@@ -1,0 +1,189 @@
+# Curiosity-driven Red-teaming for Large Language Models
+
+- Decision: Accept
+- Avg Score: 8.00
+- Scores: 8, 8, 8, 8
+
+## Abstract
+Large language models (LLMs) hold great potential for many natural language applications but risk generating incorrect or toxic content. To probe when an LLM generates unwanted content, the current paradigm is to recruit a \textit{red team} of human testers to design input prompts (i.e., test cases) that elicit undesirable responses from LLMs. 
+However, relying solely on human testers is expensive and time-consuming. Recent works automate red teaming by training a separate red team LLM with reinforcement learning (RL) to generate test cases that maximize the chance of eliciting undesirable responses from the target LLM. However, current RL methods are only able to generate a small number of effective test cases resulting in a low coverage of the span of prompts that elicit undesirable responses from the target LLM. %
+To overcome this limitation, we draw a connection between the problem of increasing the coverage of generated test cases and the well-studied approach of curiosity-driven exploration that optimizes for novelty. 
+Our method of curiosity-driven red teaming (CRT) achieves greater coverage of test cases while mantaining or increasing their effectiveness compared to existing methods.
+Our method, CRT successfully provokes toxic responses from LLaMA2 model that has been heavily fine-tuned using human preferences to avoid toxic outputs.}}
+\end{center}
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a method for automated red teaming. The method is a spiritual successor to those in the Red Teaming LMs with LMs paper from Perez et al, and should be viewed in that light (rather than in comparison to recent alternative approaches like ARCA and GCG). Specifically, the method adds a curiosity objective to the RL red teaming method of Perez et al.
+
+### Strengths
+- This paper continues an interesting line of work in fine-tuning LLMs to be better at red teaming other LLMs. This type of research is complimentary with more recent optimization-based methods like GCG
+
+- The idea of incorporating curiosity into the RL red teaming method from Perez et al. is a good idea
+
+- The results are strong; the success rate of the red teaming method remains as high as the RL baseline, and the diversity is much higher
+
+- The ablations are reasonable and anticipate questions that readers would have
+
+### Weaknesses
+ - The distinction between adversarial attacks and red teaming seems artificial. I wouldn't want this distinction being introduced in the community. Surely adversarial attacks can be semantic, and surely red teaming can include gibberish adversarial examples as an interesting failure mode of LLMs.
+
+- I would suggest adding more visual separation between diversity and quality plots. Currently it's hard to tell which is which in Figures 1 and 2 without turning my head sideways to read the axis.
+
+### Questions
+N/A
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+- The paper proposes to add an entropy bonus and novelty reward in addition to the standard RL objective to maximize toxicity in the target LLM’s responses. Two variations of the novelty reward are proposed: A SelfBLEU novelty reward and a cosine similarity novelty reward.
+- The proposed method of red-teaming is evaluated in a text continuation task(evaluated on GPT2), an instruction following task (GPT2-alpaca and Dolly-v2-7B). The method is also evaluated on LLMs fine-tuned with human preference (LLaMA2-7b-chat-hf)
+- The authors conduct ablations on the various KL penalty coefficients, sampling temperature, and the necessity of each reward. Studies on the hyperparameter choices are shown in the appendix.
+
+### Strengths
+- The paper tackles an important problem and contributions are clear and well presented.
+
+- The method (RL+Curiosity) is simple and sound, borrowing from known methods in the RL literature.
+
+- Experiments cover a good number of models, in a number of settings, and performance of RL+Curiosity is noticeably better than baselines.
+
+- Ablation studies alleviate concerns that test case diversity is not simply fixed by increasing sampling temperature or modifying the KL penalty.
+
+### Weaknesses
+ - The authors choose an objective of maximizing test case novelty but do not show how their method influences target LLM response novelty.
+
+- In A.7, you mention you sample 100 sets of 100 test cases and calculate both diversity metrics across each subset. What is the test case size for a select number of thresholds in your experiments, and why is this sampling method used?
+
+- This is not too important but it is worth mentioning that the novelty of the method is somewhat limited. The cosine similarity reward is very similar to the RL+TDiv baseline, except it is applied to the test cases.
+
+- Also, note that while RL (without curiosity and TDiv) achieves a high level of diversity in Figure 2i(c), only a limited number of test cases exceed high toxicity thresholds [0.2, 0.9]. Could you report these numbers? Could you also address why the zero shot baseline performs so well in Figure 2(ii)(c)?
+
+In general, the paper tackles a relevant problem and is well motivated and presented. I have some limited concerns (see above) and would like to hear the author's rebuttal, after which I may modify my score.
+
+### Questions
+- Could you clarify what number of test cases exceed each toxicity threshold for RL+Curiosity for the experiments in section 4.2 and 4.3?
+
+- How does your method compare with RL+TDiv if we look at the diversity of target LLM responses? I presume that both test case diversity and target LLM response diversity are important when red-teaming, and I would like to know whether RL-TDiv essentially achieves target LLM response diversity without necessarily going through the intermediate step of test case diversity.
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+- The paper proposes an rl-based red teaming method that can explore novel test cases by adapting a curiosity-driven exploration technique. 
+- The proposed method avoids redundant test cases by utilizing novelty reward during the rl optimization procedure. 
+- The empirical results show that the proposed curiosity-driven red teaming method achieves superior performance in both the red team accuracy and the diversity compared to the baseline red teaming methods.
+
+### Strengths
+- The idea is intuitive and easy to understand.
+- The writing is clear.
+- The authors provide experimental results with two diversity measures, 1-self-bleu and 1-cosine similarity.
+- The empirical results are amazing. The proposed method shows higher red teaming performance than the rl-based red teaming methods while maintaining a diversity score comparable to the zero-shot baseline method.
+
+### Weaknesses
+ - Since the paper handles the problem of red-teaming which is possible to make ethical issues in society, I think it would be better to contain subsections for ethical comments in the red-teaming.
+- The empirical results are limited to the text-to-text generation models. 
+- The proposed automated red-teaming method is based on the pre-trained offensiveness classifier. As [1] raised, there exists a risk of discovering test cases that over-fit the red team classifier, resulting in false positive test cases. But there isn't any analysis about this risk.
+
+### Questions
+- Can you provide simple experimental results on text-to-image models like stable-diffusion?
+- Can you provide an analysis of the classifier overfitting problem? For example, you may provide a confusion matrix for each method. 
+- Can you provide experimental results on large language models such as the text-davinci-003 model or gpt-3.5-turbo prompted chatbots?
+- It is just a curiosity question. In a realistic scenario, each query on the target model usually incurs costs. Hence, the number of model queries during the red teaming process can be an important factor for the overall cost of the method. Can you provide the number of queries used during the end-to-end process of RL+"curiosity"? Also, can you estimate the price when we red-team gpt4 api using RL +"curiosity"?
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper points out that the current red teaming approaches based on RL can not generate test cases with high diversity. To address this, the authors propose a curiosity-driven exploration method to train the read team models. This approach jointly maximizes the red team effectiveness and also a diversity reward, where the authors tried different metrics.  Experimental results show that the proposed approach can not only maintain the effectiveness but also increase the test case diversity, compared with previous RL-based approaches. However, the experiments are mainly based on small models GPT2 with 137M parameters, making the results and the claim of red-teaming for "Large Language Models"less convincing.
+
+### Strengths
+This paper introduces a novel approach to training models that generate more diverse red team test cases. A diversity reward is introduced to achieve that, by encouraging the red team models to explore more diverse cases. The authors test different ways to define the rewards.
+Results on GPT2 models show that the approach can indeed increase the test case diversity while maintaining effectiveness.
+
+### Weaknesses
+The experiments chose GPT2 as the target model in the main results, making the results not too convincing. I recommend testing on a wider range of LLMs, including proprietary models like ChatGPT and open-sourced models like LLaMA-2-chat (the user has already done but there are not enough results and details) and Vicuna.
+
+
+
+### Questions
+1. Are the RoBERTa hate speeh classifier strong enough to detect the toxic generations?
+2. Why not try "real" LLMs like proprietary models like ChatGPT and open-sourced models like LLaMA-2-chat and Vicuna? I do not think the results are GPT2 with 137M parameters are convincing enough.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

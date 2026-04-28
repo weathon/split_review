@@ -1,0 +1,361 @@
+\title{LUDVIG: Learning-free Uplifting of 2D Visual Features to Gaussian Splatting Scenes}
+
+\begin{abstract}
+We address the problem of extending the capabilities of vision foundation models such as DINO, SAM, and CLIP, to 3D tasks. Specifically, we introduce a novel method to uplift 2D image features into 3D Gaussian Splatting scenes. 
+Unlike traditional approaches that rely on minimizing a reconstruction loss, our method employs a simpler and more efficient feature aggregation technique, augmented by a graph diffusion mechanism. 
+Graph diffusion enriches features from a given model, such as CLIP, by leveraging 3D geometry and pairwise similarities induced by another strong model such as DINOv2.
+Our approach achieves performance comparable to the state of the art on multiple downstream tasks while delivering significant speed-ups.
+Notably, we obtain competitive segmentation results using generic DINOv2 features, despite DINOv2 not being trained on millions of annotated segmentation masks like SAM.  When applied to CLIP features, our method demonstrates strong performance in open-vocabulary object detection tasks, highlighting the versatility of our approach.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+The field of image understanding has recently seen remarkable progress, driven by large pretrained models such as CLIP~\citep{radford2021clip}, DINO~\citep{caron2021dino,oquab2024dinov2}, or SAM~\citep{kirillov2023sam}. A key factor behind their exceptional generalization capabilities lies in the vast size of their training datasets, often composed of millions or even billions of samples.
+
+3D scene representation has also advanced with machine learning approaches like NeRF~\citep{mildenhall2021nerf} and model fitting techniques such as Gaussian Splatting~\citep{kerbl202gaussiansplatting}. These methods typically rely on a few dozen views of the scene captured from different angles. While the resulting reconstructions effectively capture both appearance and geometrical information, they are not directly applicable to semantic tasks, which has led to further developments.
+
+The complementarity of these two families of approaches has indeed recently been exploited by numerous methods that integrate geometry and semantics by uplifting image-level features extracted by large pretrained models into 3D NeRF or Gaussian Splatting representations. This has led to a surge in methods for tasks such as language-guided object retrieval~\citep{kerr2023lerf, liu2023weakly, zuo2024fmgs}, scene editing, \citep{kobayashi2022decomposing, chen2024gaussianeditor, fan2023lightgaussian}, or semantic segmentation~\citep{cen2023segmentNeRF, ye2024gaussiangrouping, ying2023omniseg3d}.
+
+The main limitation of most previous approaches lies in their reliance on optimization, which requires an iterative process to learn a scene-specific 3D representation by minimizing reprojection error across all training views. While this loss function is intuitive, a faster and more straightforward method for transferring 2D generic visual features to \emph{already trained} Gaussian splatting 3D models would be preferable, which is the purpose of this work.
+
+In this paper, we demonstrate that a simple, learning-free process is highly effective for uplifting 2D features or semantic masks into 3D Gaussian Splatting scenes. This process, which can be viewed as an `inverse rendering' operation, is both computationally efficient and adaptable to any feature type. We showcase its efficiency by uplifting visual features from DINOv2~\citep{oquab2024dinov2, darcet2024registers}, semantic masks from SAM~\citep{kirillov2023sam} and SAM2~\citep{ravi2024sam2}, and language features from CLIP~\citep{ilharco2021openclip}.
+Then, we show that a graph diffusion mechanism~\citep{kondor2002diffusion,smola2003kernels} is helpful for feature uplifting in 3D scenes. This mechanism is rooted in spectral graph theory and used in spectral clustering techniques~\citep{belkin2001laplacian,shi2000normalized,meila2000learning}.
+In the context of our work, it serves multiple purposes: 
+first, it enriches 3D features obtained from a given model, such as CLIP, by leveraging 3D geometry along with pairwise similarities induced by uplifted DINOv2 representations.
+Second, graph diffusion transforms coarse segmentation inputs, such as scribbles, into accurate 3D segmentation masks without relying on segmentation models like SAM.
+When evaluated on segmentation and open-vocabulary object localization, our method achieves results comparable to state-of-the-art techniques while being significantly faster than previous approaches relying on optimization.
+
+To summarize, our contributions are threefold: (i) we introduce a simple, learning-free uplifting approach that can be directly integrated into the rendering process, achieving state-of-the-art results when applied to SAM-generated semantic masks. 
+(ii) we demonstrate that using graph diffusion based on uplifted DINOv2 features (Sec.~\ref{sec:method_seg}) yields competitive segmentation results, despite DINOv2 not being trained for segmentation like SAM. 
+(iii) we show that graph diffusion can also be used to enrich 3D CLIP representations, leveraging similarities induced by DINOv2 (Sec.~\ref{sec:method_clip}), thereby achieving state-of-the-art performance on open-vocabulary object localization tasks.
+
+
+\section{Related work}
+
+\label{sec:rw}
+
+\paragraph{Learning 3D {semantic} scene representations with NeRF.}
+NeRF~\citep{mildenhall2021nerf} uses a multilayer perceptron to predict the volume density and radiance for any given 3D position and viewing direction.
+Such representation can naturally be extended to semantic features.
+The early works  N3F~\citep{tschernezki2022n3f} and DFF~\citep{kobayashi2022decomposing} distill DINO 2D (\emph{i.e.}, image-level) features~\citep{caron2021dino} in scene-specific NeRF representations. \citet{kobayashi2022decomposing} also distill LSeg~\citep{li2022lseg} a CLIP-inspired language-driven model for semantic segmentation. Shortly after, LERF~\citep{kerr2023lerf} and 3D-OVS~\citep{liu2023weakly} learned 3D CLIP~\citep{radford2021clip} and DINO~\citep{caron2021dino} features jointly for open-vocabulary segmentation. These works were extended to other pretrained models such as latent diffusion models~\citep{ye2023featurenerf} or  SAM~\citep{kirillov2023sam} for semantic segmentation~\citep{cen2023segmentNeRF, ying2023omniseg3d}.
+
+\vsp
+\paragraph{Learning 3D {semantic} scene representations with Gaussian splatting.}
+Subsequent work 
+have relied on
+the more recent Gaussian splatting method~\citep{kerbl202gaussiansplatting}, achieving high-quality novel-view synthesis while being orders of magnitude faster that NeRF-based models. 
+Several tasks have been addressed such as semantic segmentation using SAM~\citep{cen2023segmentGS, ye2024gaussiangrouping, kim2024garfield}, language-driven retrieval or editing using CLIP combined with DINO~\citep{zuo2024fmgs} or SAM~\citep{ye2023featurenerf}, scene editing using diffusion models~\citep{chen2024gaussianeditor, wang2024gaussianeditor}, and 3D-aware finetuning~\citep{yue2024fit3d}.
+These works learn 3D semantic representations by minimizing a reprojection loss.
+As a single scene can be represented by over a million Gaussians, such optimization-based techniques have strong memory and computational limitations. 
+To handle these, FMGS~\citep{zuo2024fmgs} employs a multi-resolution hash embedding (MHE) of the scene for uplifting DINO and CLIP representations, Feature 3DGS~\citep{zhou2024feature3dgs} learns a $1\times 1$ convolutional upsampler of Gaussians' features distilled from LSeg and SAM's encoder, and LangSplat~\citep{qin2023langsplat} learns an autoencoder to reduce CLIP feature dimension from 512 to 3. In contrast, our approach requires no learning, which significantly speeds up the uplifting process and reduces the memory requirements. 
+
+\vsp
+\paragraph{Direct uplifting of 2D features into 3D.} Direct uplifting from 2D to 3D has been explored in prior works.
+\ref{sec:appendx-gaussianeditor}). Both approaches are specific to segmentation and are ill-suited for uplifting generic representations. Semantic Gaussians\citep{guo2024semantic} pair 2D pixels with 3D Gaussians along each pixel’s ray based on depth information but rely on a learned 3D convolutional network. In contrast, our approach is both applicable to any 2D representation and entirely parameter-free.
+
+\vsp
+\paragraph{Leveraging 3D information to better segment in 2D.}
+Most prior works focusing on semantic segmentation leverage 2D models specialized for this task. The early work of \cite{yen2022nerfsupervision} uplifts learned 2D image inpainters by optimizing view consistency over depth and appearance. 
+Subsequent works have mostly relied on uplifting either features from SAM's encoder~\citep{zhou2024feature3dgs}, binary SAM masks~\citep{cen2023segmentNeRF, cen2023segmentGS}, or SAM masks automatically generated for all objects in the image~\citep{ye2024gaussiangrouping, ying2023omniseg3d, kim2024garfield}.
+The latter approach is computationally expensive, as it requires querying SAM on a grid of points over the image. It also requires matching inconsistent mask predictions across views, with \emph{e.g.} a temporal propagation model~\citep{ye2024gaussiangrouping} or a hierarchical learning approach~\citep{kim2024garfield}, which introduces additional computational overhead. In this work, we focus on single instance segmentation and show that our uplifted features are on par with state-of-the-art approaches~\citep{cen2023segmentNeRF,cen2023segmentGS,ying2023omniseg3d}.
+Standing out from prior work uplifting DINO features~\citep{tschernezki2022n3f,kobayashi2022decomposing,isrfgoel2023interactive,kerr2023lerf,liu2023weakly, ye2023featurenerf, zuo2024fmgs}, we quantitatively show that DINOv2 features can be used on their own for semantic segmentation and rival SAM-based models through a simple graph diffusion process that leverages 3D geometry.
+\vsp
+\paragraph{Learning 3D CLIP features for open-vocabulary object localization.} For learning 3D CLIP features, prior works leverage vision models such as DINO or SAM. DINO is used to regularize and refine CLIP features~\citep{kerr2023lerf, liu2023weakly, zuo2024fmgs, shi2024legaussians}, while SAM is employed for generating instance-level CLIP representations~\citep{qin2023langsplat}. These approaches suffer from high computational costs, resorting to either dimensionality reduction or efficient multi-resolution embedding representations, and usually run for a total of one to two hours for feature map generation and 3D feature optimization. In contrast, our approach bypasses the high computational cost of gradient-based optimization and, combined with graph diffusion, is an order of magnitude faster than these prior works.
+
+
+\section{Uplifting 2D visual representations into 3D}
+
+\label{sec:method_uplifting}
+
+In this section, we present a simple yet effective method for lifting 2D visual features into 3D using Gaussian splatting and discuss its relation with more expensive  optimization-based techniques.
+
+\subsection{Background on Gaussian splatting}
+\label{sec:background}
+
+\paragraph{Scene representation.}
+The Gaussian splatting method consists in modeling a 3D scene as a set of~$n$ Gaussians densities $\Ncal_i$, each defined by a mean $\mu_i$ in $\mathbb{R}^3$, a covariance $\Sigma_i$ in $\mathbb{R}^{3\times 3}$, an opacity $\sigma_i$ in $(0,1)$, and a color function $c_i({d})$ that depends on the viewing direction $d$.
+
+A 2D frame at a given view is an image rendered by projecting the 3D Gaussians onto a 2D plane, parametrized by the viewing direction $d$. This projection accounts for the opacity of the Gaussians and the order in which rays associated with each pixel pass through the densities.
+More precisely, a pixel $p$ for a view $d$ is associated to an ordered set $\Scal_{{d},p}$ of Gaussians and its value is obtained by their weighted contributions:
+\begin{equation}\label{eq:render}
+\hat{I}_{{d}}(p) = \sum_{i \in \Scal_{d,p}} c_i(d) w_{i}(d, p). 
+\end{equation}
+The above weights are obtained by $\alpha$-blending, i.e. $w_{i}(d, p) = \alpha_{i}(d,p) \prod_{j\in \mathcal{S}_{d,p}, j<i} \left(1-\alpha_{j}(d,p)\right)$, 
+where the Gaussian contributions $\alpha_{i}(d,p)$ are computed by multiplying the opacity $\sigma_i$ by the Gaussian density $\Ncal_i$ projected onto the 2D plane at pixel position $p$.
+
+\vsp
+\paragraph{Scene optimization.}
+Let $I_1,\dots,I_m$ be a set of 2D frames from a 3D scene and $d_1,\dots,d_m$ the corresponding viewing directions. Gaussian Splatting optimizes the parameters involved in the scene rendering
+function described in the previous section. This includes the means and covariances of the Gaussian densities, their opacities, and the color function parametrized by spherical harmonics. Denoting by $\theta$ these parameters, the following reconstruction loss is used
+ \begin{equation}
+ \label{eq:gs-problem}
+ \min_{\theta} \frac 1m \sum_{k=1}^m \mathcal{L}(I_k, \hat{I}_{d_k,\theta}),
+ \end{equation}
+where $\hat{I}_{d_k,\theta}$ is the rendered frame of the scene in the direction $d_k$, as in Eq.~(\ref{eq:render}), by using the parameters $\theta$, and $\mathcal L$ is a combination of $\ell_1$ and SSIM loss functions~\citep{kerbl202gaussiansplatting}.
+
+\subsection{Uplifting of 2D feature maps into 3D}
+\label{sec:uplifting}
+
+Given a set of $m$ 2D training frames and the corresponding 3D scene obtained by Gaussian Splatting, our goal is to compute generic features $f_i$ in $\mathbb{R}^c$ for each Gaussian $i$, which would be effective for solving future downstream tasks, \emph{e.g.}, high-resolution semantic segmentation for new frames of the scene, or robot navigation. In other words, $f_i$ can be seen as an extension of the color function $c_i$, even though, for simplicity, we do not consider view-dependent features in this work. 
+
+A natural approach is to consider a pre-trained vision model that provides 2D feature maps for each of the $m$ frames used in Gaussian splatting, and then devise a technique to \emph{uplift} these 2D feature maps into 3D. This uplifting principle can also be directly applied to semantic masks instead of generic features, as demonstrated in Section \ref{sec:exp}.
+Interestingly, once the features $f_i$ are computed for each Gaussian $i$, it is possible to \emph{render} two-dimensional feature maps for any new view, at a resolution that can be much higher than the feature maps computed for the $m$ training frames. %, thus performing effective feature super-resolution. 
+\vsp
+\paragraph{Uplifting with simple aggregation.}
+We construct uplifted features for each 3D Gaussian of the 3D Gaussian Splatting scene as a weighted average of 2D features from all frames. 
+Each 2D feature $F_{d,p}$ from a frame at a given viewing direction $d$ and pixel $p$ contributes to the feature $f_i$ by a factor proportional to the rendering weight $w_{i}(d, p)$, if the Gaussian $i$ belongs to the ordered set $\mathcal{S}_{d,p}$ associated to the view/pixel pair $(d,p)$. The resulting features are then normalized to maintain the same order of magnitude as the original 2D features, thus resulting in the following simple equation: 
+\begin{equation}
+    \label{eq:uplifting}
+    f_i =  \sum_{d=1}^m\sum_p  \bar{w}_{i}(d, p) F_{d,p} ~~~~\text{with}~~~~ \bar{w}_i(d,p) = \frac{\mathds{1}_{i\in \mathcal{S}_{d,p}} w_{i}(d, p)}{\sum_{d=1}^m\sum_p \mathds{1}_{i\in \mathcal{S}_{d,p}} w_{i}(d, p)},
+\end{equation}
+where $\mathds{1}_{i\in \mathcal{S}_{d,p}}$ is equal to $1$ if the Gaussian $i$ belongs to $\mathcal{S}_{d,p}$ and $0$ otherwise. 
+We can interpret this equation as a normalized version of the transposed rendering operation over the $m$ viewing directions. 
+ More precisely, the rendering of any view-independent collection of features ${\bf{f}} = (f_i)$ attached to the~$n$ Gaussians into the $m$ training frames can be represented as a linear operator $W$ acting on the collection $\bf{f}$ and returning a collection of 2D feature maps ${\bf{\hat{F}}} = (\hat{F}_{d,p})$, see Eq.~(\ref{eq:rendering}) below.
+  Here, the matrix $W$ consists of all rendering weights $\mathds{1}_{i\in \mathcal{S}_{d,p}} w_{i}(d, p)$ at row $(d,p)$ and column $i$, and $\mathbf{\hat{F}}$ is a 2D matrix containing all (flattened) 2D feature maps generated for all cameras poses, with $\mathbf{\hat{F}}_{d,p}$ pointing to the feature of pixel $p$ viewed from viewing direction $d$.
+Similarly, the uplifting expression introduced in Eq.~(\ref{eq:uplifting}) can be expressed in terms of the transpose of $W$ and a diagonal matrix $D$ of size $m$ representing the normalization factor and whose diagonal elements are obtained by summing over the rows of $W$ as in Eq.~(\ref{eq:uplifting_matrix}) below:
+
+\begin{minipage}{0.48\textwidth}
+\[
+\text{Rendering to $m$ frames}
+\]
+\begin{equation}
+    {\bf \hat{F}} = W{\bf{f}},
+\label{eq:rendering}
+\end{equation}
+\end{minipage}
+\hfill
+\begin{minipage}{0.48\textwidth}
+\[
+\text{Uplifting from $m$ frames}
+\]
+\begin{equation}
+    {\bf f} = D^{-1}W^{\top}{\bf{F}}.
+\label{eq:uplifting_matrix}
+\end{equation}
+\end{minipage}
+
+It is important to note that $W$ and $D$ are not explicitly constructed. Instead, they are computed by calling the forward rendering function for Gaussian Splatting and replacing the color vectors by the feature vectors. All these operations are performed within the CUDA rendering process, and illustrated in Figure~\ref{fig:uplift_render}.
+
+\begin{figure}
+    \centering
+    \includegraphics[trim={1.9cm 4cm 2cm 4cm},clip, width=1.\linewidth]{figures/Uplift_and_render.pdf}
+    \caption{Illustration of the inverse and forward rendering. In the inverse rendering (or uplifting) phase, features ${\bf{f}}$ are created for each 3D Gaussian by aggregating coarse 2D features ${\bf F}$ over all viewing directions. For forward rendering, the 3D features ${\bf{f}}$ are projected on any given viewing direction as in regular Gaussian splatting. The rendering weight $\bar{w}_{i}(d, p)$ represents the relative influences of the Gaussian $i$ on pixel $p$, defined in Eq.~(\ref{eq:uplifting}).} 
+    \label{fig:uplift_render}
+\end{figure}
+
+\vsp
+\paragraph{Connection with optimization-based inverse rendering.}  
+An alternative approach to uplifting 2D features ${\bf F}$ is to minimize a reconstruction objective $\mathcal{L}({\bf f})$, where the goal is to find uplifted features~${\bf f}$ whose rendering closely matches the original 2D features ${\bf F}$ \citep{tschernezki2022n3f, kerr2023lerf, zuo2024fmgs}. A natural choice is to minimize the mean squared error between the 2D features ${\bf F}$ and the rendered ones ${\bf \hat{F}}$ as defined by Eq.~(\ref{eq:rendering}):
+\begin{align}
+\min_{{\bf f}} \mathcal{L}({\bf f}) := \frac{1}{2}\Vert {\bf F} - W{\bf f} \Vert^2.
+\label{eq:reconstruction_loss}
+\end{align}
+Such an approach requires using an optimization procedure which would be costly compared to the proposed uplifting method. Nevertheless, it is possible to interpret the proposed uplifting scheme in Eq.~(\ref{eq:uplifting_matrix}) as a single pre-conditioned gradient descent step on the reconstruction objective, starting from a ${\bf 0}$ feature, \emph{i.e.}, ${\bf f}= -D^{-1}\nabla \mathcal{L}({\bf 0})$. In practice, we found that performing more iterations on the objective $\mathcal{L}({\bf f})$ did not result in particular improvement of the quality of the features, thus suggesting that the cheaper scheme in Eq.~(\ref{eq:uplifting_matrix}) is already an effective approach to uplifting.
+\vsp
+\paragraph{Gaussian filtering}
+The normalization $\beta_i = \sum_{d=1}^m\sum_p \mathds{1}_{i\in \mathcal{S}_{d,p}} w_{i}(d, p)$ serves as an estimator of the relative importance of each Gaussian in the scene. Therefore, it can be used as a criterion to prune the set of Gaussians for memory efficiency. In our experiments, we filter out half of the Gaussians based on $\beta_i$ and observe no qualitative nor quantitative degradation of the results. This approach is inspired by prior work on efficient Gaussian Splatting representation such as proposed by~\cite{fan2023lightgaussian} that also prunes Gaussians based on their contribution to each pixel in the training frames.  
+
+\subsection{Enriching features by diffusion on graphs}
+\label{sec:diffusion}
+DINOv2 features have shown remarkable performance on semantic segmentation tasks with simple linear probing~\citep{oquab2024dinov2}, making them a good candidate to enrich features that lack such a property like CLIP~\citep{wysoczanska2023clipdino,zuo2024fmgs,liu2023weakly}. 
+Inspired by spectral clustering techniques~\citep{shi2000normalized,kondor2002diffusion,belkin2001laplacian}, and aligning with the goals of recent work on 2D segmentation that improve CLIP features with DINO~\citep{wysoczanska2023clipdino}, we propose to \textit{diffuse} features that have been uplifted to 3D. This process aims to align semantic features with the scene layout and object boundaries implied by DINOv2. %, by leveraging DINO pairwise similarities.
+Contrary to the aforementioned methods, we are the first to perform this landscaping with DINOv2 directly in the 3D scene, hereby taking 3D geometry into account as well.
+
+\vsp
+\paragraph{Graph construction}
+From uplifted DINOv2 features $f$ in $\mathbb{R}^n$ we construct a graph whose nodes are given by the 3D Gaussians and whose edges, represented by a matrix $A$ of size $n\times n$, encode both the 3D Euclidean geometry between the nodes and the similarity between their DINOv2 features.
+More precisely, each node $i$ is connected to its  $k$ nearest neighbors $\mathcal{N}(i)$ as measured by the Euclidean distance between the centers of the 3D Gaussians. 
+The edge weight between neighboring nodes $i$ and $j$ is defined as follows: 
+\begin{equation}
+\label{eq:edges}
+A_{ij} = \mathds{1}_{j\in \mathcal{N}(i)} \, S_f(f_i, f_j) \, P(f_i)^{\frac 12}P(f_j)^{\frac 12} 
+\end{equation}
+with $S_f(f_i,f_j)$ a local similarity between features $f_i$ and $f_j$, typically defined as a RBF kernel. For tasks requiring diffusion to be confined to a specific object instance, we prevent leakage into the background by introducing a node-wise unary regularization term $P(f_i)$ which quantifies the similarity between the node feature $f_i$ and the features of the object of interest.
+
+\vsp
+\paragraph{Diffusion on the graph.}  
+Given uplifted features $g_0$ in $\mathbb{R}^n$, which aim to improve by using information encoded in $A$ (3D geometry and DINOv2 similarities), we perform $T$ diffusion steps to construct a sequence of diffused features $(g_t)_{1\leq t \leq T}$  defined as follows:
+\begin{equation}
+g_{t+1} = A\tilde{g}_{t}, \quad \tilde{g}_{t} = {g_t}/{\|g_t\|_2},
+\label{eq:diffusion}
+\end{equation}
+This can be seen as performing a few steps of the power method, making $g_0$ closer to the dominant eigenspace of $A$. Note that depending on the downstream task, $g_0$ may represent generic features such as CLIP embeddings or task-specific features such as uplifted 2D segmentation masks.
+
+
+\section{From 3D Uplifting to downstream tasks}
+
+
+In this section, we describe our approach for uplifting SAM, DINOv2 and CLIP models and evaluating the 3D features on two downstream tasks: segmentation and open-vocabulary object detection.
+As in Sec.~\ref{sec:method_uplifting}, we are given a set of 2D  frames $I_1,\dots, I_m$, with viewing directions $d_1,\dots, d_m$ and a corresponding 3D scene obtained using the Gaussian Splatting method.
+
+\vsp
+\subsection{Multiple-view Segmentation}\label{sec:muti_seg}
+\label{sec:method_seg}
+We assume that a \textit{foreground mask} of the object to be segmented is provided on the \emph{reference frame}~$I_1$.
+The foreground masks are either \emph{scribbles} or a whole \emph{reference mask} of the object, both of which define a set of \textit{foreground pixels} $\mathcal{P}$. 
+In the following, we present the proposed approaches for segmentation using SAM and DINOv2 features, based on both types of foreground masks.
+
+\vsp
+\paragraph{Multiple-view Segmentation with SAM.}  
+SAM~\citep{kirillov2023sam, ravi2024sam2} is a powerful model that can generate object segmentation masks from point prompts, on a single 2D image. 
+Aggregating SAM 2D segmentation masks in 3D allows for cross-view consistency and improves single-view segmentation results. We proceed by generating 2D feature maps based on SAM segmentation masks of each training frame while only relying on the \textit{foreground mask} for the reference frame $I_1$. 
+The 2D feature maps are generated by constructing several sets of point prompts on each training frame which are then provided to SAM to obtain several segmentation masks. Averaging the resulting segementation masks for each frame results in the final 2D SAM feature maps. 
+These are then uplifted using the aggregation scheme in Sec.~\ref{sec:uplifting}. Our final prediction is obtained by rendering the uplifted feature maps into the target frame and thresholding. 
+
+\vsp
+\paragraph{{Multiple-view} segmentation with DINOv2.}
+We construct 2D feature maps at the patch level using DINOv2 with registers~\citep{darcet2024registers} and uplift them into a high resolution and fine-grained 3D semantic representation which is then used for segmentation. 
+ 
+This approach enhances the granularity of spatial representations by aggregating patch-level representations to form pixel-level features.
+The 2D feature maps from the $m$ training views are uplifted using Eq.~(\ref{eq:uplifting}) and the resulting 3D features are then re-projected into any viewing direction $d$ using Eq.~(\ref{eq:rendering}) to compute rendered 2D features $(\hat{F}_{d,p})$. To obtain segmentation masks, we construct a predictor score $P(\hat{F}_{d,p})$ for a 2D pixel $p$ to belong to the foreground, based on its corresponding rendered feature. The final segmentation mask is then obtained by thresholding.
+
+\vsp
+\paragraph{Enhancing segmentation with DINOv2 using 3D graph diffusion.}
+DINOv2 provides generic visual features that do not explicitly include segmentation information, unlike models such as SAM that were specifically trained for such a task. 
+Consequently, 2D projections of uplifted DINOv2 features might fail to separate distinct objects that have similar features.
+This challenge can be mitigated by incorporating 3D spatial information, which may help separate them. 
+
+To this end, we propose to leverage the graph diffusion process introduced in Section~\ref{sec:diffusion}. We set the initial vector of weights $g_0$ in $\mathbb{R}^n$ of the graph diffusion algorithm to be a coarse estimation of the contribution of each Gaussian to the final segmentation mask. This initial weight vector is computed by uplifting the 2D \textit{foreground mask} (either scribbles or a reference mask) from the \textit{reference frame} into 3D using Eq.
+The nodes for which $g_0$ has a positive value define a set of anchor nodes $\mathcal{M}$ that are more likely to contribute to the foreground. We retain the last weight vector $g_T$ and render it into 2D for segmentation (Eq.~(\ref{eq:rendering})). 
+The regularization term $P$ appearing in Eq.
+
+\subsection{Open-vocabulary object detection}
+\label{sec:method_clip}
+
+As in \cite{kerr2023lerf,qin2023langsplat,zuo2024fmgs}, we propose uplifting CLIP features~\citep{radford2021clip} for open-vocabulary object detection. CLIP effectively aligns images and text in a shared representation space, making it well-suited for tasks involving text-based queries. Since CLIP outputs only one feature vector per input image, additional steps are required to distill CLIP into the 3D Gaussians. 
+
+\vsp
+\paragraph{Construction of CLIP feature maps.}
+We follow the common practice \citep{kerr2023lerf, zuo2024fmgs} of constructing multi-resolution CLIP 2D feature maps by querying CLIP on a grid of overlapping patches at different scales and aggregating the resulting representations. As in \cite{zuo2024fmgs}, rather than keeping the different representations separate, we choose to aggregate them with a simple average pooling. These multi-resolution CLIP features are uplifted into 3D using Eq.~(\ref{eq:uplifting}).
+\vsp
+\paragraph{Refinement with DINOv2 graph diffusion.}
+We further refine these features with the diffusion procedure described in Sec.~\ref{sec:diffusion}. To this end, DINOv2 features are also uplifted, and the similarity matrix is built as in Eq.~(\ref{eq:edges}), with no unary term $P$. The diffusion process locally aggregates CLIP features from Gaussians whose DINOv2 features are similar. This enhances the granularity of CLIP visual representations while remaining in the CLIP feature space, allowing for downstream applications with text queries. \cite{wysoczanska2023clipdino} perform a similar procedure for 2D image segmentation, with only one step in the diffusion. This process can also be related to the pixel-alignment loss in \cite{zuo2024fmgs}, as a diffusion step corresponds to a gradient step for that loss.
+
+\vsp
+\paragraph{Relevancy maps.} 
+After projecting the refined 3D CLIP features into 2D, we compute a pixel-wise relevancy score with text queries embedded by CLIP. This relevancy map can be used for both localization and segmentation. For localization, we choose the pixel with the highest relevancy score.
+For segmentation, we predict a SAM mask by selecting point prompts among pixels with the highest relevancy score.
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+\subsection{Experiment details}
+
+\paragraph{3D scene training and pruning.} All scenes are trained using the original Gaussian Spatting implementation~\citep{kerbl202gaussiansplatting} with default hyperparameters. For memory efficiency, half of the Gaussians are filtered out based on their importance, as described in Sec.~\ref{sec:uplifting}. 
+\vsp
+\paragraph{2D vision models.}
+Our experiments are conducted using DINOv2's ViT-g with registers~\citep{darcet2024registers}, SAM~\citep{kirillov2023sam}, SAM 2~\citep{ravi2024sam2} and the OpenCLIP ViT-B/16 model~\citep{ilharco2021openclip}. 
+\vsp
+\paragraph{Segmentation tasks.} We consider two segmentation tasks: i) Neural Volumetric Object Selection (NVOS, ~\citealt{ren2022nvos}), which is derived from the LLFF dataset~\citep{mildenhall2019llff}, and ii) SPIn-NeRF, which contains a subsets of scenes from NeRF-related datasets~\citep{knapitsch2017tanks, mildenhall2019llff, mildenhall2021nerf, yen2022nerfsupervision, fridovich2022plenoxels}.
+The NVOS dataset consists of forward-facing sequences in which one frame is labeled with a segmentation mask and another one is labeled with scribbles to be used as reference. SPIn-NeRF contains both forward-facing and 360-degree scenes, in which all frames are labeled with segmentation masks, and the standard evaluation protocol uses the segmentation mask from the first frame as reference to label the subsequent frames.
+\vsp
+\paragraph{Open-vocabulary object detection} 
+We evaluate on the LERF dataset~\citep{kerr2023lerf}, which includes localization and segmentation tasks on complex in-the-wild scenes. We report our results on the extended evaluation task introduced by LangSplat~\citep{qin2023langsplat} containing additional challenging localization samples, and also follow their evaluation protocol.
+
+\vsp
+\paragraph{Evaluation and hyperparameter tuning.} 
+Segmentation with 3D SAM masks requires setting a threshold for foreground/background pixel assignment, and optionally choosing one of the three masks proposed by SAM (representing different possible segmentations of the object of interest).
+Segmentation with DINOv2 relies on two parameters for defining $S_f$ and $P$ in graph diffusion, and on the threshold for foreground/background pixel assignment. Results are averaged over 3 independent runs. 
+
+
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}{.32\linewidth}
+        \includegraphics[width=\linewidth]{figures/pcas/trex.jpg}
+        \includegraphics[width=\linewidth]{figures/pcas/lego.jpg} 
+        \caption{RGB image}
+    \end{subfigure}
+    \begin{subfigure}{.32\linewidth}
+        \includegraphics[width=\linewidth]{figures/pcas/trex_pca_sv.jpg}
+        \includegraphics[width=\linewidth]{figures/pcas/lego_pca_sv.jpg} 
+        \caption{Single-view PCA}
+    \end{subfigure}
+    \begin{subfigure}{.32\linewidth}
+        \includegraphics[width=\linewidth]{figures/pcas/trex_pca.jpg}
+        \includegraphics[width=\linewidth]{figures/pcas/lego_pca.jpg} 
+        \caption{Multi-view PCA}
+    \end{subfigure}
+    \caption{\textbf{PCA visualizations.} The DINOv2 patch-level representations (middle) predicted from the RGB images (left) are aggregated into highly detailed 3D representations (right) using Eq.~(\ref{eq:uplifting}).}
+    \label{fig:pca}
+\end{figure}
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}{.24\linewidth}
+    \includegraphics[width=\linewidth]{figures/diffusion/fern_rgb_pos.jpg}
+    \includegraphics[width=\linewidth]{figures/diffusion/horns_rgb_pos.jpg}
+    \subcaption{RGB image}
+    \end{subfigure}
+    \begin{subfigure}{.24\linewidth}
+    \includegraphics[width=\linewidth]{figures/diffusion/fern_sim3itreg.jpg} 
+    \includegraphics[width=\linewidth]{figures/diffusion/horns_sim3itreg.jpg}
+    \caption{3 steps}
+    \end{subfigure}
+    \begin{subfigure}{.24\linewidth}
+    \includegraphics[width=\linewidth]{figures/diffusion/fern_sim7itreg.jpg}
+    \includegraphics[width=\linewidth]{figures/diffusion/horns_sim7itreg.jpg}
+    \subcaption{7 steps}
+    \end{subfigure}
+    \begin{subfigure}{.24\linewidth}
+    \includegraphics[width=\linewidth]{figures/diffusion/fern_simreg.jpg} 
+    \includegraphics[width=\linewidth]{figures/diffusion/horns_simreg.jpg}
+    \caption{100 steps}
+    \end{subfigure}
+    \caption{\textbf{Illustration of the diffusion process.} 2D projection of the weight vector $g_t$ (white) and unary regularization term (red) at different diffusion steps $t$. The diffusion process allows %is effective in 
+    filtering out unwanted objects that have similar features to the object of interest (such as the two smaller skulls on \emph{horns}, bottom-row), but are disconnected in space. The regularization term (red background) prevents leakage from the object to the rest of the scene (such as through the \emph{fern}'s trunk, top-row).}
+    \label{fig:diffusion}
+\end{figure}
+\subsection{Qualitative results}
+
+\paragraph{DINOv2 feature uplifting.}
+First, we illustrate the effectiveness of our simple uplifting approach. Figure~\ref{fig:pca} shows the first three PCA components (one channel per component) over DINOv2's patch embeddings. The coarse patch-level representations from every view (middle) are aggregated using Eq.~(\ref{eq:uplifting_matrix}) to form a highly detailed 3D semantic representation, and reprojected into 2D (right) using Eq.~(\ref{eq:rendering}). The aggregation is very fast, being directly implemented in the Gaussian Splatting CUDA-based rendering process, and takes about 1.3ms per view and feature dimension. The first principal component (encoded in the red channel) mostly captures the foreground object, and the subsequent ones allow refining the foreground representations and delivering a detailed background.
+
+\vsp
+\paragraph{Graph diffusion.}
+Figure~\ref{fig:diffusion} illustrates the effectiveness of the diffusion process. The graph nodes are initialized with the reference scribbles, and the diffusion spreads through the object of interest, stopping at its borders. As illustrated with the case of Horns, diffusion filters out unwanted objects that are similar to the object of interest (here, the two skulls on the side). In the Fern scene, diffusion progressively spreads through the branches to their extremities, with the regularization (red background) constraining it to the trunk and preventing leakage, even after a large number of iterations.
+
+\input{tables/ablation_spin_small}
+\input{tables/results_nvos-spin}
+
+\subsection{Segmentation results}
+
+In this section, we quantitatively evaluate the segmentation task on NVOS~\citep{ren2022nvos} and SPin-NeRF~\citep{mirzaei2023spin}.
+We evaluate segmentation based on SAM and SAM2 mask uplifting, and on DINOv2 feature uplifting combined with graph diffusion. We compare our segmentation results to the current state of the art: SA3D~\citep{cen2023segmentNeRF}, SA3D-GS~\citep{cen2023segmentGS}, SAGA~\citep{cen2023saga}, OmniSeg3D~\citep{ying2023omniseg3d}. All these methods are specifically designed for uplifting the 2D segmentation masks produced by SAM into 3D using gradient-based optimization of a projection loss. We also report results from NVOS \citep{ren2022nvos} and MVSeg \citep{yen2022nerfsupervision}, who respectively introduced the NVOS and SPIn-NeRF datasets.
+
+\vsp
+\paragraph{Results.} Table~\ref{tab:nvos-spin} reports the average IoU across all scenes for the two datasets.
+Our results are comparable to the state-of-the-art, while not relying on gradient-based optimization. 
+Surprisingly, our segmentation with DINOv2 using graph diffusion also gives results on par with models leveraging SAM masks. Compared to SAM, DINOv2 better captures complex objects, but sometimes also captures some background noise.
+Our lower segmentation results compared to OmniSeg's can partly be attributed to the poor Gaussian Splatting reconstruction of highly specular scenes, such as the Fork. As also noted by \cite{cen2023saga}, the reconstruction includes semi-transparent Gaussians floating over the object, attempting to represent reflections or surface effects, which are challenging to capture using standard rasterization techniques~\citep{jiang2024gaussianshader}.
+
+\vsp
+\paragraph{Ablation study.}
+We compare our segmentation protocol using DINOv2 and SAM2 to multiple simpler variants. More precisely, we evaluate i) a purely geometrical variant that reprojects the reference mask on the other views, without using SAM2 or DINOv2, ii) single-view segmentation in 2D based on SAM2 or DINOv2 2D predictions, iii) uplifting DINOv2 features or SAM2 masks into 3D then rendering them for segmentation, and iv) segmenting using graph diffusion over DINOv2 3D feature similarities. We observe that the purely geometrical approach works well on the forward-facing scenes and fails on 360-degree scenes. The single-view variant performs reasonably well on average but, the low resolution of patch-level representations (illustrated in  Fig.~\ref{fig:pca}) lead to a coarser segmentation. 3D uplifting considerably boosts results compared to single-view approaches, and introducing 3D spatial information through 3D graph diffusion further enhances results on the more challenging 360-degree scenes.
+
+\subsection{Open-vocabulary object detection}
+
+Table~\ref{tab:lerf-loc} presents results on the open-vocabulary LERF localization and segmentation tasks~\citep{kerr2023lerf}, evaluated on the extended and more challenging version of the dataset introduced by LangSplat~\citep{qin2023langsplat}. The reported average running times include feature map generation and 3D feature training whenever relevant. 
+LUDVIG outperforms prior works while being significantly faster than all methods (around 10 times faster). 
+
+~\ref{sec:appendx-clip-visualization} provides illustrations of the impact of the diffusion process (Fig. 
+
+\input{tables/results_lerf_loc}
+
+
+\section{Concluding remarks and limitations}
+
+
+\paragraph{Learning-free uplifting.}
+In this work, we introduce a simple yet effective aggregation mechanism for transferring 2D visual representations into 3D, bypassing the traditional optimization-based approach. The aggregation builds upon already trained Gaussian Splatting representations and is implemented within the CUDA rendering process, making 2D-to-3D uplifting as fast as 3D-to-2D rendering. 
+Note however that the quality of learned 3D features is bound by that of the 3D scene reconstruction. Reconstruction by Gaussian Splatting is notoriously challenging when dealing with, \emph{e.g.}, highly specular scenes~\citep{jiang2024gaussianshader,yang2024spec}, blurred images~\cite{zhao2024badgaussians,lee2024deblurring} or  high-frequency regions~\citep{ye2024absgs, zhang2024fregs}. In such scenarios, learning 3D features \emph{along with} 3D Gaussian Splatting reconstruction may lead to improved scene geometry, opening promising perspectives for future work.
+
+\vsp
+\paragraph{Graph diffusion.} Our proposed graph diffusion process allows injecting the rich DINOv2 representations to refine arbitrary features such as segmentation masks or CLIP embeddings. Our CLIP feature refinement builds upon prior works using DINO features as a regularization~\citep{kerr2023lerf, zuo2024fmgs}, while alleviating the computational overhead associated with joint gradient-based optimization of CLIP and DINO features. While diffusion relies on appropriately chosen hyperparameters to define the similarity graph, our automatic selection process ensures robustness to the varying landscape of DINOv2 features within a 3D scene.
+
+
+

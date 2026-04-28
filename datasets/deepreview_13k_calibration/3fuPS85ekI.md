@@ -1,0 +1,205 @@
+# Adapting Communicating MLLMs on the Fly in Referring Expression Tasks
+
+- Decision: Reject
+- Avg Score: 5.25
+- Scores: 5, 5, 5, 6
+
+## Abstract
+Multimodal Large Language Models (MLLMs) exhibit varying comprehension levels in language and perception that complicate interacting with a diverse population of agents, similar to how miscommunication happens in humans, e.g., because intentions are not always known.
+In this work, we investigate whether MLLMs can adapt to the perceptual weaknesses of the communication partners in an online manner, i.e. change the way they describe their environment in a way that is understandable to their partner while communicating with them, via reinforcement learning.
+We experiment with two tasks: referring expression identification (REI) and referring expression segmentation (RES), where a speaker agent has to describe an object, and a listener has to identify it.
+To be successful, the speaker agent must discern the comprehension level of the listener and adapt accordingly, especially when the listener suffers from perceptual weaknesses such as color blindness or blurred vision.
+Unlike traditional offline alignment methods for LLMs, we fine-tune a Multimodal LLM (MLLM) online to adapt to other agents' conceptual understanding. Our experiments with four MLLMs on four datasets show that online adaptation is feasible in both REI and RES settings.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3
+
+### Summary
+This paper studies an interesting problem setup: how to adapt MLLMs to perceptual misunderstandings. The paper introduces a novel framework of having a speaker MLLM and a listener MLLM, where the speaker MLLM need to learn adaptation to the listener MLLM on the fly so that the listener MLLM can come up with the correct answer. The paper proposes two settings where the MLLM can have misunderstanding: color blindness and blurry images. The paper tested on 3 RL algorithms to do online adaptation: PPO, NLPO, KTO, and found that KTO attains the best performance. The paper also provides qualitative results of the response difference between the adapted MLLM and the original MLLM.
+
+### Strengths
+1. The paper proposes an interesting setting of the communication between MLLMs. The paper proposes to have one speaker and one listener, where the speaker need to address the best way to communicate with the listener so that the listener can arrive at the correct answer. This setting is novel.
+2. The paper proposes on the fly adaptation based on the listener's feedback. The real time adaptation is interesting and useful.
+3. The paper conducts thorough experiments on three RL algorithms and demonstrates the effectiveness of KTO. The experiments provides a thorough comparison between different RL algorithms.
+4. The writing is generally clear and easy to follow.
+
+### Weaknesses
+1. The paper lacks comparison with more baseline methods. Some simple and training-free personalization methods in MLLMs might directly solve this problem better. Eg, adding the experiment of few-shot/one-shot learning would be a useful comparison with the online adaptation method that the paper proposes. RAG methods with a memory augmented module. Or some implict/explicit prompt engineering techniques.
+2. The qualitative analysis is not thorough enough. Eg, in Figure 7, the author noted that the adapter-generated description is better because it has less color attributes. However, this is still a surface level analysis as there are many differences between the two descriptions generated, such as length. It would be better to conduct a deeper analysis of the comparison between the adapter generated, such as the response length.
+3. The paper covers the scope "color blind" and "blur" as the two attributes of the listener. It is not clear to me how these two attributes are chosen and how they align with real-world misunderstanding between MLLMs.
+
+### Questions
+1. The ZSL baseline seems insufficient. What about comparison with few-shot learning? eg. Given the trajectory of the past prediction results as context, would the speaker learn to better describe the object? 
+2. What are the costs of introducing RL learning? Would be useful to add an analysis.
+3. It would be interesting to test the speaker's final understanding of the , eg, would the speaker be able to identify that the listener is color-blind in the end?
+
+### Soundness
+2
+
+### Presentation
+3
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5
+
+### Summary
+In this paper, the authors study the efficient online adaptation of agents implemented as Multimodal Language Models (Vision language models more specifically). Particularly, the authors study this online adaptation with both a reference identification task (REI) and a reference segmentation task (RES). In REI, a listener needs to select the correct target image between 2 images using a description generated by a speaker. For the RES task, the speaker needs to generate a description for an object in an image and the listener has to derive a segmentation mask for it.
+
+In this paper, the authors study how the well-known RLHF algorithms can be adapted to the online setting which is more challenging because they typically refer to single-turn data rather than dialogues with noisier rewards. For their evaluation, they test different SOTA VLMs on images derived from relatively standard benchmarks such as COCO, ImageNet, etc.
+
+The results highlights that adaptation seems to have a negative effect on the quality of the descriptions which diverge to very unnatural ones which do not include any object attributes compared to the Zero-shot variants that are much more descriptive.
+
+### Strengths
+1. Studying continuous adaptation of Vision and Language Models is definitely an interesting topic that should be explored more by the community
+
+2. The authors test different training regimes using techniques such as KTO, PPO and NLPO. The evaluation uses different models such as Llava-7B and Llava-13B which makes the experiments very reproducible by the community
+
+### Weaknesses
+1. The authors consider referential games with only two images which incredibly reduces the ambiguity of the task. Additionally, they do not compare with existing literature from multi-agent language evolution (e.g., [1])
+
+2. It's not clear to me to what extent the benchmarks that the authors have used are completely unseen by the models. For instance, it's very likely that RefCOCO is part of the Llava fine-tuning considering that they use MSCOCO images. Authors should pay more attention to the problem of data contamination which I believe was ignored by the authors.
+
+3. The models used in the evaluation are not up to date considering that there are many strong variants such as Llava-1.5, QwenVL-2, Llama-3.2 and Molmo. I would suggest the authors provide additional results with these baselines to make the results much stronger.
+
+4. The authors should clarify the way the different models are adapted. Do they always adapt the speaker or only the listener? This is an important research question that I think is not clearly highlighted by their evaluation.
+
+5. Their models are clearly affected by language drift during the adaptation procedure. I believe the authors should focus on a more detailed analysis of the language developed by the models and how it changes over the different games. This should also be compared to utterance length and vocabulary size to verify whether models are simply maximising success rate and forgetting their language abilities.
+
+### Questions
+1. Examples in Figure 8 are particularly bad in terms of the quality of the description. How do you explain this? Have you thought about mitigating this language drift problem?
+
+2. Why did you use PaliGemma only for the RES task?
+
+3. It's not clear to me the example in Figure 2. The example seems very unfortunate because it's hard to discriminate two birds when the image is black and white.
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3
+
+### Summary
+This paper introduces a novel framework for referring expression tasks in which two MLLM agents attempt to communicate with each other to communicate information about images in a scene. The dataset/task, based on CLEVR, CUB, ImageNet and RefCOCO is constructed by sampling two images, with one of those images designated as the target image. The "speaker" is then asked to the describe the "target" image relative to the other image, and the "listener" attempts to identify the target image from the two images. This paper evaluates several speaker and listener MLLMs on this task, as well as fine-tunes the speaker MLLM using reinforcement learning, and demonstrates several effects including that adaptation improves listener performance (KTO adaptation improved the best listener accuracy from 0.58 (LLava-13B) to 0.67 on CLEVR and that certain attributes matter more than others (Color and shape attributes were crucial for performance, with GPT-4V’s accuracy dropping from 0.99 to 0.84 on CLEVR when color was omitted).
+
+### Strengths
+- The paper presents an original approach by exploring real-time adaptive capabilities in MLLMs using RL to dynamically adjust descriptions in communication tasks. This is a relatively novel direction, and is quite an interesting application domain. I find the idea of introducing perceptual weaknesses into the AI to be quite a novel idea - and of great interest - as I think that very few approaches have focused on specializing to perceptual weaknesses. As far as I am aware, there is no other work that studies the idea of having conversational interactions with visually impaired listeners, and looking at how models are capable of handling such situations.
+- The paper clearly demonstrates that online RL-based adaptation can improve performance on the scenario tasks. 
+- The paper's results and claims are quite clear, and easy to understand, and the data presented (fairly well) supports those claims.
+
+### Weaknesses
+Given the strengths, there are also several weaknesses:
+- There is no statistical analysis of the data, so it's quite challenging to tell if there are statistically significant differences between the methods. While the absolute differences are large, the fact that the dataset size is somewhat small (accuracy over 300 episodes), might lead to relatively high variance in the accuracy metrics, and it would be nice to have that variance reported in the paper (especially when significant differences are claimed: L319, L32, L370, L376, L427).
+- It's not really clear to me how challenging this task is. Because the images are selected at random, it seems likely that not that much information needs to be communicated between the agents to correctly select the target image/complete the target task. That seems to contrast with the difficulty of the problem for the agents (with the exception of GPT-4v, which seems to perform quite well at the task, achieving almost 100% accuracy). This suggests to me that with some prompt tuning, open models could achieve much higher accuracies as well. The paper would benefit from an improved approach to selecting hard negatives, which might help increase the difficulty of the task.
+- It's not clear if the interactions are actually multi-turn (as indicated by Nx in Figure 1), or if the interactions that the agents have are merely single-turn interactions (as seems to be the case in Figure 7 and Figure 8). While it makes sense to have single-turn interactions for simplicity, I think that claiming that MLLMs are "adapting" in the case of single-turn interactions is quite weak. Ideally, the "conversation" should have more than one turn where the speaker must determine the kind of impairment or confusion that the listener has, and then adjust to that, rather than adjust to global speaker impairments over time.
+- Several of the effects mentioned in the paper seem to be caused by poor prompting of the speaker MLLMs, rather than actual failures during the task. For example, the effect of visual prompting mentioned on L494, or the non-specific descriptions in Figure 8. It also seems like the descriptions are generally not comparative (Fig 7) - which seems to indicate that the models aren't taking into account multiple images during the prompting process. GPT-4v is rather robust to these prompting issues, and has considerably better performance, so I wonder if that is the underlying cause of many of the effects in this paper.
+- The paper only investigates the LLaVA-7B speaker, and does not look at other speaker agents. It would be nice to see if these effects are generalizable to other speaker agents.
+
+### Questions
+- In figure 8, the ZSL experiments seem to be quite low-quality captions of the image. It seems like the prompting could have quite large impacts on ZSL performance.
+- How precisely are images provided to the LLMs (through tiling, or separate image addition)? Models such as Llava are not designed for multi-image reasoning, and so it is important to correctly work around those limitations. 
+- Does ZSL performance improve when the prompt indicates that the listener may have some kind of impairment (or the impairment is explicitly specified)? 
+- Does Figure 10 really show a divergence effect? Is this unexpected, or just an artifact of gradient-based optimization? It seems like in general the trend is increasing, as would be expected from RL agents. Further, does Figure 10 plot validation or test accuracy? If it's plotting test accuracy, this would indicate a significant issue in the evaluation methodology, since the model is being tuned on the test set.
+- It would be really helpful if Figure 3 was presented as a table instead of a radar chart. Because the axes have no relationship to each other, the shapes are generally misleading, and the chart makes it quite difficult to understand finer grained performance details.
+- In general, some more tables would be appreciated, since locating all of the comparative numbers within the paper is quite time consuming. Further, Figures 5,6, and 9 are impossible to read clearly without knowing the base numbers, and might be better as tables.
+- It would be interesting to see some failure cases of the model. What is happening when miscommunications occur? 
+- How do the chosen reinforcement learning algorithms (PPO, KTO, NLPO) compare in terms of training stability? The results in Fig. 10 seem to be from a single run - are the results different across runs? 
+- Does the use of LoRA impact the adaptation performance compared to fine-tuning all of the parameters? 
+- Are there model size effects (i.e. using 7B vs. 13B)? 
+
+Some additional minor comments:
+- The descriptions of RLHF, along with PPO, KTO, and NLPO in Section 3.1 take up a lot of space, and could be moved to the appendix in favor of additional analysis, qualitative results, or tables.
+- Is random performance on the task 0.5 accuracy? If so, it would be nice to explicitly clarify that in the paper (since random performance is mentioned on L840). If not, it would be good to know.
+- It would be interesting to investigate a wider range of perceptual weaknesses (for example, resolution, partial occlusion, field of view, focal length (blurring at different depths), spatial distortion, inverted colors, etc.). 
+- The motivation for the specific dataset selection is somewhat unclear, and it would be good to have improved motivation as to why, precisely, these datasets were chosen. 
+- How expensive (computationally) are these experiments? How long does the average rollout take, and the average experiment?
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+2
+
+### Summary
+This paper, "Adapting Communicating MLLMs on the Fly in Referring Expression Tasks," explores whether multimodal large language models (MLLMs) can adapt to their communication partners’ perceptual weaknesses, such as color blindness or blurred vision, in real time. Using referring expression identification (REI) and segmentation (RES) tasks, the paper evaluates how well MLLMs can fine-tune their responses to improve interaction with varying levels of listener comprehension. Through on-the-fly reinforcement learning and using LoRA adapters for efficient fine-tuning, the authors test different MLLMs (LLaVA, Qwen, and PaliGemma) and adaptation algorithms (PPO, KTO, NLPO) on datasets such as CLEVR, CUB, ImageNet, and RefCOCO. The results indicate that online adaptation, especially through KTO, enhances task performance and communication efficacy for MLLMs, revealing the potential for personalized MLLM applications.
+
+### Strengths
+Originality: The concept of online, real-time adaptation to perceptual weaknesses through reinforcement learning in MLLMs is innovative and provides a step forward for personalized multimodal interactions.
+Quality: The methodology is comprehensive, with experiments covering diverse datasets and models, adding to the robustness of the findings.
+Clarity: The explanation of the reinforcement learning algorithms (PPO, KTO, NLPO) is well-articulated, as is the application of LoRA for efficient parameter tuning.
+Significance: This work addresses a vital aspect of real-time communication adaptation for AI models, potentially making them more inclusive and functional in real-world applications.
+
+### Weaknesses
+Limited Adaptability: While KTO shows improvement, the adaptation results vary across different tasks and MLLMs, and the paper lacks an exploration of methods to enhance consistency across different perceptual impairments.
+
+Lack of Human Interaction: Although the study uses MLLM-MLLM interactions, the paper could be strengthened by experiments involving human listeners, which would provide a clearer perspective on practical applications.
+
+Evaluation Scope: The paper could further assess performance over a broader range of perceptual weaknesses beyond color blindness and blur, such as partial occlusion or noise.
+
+### Questions
+Could the authors elaborate on the variance between different adaptation algorithms across datasets, especially why KTO performed better in RES tasks?
+Were there any attempts to test the trained models with real human interactions? This could validate the practical applicability of the proposed methods.
+How would the proposed method handle more complex perceptual challenges, like occlusion, or scenarios with multiple perceptual weaknesses simultaneously?
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+2

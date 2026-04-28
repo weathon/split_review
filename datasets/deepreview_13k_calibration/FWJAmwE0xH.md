@@ -1,0 +1,205 @@
+# Neural-Symbolic Recursive Machine for Systematic Generalization
+
+- Decision: Accept
+- Avg Score: 6.25
+- Scores: 6, 8, 3, 8
+
+## Abstract
+Current learning models often struggle with human-like systematic generalization, particularly in learning compositional rules from limited data and extrapolating them to novel combinations. We introduce the \ac{nsr}, whose core is a \ac{gss}, allowing for the emergence of combinatorial syntax and semantics directly from training data. The \ac{nsr} employs a modular design that integrates neural perception, syntactic parsing, and semantic reasoning. These components are synergistically trained through a novel deduction-abduction algorithm. Our findings demonstrate that \ac{nsr}'s design, imbued with the inductive biases of \textit{equivariance} and \textit{compositionality}, grants it the expressiveness to adeptly handle diverse sequence-to-sequence tasks and achieve unparalleled systematic generalization. We evaluate \ac{nsr}'s efficacy across four challenging benchmarks designed to probe systematic generalization capabilities: SCAN for semantic parsing, PCFG for string manipulation, HINT for arithmetic reasoning, and a compositional machine translation task. The results affirm \ac{nsr}'s superiority over contemporary neural and hybrid models in terms of generalization and transferability.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper introduces the Neural-Symbolic Recursive Machine (NSR), a model for systematic generalization in sequence-to-sequence tasks. The key innovation is representing the problem as a Grounded Symbol System (GSS) with combinatorial syntax and semantics that emerge from training data. The NSR incorporates neural modules for perception, parsing, and reasoning that are jointly trained via a deduction-abduction algorithm. Through architectural biases like recursiveness and equivariance, the NSR achieves strong systematic generalization on tasks including semantic parsing, string manipulation, arithmetic reasoning, and compositional machine translation.
+
+Overall, the paper presents a novel neural-symbolic architecture that combines beneficial inductive biases from both neural networks and symbolic systems to achieve human-like generalization and transfer learning abilities. The experiments demonstrate strengths on challenging benchmarks designed to test systematic generalization.
+
+### Strengths
+- Compositional generalization is an interesting and important direction to explore, which should be one of the most important capabilities of human. Therefore, the problem and the research direction is important.
+- The Neural-Symbolic Recursive Machine (NSR) model is a novel model architecture centered around representing problems as grounded symbol systems. The deduction-abduction training procedure for coordinating the modules is an original contribution for jointly learning representations and programs.
+- The paper clearly explains the limitations of existing methods, the need for systematic generalization, and how the NSR model aims to address this. The model description and learning algorithm are well-explained. The experiments and analyses effectively demonstrate the claims.
+- The paper is technically strong, with rigorous definitions and detailed exposition of the model components and learning algorithm.
+- The experiments systematically test generalization across four datasets with carefully designed splits. The analyses provide insights into when and why the NSR architecture generalizes better than baselines.
+
+Overall, this is a technically strong and well-written paper that makes both conceptual and practical contributions towards an important research direction.
+
+### Weaknesses
+Although I understand that compositional generalization is currently driven primarily by synthetic datasets like SCAN, I would still like to see the application of this method in real-world scenarios. For example, could it achieve significantly better generalization performance compared to conventional seq2seq models on real machine translation tasks?
+
+### Questions
+N/A
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper describes a new neurosymbolic model, NSR, which consists of (1) a task-dependent model mapping from inputs to strings; (2) the Chen-Manning dependency parser; (3) a program induction module that is somehow based on DreamCoder. This pipeline is trained by gradient-based optimization (SGD?) using Metropolis-Hastings sampling to estimate the gradient. The proposed method performs well across four tasks, SCAN, PCFG, and HINT, and an artificial machine translation task.
+
+### Strengths
+This is a very interesting approach that achieves very good results on the four tasks tested. In every setting, their model either does the best, or is tied with NeSS because both models achieve 100% accuracy.
+
+### Weaknesses
+Many statements are made like, "This stark discrepancy underscores the pivotal role and efficacy of symbolic components—specifically, the symbolic stack machine in NeSS and the GSS in NSR—in fostering systematic generalization." But, for an outsider, no explanation is given for why the symbolic components actually lead to better generalization. I would like to see some more explanation or analysis to back this up. Specifically, it's unclear how the GSS enforces systematicity, and what properties of the GSS architecture lead to this behavior. It would be helpful to see a more detailed analysis of the GSS's internal representations and how they differ from purely neural approaches.
+
+The program induction module is not described in detail; in equation (3), what is the p in the right-hand side? When you say that you "leverage" DreamCoder, do you mean that this module simply is DreamCoder? The description of the program induction module is too high-level, and it's difficult to understand how it operates. A more detailed explanation of the search process, the representation of programs, and the specific modifications made to DreamCoder is needed. The current description lacks the necessary detail for reproducibility and a deeper understanding of the method.
+
+Figure 3: image is wrong?
+
+### Questions
+Section 3.3: How do you use the gradients? Is this SGD?
+
+Why is abduction called that? It seems different from abductive reasoning?
+
+Def 3.2: Isn't "compositionality" a more usual word for this? "Recursive" has a totally different meaning in theory of computation.
+
+### Soundness
+4 excellent
+
+### Presentation
+2 fair
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper presents a neuro-symbolic architecture called the NSR which consists of 3 steps:
+1. perception module to convert raw input into symbols
+2. a parser to compute a syntax tree over symbols
+3. a program induction module to convert this syntax over induced symbols into a program which can then convert an input into an output deterministically.
+
+Each of these components are separate probabilistic modules (though details about what these models are exactly is unclear from the paper). From results on 3 tasks, we see improvements on generalization compared to neural models.
+
+### Strengths
+The subject matter of the paper is to make progress towards improving compositional generalization in learnt models, which is a very important area.
+
+### Weaknesses
+*Presentation is unclear*: There are very few details about the actual approach in the Section-3 (and Figure-1) to fully understand what exactly the model is (See questions). Unfortunately, because there is a lack of details around the approach, it is hard to do a thorough assessment of this work, and I request the authors to revise their draft.
+
+Moreover, the paper spends too much time (and math notation) on simple definitions such as “equivariance” and “recursiveness” and on flagposting “hypothesis” statements. Not necessarily cause for rejection, but I highly suggest that these be moved into an appendix, so more time is spent on explaining the approach.
+
+
+*How general is this approach*: Most of the experiments here are on datasets where symbolic approaches are likely to help, but it is unclear how well this approach would do for natural language semantic parsing tasks such as GeoQuery. I'm not fully opposed to having experiments that are only on these programmatic datasets, but it would be good to have an extended discussion on what the symbols and programs look like for more natural data distributions.
+
+### Questions
+Here are some details I could not get from Section-3:
+
+- What exactly are the symbols in T for each of the datasets? 
+- Is every raw input mapped to a single symbol or is there a consolidation step where multiple raw inputs can be associated with the same symbol? 
+- What models are used to parameterize all of the distributions in Eq~4? Are these neural networks?
+- What is the overall parameter count?
+- How does inference work for this model?
+- How does this compare to other neuro-symbolic systems, for example "Neuro-Symbolic Concept Learner" from Mao et al. 2019?
+
+### Soundness
+1 poor
+
+### Presentation
+1 poor
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This work introduces a Neuro-symbolic approach capable of strong systematic generalization: NeuralSymbolic Recursive Machines (NSR).
+The method is made of 3 modules:
+1. a neural net perception module mapping raw input to grounded symbols. This can be a pre-trained CNN or transformer for Images and Text.
+2. a dependency parser to infer dependencies between grounded symbols in a structured syntax tree, termed Grounded Symbol System (GSS)
+3. a program synthesizer that deduces semantic meanings to a given symbol based on its neighborhood in the GSS tree.
+
+To train this system with simple input-output (x, y) pairs and without any external expert knowledge or supervision for the GSS, the authors introduced a probabilistic learning method based on deduction-abduction: start with a greedy decoded and incorrect GSS tree, then refine step by step by looking at the potential neighbouring trees, until accurate results are obtained.
+Monte-Carlo sampling is done to sample potential trees.
+
+The method is tested on three synthetic tasks (SCAN, PCFG, Hint) and a compositional machine translation task. In SCAN, PCFG, and compositional machine translation, NSR obtains 100% accuracy. On Hint, NSR beats all baselines including vanilla Transformers.
+
+### Strengths
+This paper proposes a method that unifies the connectionism and the symbolism views of AI. While the attempt has been made multiple times in the past, the proposed method seems original and novel, although additional references could be cited (see the minor suggestions in the Weaknesses section)
+
+The proposed method is well presented and the paper is easy to read. Figures 3 and 4 in particular made the content of the paper easier to understand and helped gain an intuition on what the method learns.
+Experiments clearly present the strength of the proposed approach over previous baselines.
+
+Eventually, this paper addresses an important challenge of current neural architectures: systematic generalization, making this work significant.
+
+### Weaknesses
+1. All results are comparing the proposed method NSR with various neural architectures and only one neuro-symbolic method: NeSS. The fact that NeSS performs 0% in 2 tasks and 100% in the other two makes it a weak comparing point (and also suggests that NeSS behaves more like a symbolic model than a neuro-symbolic one: it's all or nothing in terms of performance). I would suggest the authors provide at least 1 other neuro-symbolic method to compare against to make the results more significant. It is very clear that the proposed method outperforms vanilla neural methods such as Transformers, which is not surprising given the nature of the tasks being used, but it is less clear if the proposed method is significantly better than previous neuro-symbolic methods that also do not require additional training signal. The work from Minervini et. al. on Greedy Theorem Provers, or other variants could potentially be used as a baseline for some of these tasks.
+
+2. Another weakness of this paper is the ambiguous explanation of how the search for a GSS tree is terminated. Section 1 states that the search for a tree runs "_until the accurate result is obtained_", and Section 3.2 doesn't detail this point (or at least not very well). The authors should better define this stop criterion in order to better understand its limitation: what does it mean for the resulting tree to be "accurate"? Could the method settle on an "almost correct" syntactic tree to save time? and what would the effect of that be on performance?
+
+3. Eventually, at the end of Section 3, the authors state that the three modules of NSR exhibit equivariance and recursiveness. It would be beneficial to explain why this claim is true and provide additional evidence about it.
+
+The following are minor suggestions:
+
+4.  In Table 3, for the task of compositional translation, it would be interesting to also evaluate the performance of a vanilla transformer like in the previous tables.
+
+5. the work could benefit from a discussion about previous neuro-symbolic works such as Neural Theorem Provers (NTPs) and Greedy NTPs: "_Differentiable Reasoning on Large Knowledge Bases and Natural Language_" by Minervini et. al, and previous work trying to add inductive biases to Transformers such as "_Does Entity Abstraction Help Generative Transformers Reason?_" by Gontier et. al.
+
+### Questions
+- see "weakness (2)": Could the method settle on an "almost correct" syntactic tree to save time? and what would the effect of that be on performance?
+
+- What is the vocabulary size of the primitives considered? Did you try more complex sets of logical primitives? What do you think the effect would be on time and performance?
+
+- Do you have any hints of how to start thinking about representing probabilistic semantics like mentioned in the Limitation section?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

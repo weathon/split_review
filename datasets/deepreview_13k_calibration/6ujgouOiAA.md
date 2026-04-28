@@ -1,0 +1,168 @@
+# Use Your INSTINCT: INSTruction optimization usIng Neural bandits Coupled with Transformers
+
+- Decision: Reject
+- Avg Score: 5.50
+- Scores: 5, 8, 3, 6
+
+## Abstract
+Large language models (LLMs) have shown remarkable instruction-following capabilities and achieved impressive performances in various applications. However, the performances of LLMs depend heavily on the instructions given to them, which are typically manually tuned with substantial human efforts. Recent work has used the query-efficient Bayesian optimization (BO) algorithm to automatically optimize the instructions given to black-box LLMs. However, BO usually falls short when optimizing highly sophisticated (e.g., high-dimensional) objective functions, such as the functions mapping an instruction to the performance of an LLM. This is mainly due to the limited expressive power of the Gaussian process (GP) model which is used by BO as a surrogate to model the objective function. Meanwhile, it has been repeatedly shown that neural networks (NNs), especially pre-trained transformers, possess strong expressive power and can model highly complex functions. So, we adopt a neural bandit algorithm which replaces the GP in BO by an NN surrogate to optimize instructions for black-box LLMs. More importantly, the neural bandit algorithm allows us to naturally couple the NN surrogate with the hidden representation learned by a pre-trained transformer (i.e., an open-source LLM), which significantly boosts its performance. These motivate us to propose our INSTruction optimization usIng Neural bandits Coupled with Transformers (INSTINCT) algorithm. We perform instruction optimization for ChatGPT and use extensive experiments to show that our INSTINCT consistently outperforms the existing methods in different tasks, such as in various instruction induction tasks and the task of improving the zero-shot chain-of-thought instruction.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper introduces  INSTINCT algorithm to optimize the instructions for black-box LLMs. INSTINCT replaces the GP surrogate in BO by an NN surrogate, and couples the NN surrogate with the hidden representation learned by a pre-trained transformer
+
+### Strengths
+The paper is well-written and easy to follow, and it proposes a novel method to solve the instruction optimization problem.
+
+### Weaknesses
+1. Clarification is required on one aspect: it appears that the MLP on top the pre-trained model remains unchanged, with its parameters being pre-determined using 1000 pairs of vectors and score. An interesting baseline for the author to consider might be utilizing these Sobol sequences to create instructions and selecting the best one. I'm curious to see if the author's approach would yield any significant improvements through exploration.
+
+2. The author's exploration into whether using ChatGPT for paraphrasing enhances instruction quality raises an important question. If paraphrasing indeed improves instructions, is the optimization process still necessary? Perhaps a more straightforward approach would be to initially generate a rudimentary base instruction using a white-box model, potentially of lower quality, and then refine it through repeated paraphrasing.
+
+### Questions
+See the weakness part.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper introduces a new instruction tuning technique for LLMs that builds on InstructZero, which is recent work using Bayesian optimization to tune instructions. The technique, called INSTINCT, replaces the Gaussian process objective function surrogate in Bayesian optimization-based instruction tuning with a neural network surrogate (NeuralUCB) -- thus increasing the expressive power that it can support. Finally, the hidden representations in the neural surrogate are combined with pretrained LLM hidden representations. The results show improved zero-shot and chain of thought performance across a variety of tasks.
+
+### Strengths
+- INSTINCT solves a clear problem -- Bayesian Optimization-based techniques for prompting that involve the use of a Gaussian process for modeling the objective might not be the right tool for high-dimensional or complex objectives (which are both true in the case of prompting). Replacing the Gaussian process model with NeuralUCB just makes sense. 
+- The authors include a thorough evaluation, and show in Tables 1 and 4 that INSTINCT improves the average ranking over the baselines across a wide variety of tasks. 
+- While combining NeuralUCB with InstructZero makes sense, it poses a nontrivial challenge of computational inefficiency that the authors address via precomputation. I view this is a potentially solid contribution that can be further strengthened via an empirical evaluation of the computational costs involved.
+
+### Weaknesses
+ - While it seems great that INSTINCT can be sped up via pre-computation, can the authors provide an empirical comparison between the computation costs involved with running INSTINCT compared to its baselines? Ideally for the sake of a fair evaluation, this should also include pre-computation. 
+- Not a deal breaker, but could more baselines be included? It seems that INSTINCT is only compared to two baselines: APE and InstructZero. I do see that this is addressed in Section 6 -- but can any of the black-box methods be adapted to your setting in some simple way?
+
+### Questions
+- It is interesting that the method can be sped up via pre-computation. Can the authors demonstrate this speedup, or is it computationally infeasible even for small problems to evaluate the non-pre-computed version? 
+- In Tables 1 and 4, INSTINCT seems to perform quite well and the authors report average rank, which is fine. For the sake of differntiating between the performance of the two baselines (APE and InstructZero), it would also be interesting to see this summary via performance profiles curves [1, 2], as they are computed over a decently large set of tasks. The caveat is that some of the scores appear to be perfect, which is not directly supported by performance profiles, but there are ways of dealing with this such as setting a performance ceiling. 
+- The text in figure 4 is too small. 
+
+[1] https://arxiv.org/abs/cs/0102001 
+[2] https://www.argmin.net/2018/03/26/performance-profiles/
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The paper discusses the dependency of Large Language Models (LLMs) on specific instructions for optimal performance, which are usually manually fine-tuned. It mentions the use of a Bayesian optimization (BO) algorithm to automate instruction optimization but highlights its inadequacy in handling complex, high-dimensional objective functions. To overcome this, the authors introduce a neural bandit algorithm replacing the Gaussian process in BO with a Neural Network (NN) surrogate. This new method, named INSTINCT (INStruction optimization usIng Neural bandits Coupled with Transformers), leverages pre-trained transformers to better model the objective function and optimize instructions. Through extensive experimentation with ChatGPT on various tasks, the INSTINCT algorithm demonstrated superior performance compared to existing methods, showcasing its efficacy in enhancing instruction optimization for black-box LLMs.
+
+### Strengths
+1. Adopt the NeuralUCB algorithm and propose INSTINCT algorithm to improve the instruction optimization.
+2. Conduct comprehensive experiments regarding the tasks.
+
+### Weaknesses
+1. lack of the novelty: since the NeuralUCB is the existing algorithm and InstructZero is the existing pipeline for optimizing the instructions for black-box models, i.e., ChatGPT. It seems that the idea is just a combination of InstructZero and NeuralUCB.
+2. lack of the experiment on different combinations of white-box + block-box model, e.g., GPT4 + WizardLM, GPT4 + Vicuna. I would like to see how the different combinations affect the results. 
+3. Since the white-box model, Vicuna, is a distilled model from GPT-family, I would like to see how the algorithm can optimize the instruction for black-box models from other families. If you want to claim that your algorithm can generalize well, please conduct these experiments.
+
+### Questions
+1. how many demos do you use for white-box LLM?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+Large language models (LLMs) have shown remarkable performance on many tasks, mainly due to their strong instruction-following capabilities. However, their performance depends heavily on the instructions/prompts given to them. Manually designing good instructions is human-intensive and costly. Thus, developing methods to automatically optimize instructions for LLMs is important. Recent works propose gradient-free methods for prompt tuning. Concretely, Chen et al. propose InstructZero which uses Bayesian optimization with Gaussian processes to find optimal soft-prompts that can be used to generate optimal prompts.
+Soft prompts are vectors fed to an open-source LLM, which can generate a human-readable and task-relevant instruction given a few exemplars of the target task. The instruction is then submitted to the black-box LLM for evaluation on the target task, whose performance is used to guide the optimization of the soft prompt toward generating better instructions.
+However, GPs struggle to model complex high-dimensional functions like the LLM score function.This work proposes INSTINCT, which replaces the Gaussian process with a natural bandit (Neural Upper Confidence Bound - NeuralUCB (Zhou et al., 2020)) based on a pre-trained LLM to improve modeling capability. This allows efficient exploration vs exploitation for optimizing black-box LLM instructions. Experiments show INSTINCT consistently outperforms existing methods on instruction optimization tasks for the black-box model ChatGPT.
+
+### Strengths
+1. Authors tackle an important problem in leveraging large language models - automatically optimizing instructions/prompts to get better performance from LLMs. Manual prompt design is costly. They clearly identify limitations of prior work on prompt tuning that relies on GPs as such models struggle to find the optimum in high dimensional spaces such as prompt tuning.
+2. Authors improve the previous results of InstructZero (INSTINCT) and replace the Gaussian process with a neural bandit model based on pre-trained LLM embeddings, improving modeling capability for the LLM score function. Neural bandits based on pre-trained embeddings are sample efficient due to the power of pre-trained models used for embeddings. 
+3. The paper is well written and easy to follow, most notably authors clearly explain the prior work and outline their contributions. They highlight the limitations of prior work, the proposed method, and present convincing experimental results.
+4. Authors  evaluate their method on instruction optimization tasks for ChatGPT, compare it to prior state-of-the-art methods, and show consistent improvements. They run ablation studies to explore the strength of using pre-trained LLM-based representations of the prompts which they show offers good similarity measure for prompts.
+
+### Weaknesses
+1. Authors claim the largest problem of GP based BO is how GPs cannot deal with high dimensional optimization problems. It is unclear how this affects automated tuning of Prompts. I would love to see how:  increasing the dimensionality D of the soft prompt affects the accuracy of the downstream accuracy of the black-box LLM with the best prompt chosen based on D. This should be repeated for both normal GP based BO and the NN-bandits based BO to see how the curves change.
+
+2. Authors improve on InstructZero by exploring different surrogate models in the BO scheme introduced by the original authors. Neural Network based bandits are shown to be an efficient mechanism but it is unclear whether a different surrogate function would not offer larger improvements. Similarly, more discussion about acquisition functions would be important. Overall, Authors choose one BO strategy, different than InstructZero and it is unclear whether it is better than any other, modern BO strategy, perhaps BORE [https://proceedings.mlr.press/v139/tiao21a.html] TPE [https://proceedings.neurips.cc/paper_files/paper/2011/file/86e8f7ab32cfd12577bc2619bc635690-Paper.pdf] or evolutionary algorithms such as REA [https://arxiv.org/abs/1802.01548].
+
+3.The authors explore the BO approach for prompt tuning but neglect the recent line of work of evolutionary methods for generating better prompts, for example PROMPTBREEDER [https://arxiv.org/pdf/2309.16797.pdf]. I believe it would be helpful to see how this strategy fares against others. I understand the paper I have references only came out recently but nevertheless more extensive evaluation is needed.
+
+4.The empirical evaluation is limited to optimizing instructions for a single black-box LLM (ChatGPT) and a single white-box LLM (Vicuna). Testing on more LLMs would strengthen the results.
+
+### Questions
+What is the main motivation behind using NN bandits for this problem instead of other BO methods?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

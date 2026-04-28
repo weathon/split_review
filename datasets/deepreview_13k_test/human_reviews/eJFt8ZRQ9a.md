@@ -1,0 +1,195 @@
+# IMProv: Inpainting-based Multimodal Prompting for Computer Vision Tasks
+
+- Decision: Reject
+- Scores: 5, 6, 3, 8
+
+## Abstract
+In-context learning allows adapting a model to new tasks given a task description at test time. In this paper, we present \model~- a generative model that is able to in-context learn visual tasks from multimodal prompts. Given a textual description of a visual task (e.g. “Left: input image, Right: foreground segmentation”), a few input-output visual examples, or both, the model in-context learns to solve it for a new test input.  We train a masked generative transformer on a new dataset of figures from computer vision papers and their associated captions, together with a captioned large-scale image-text dataset. During inference time, we prompt the model with text and/or image task example(s) and have the model inpaint the corresponding output. We show that training our model with text conditioning and scaling the dataset size improves in-context learning for computer vision tasks by over $+10\%$ AP for Foreground Segmentation, over $+5\%$ gains in AP for Single Object Detection, and almost $20\%$ lower LPIPS in Colorization. Our emperical results suggest that vision and language prompts are complementary and it is advantageous to use both to achieve better in-context learning performance.\footnote{Project page: \url{https://jerryxu.net/IMProv/}}
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+In this paper, the authors expand upon Vision prompting via image inpainting by introducing a new textual prompt modality. Their method, IMProv, is capable of conducting image-to-image translation tasks based on a textual task description and a few input-output visual examples. The authors introduce two datasets to support their approach. They demonstrate that incorporating a text prompt and utilizing larger datasets results in improved performance.
+
+### Strengths
+- The method is straightforward without unnecessary complexity. The model architecture closely resembles Bar et al. to minimize additional variables.
+- The authors conduct a quantitative analysis of various factors influencing the performance of this method, such as training data size and source (including more data and diverse standard data), different prompt designs, and more.
+- The proposed method offers flexibility as it can accept either a textual prompt, a visual prompt, or both.
+
+### Weaknesses
+- This paper exhibits limited novelty since the proposed method is primarily a straightforward extension of Bar et al.'s work.
+- Qualitative analyses are relatively scarce within the paper.
+- It appears that there may be a trade-off between textual and visual modalities, with the advantages of a text prompt being less pronounced when paired with better visual prompts.
+
+### Questions
+Questions:
+
+- The authors explore various visual prompts, such as switching from a random class to a nearest neighbor (NN) class. It raises the question of how performance would be affected if the visual prompt is incorrect, (for example, an example for a different task), and how this compares to using a textual prompt alone.
+- In the appendix, the authors compare their method to SD. However, it may not be a fair comparison. It would be more equitable if the authors also fine-tuned on CCVF and S2CV datasets to assess whether the SD model can correctly inpaint in those scenarios.
+- Bar et al. discussed the limitations of their methods, including task ambiguity, non-aligned input-output, and out-of-distribution decoding. It would be interesting to explore whether these issues can be mitigated by using a textual prompt (for addressing task ambiguity and non-aligned input-output) and by employing more data (for handling out-of-distribution decoding).
+- Have the authors considered how different text encoders might affect the model's performance?
+- The authors examine the quality of visual prompts versus textual prompts. Both the authors and Bar et al. have investigated how performance changes with the number of support pairs versus performance. It would be valuable to understand the trade-off between the number of support pairs and the use of textual prompts.
+- It appears that the authors conclude S2CV+LAION results in better performance from Table 3. Although I do think the conclusion is likely true, however, it is not rigorous to say so since IMProv benefits from both textual prompts and data. An interesting experiment could involve retraining MAE-VGGAN with CCVF+LAION data and S2CV+LAION data for a fair comparison.
+
+Minor:
+
+- The “textual prompts ablation” section is not only about textual prompts but both textual and visual.
+- TIt's worth mentioning that the loss used is similar to the MRM (Masked Region Modeling) in UNITER. A citation could provide relevant context. Chen, Yen-Chun, et al. "Uniter: Universal image-text representation learning." *European conference on computer vision*. Cham: Springer International Publishing, 2020.
+
+
+Final rating:
+I maintain my original rating. While the authors provide numerous qualitative examples, which is good, the paper still lacks both qualitative and quantitative analyses, as I pointed out in my questions. Strengthening these aspects would enhance the paper's overall quality and impact.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper introduces a model for solving computer vision tasks using multi-modal prompts based on inpainting. In addition to visual prompts, this method also utilizes text features encoded by CLIP as prompts, inputting them into the visual transformer using cross-attention mechanisms. To train the model, the authors collected a new dataset called Semantic Scholar Computer Vision (S2CV) dataset, which includes structured textual descriptions for precise task delineation, enabling the model to better handle distribution shifts. This model expands the range of tasks, it can perform to include images-to-X and X-to-images tasks.
+
+### Strengths
+1. The author's incorporation of text as an additional cue into the practice of visual in-context learning is insightful. 
+2. Abundant experimental results demonstrate the effectiveness of the approach. The paper, through a comparison of IMProv trained on CCVF data and MAE-VQGAN, provides evidence that multi-modal prompts consisting of both text and images outperform purely visual prompts. Furthermore, the paper shows that IMProv trained on a mixed dataset of S2CV + LAION, which includes structured textual prompts, can further enhance the model's performance.
+3. The paper extends the model's application scope, enabling it to accomplish image-to-X and X-to-image tasks, contributing to the further advancement of In-context learning in computer vision.
+
+### Weaknesses
+1. Using only LPIPS as a quantitative metric for extending applications in image-to-X and X-to-image tasks may not be particularly convincing. While there may be significant variations in metrics for image-to-X tasks, the use of standardized metrics like FID for X-to-image tasks would provide more solid experimental results.
+2. The choice of sample images in Figure 2 of the paper, which showcases the pipeline, does not seem to be well-suited and may not have a strong relevance to the tasks addressed in the paper.
+
+### Questions
+1.Do large language models that exclusively handle text, such as T5, outperform models that encode text using CLIP? 
+2.In Tables 4 and 7, the models trained with CCVF and LAION exhibit significantly better metrics compared to models trained solely with CCVF. Could the authors provide some analysis, possibly accompanied by visual results, to explain the reasons behind this substantial improvement?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper proposes a visual in-context learning framework termed IMProv. Based on an inpainting pipeline, IMProv incorporates both visual examples and task descriptions to prompt the model for different vision tasks. To train IMProv, a large-scale image-text dataset containing paired figures and captions from computer vision papers is collected by the authors. Experiments on different tasks are conducted to indicate the validity of IMProv to perform in-context inference.
+
+### Strengths
+1. Integrating text prompts into the visual in-context learning framework is interesting and the experimental results demonstrate its effectiveness.
+
+2. This paper proposes a large-scale image-text dataset, the Semantic Scholar Computer Vision dataset (S2CV), which is beneficial for the multimodal learning community.
+
+### Weaknesses
+1. Obviously, there is a large difference between figure captions from papers and the prompts used at inference time. For example, the text prompt may not appropriately describe the task during training. In the paper, I do not see any discussions regarding this issue.
+
+2. In Table 3, methods are trained with different datasets, thus leading to an unfair comparison. The authors could report the performance of IMProv trained on CCVF.
+
+3. For the tasks of X-to-images and images-to-X, the evaluation is not rigorous. For example, LPIPS cannot assess the performance of semantic segmentation. The reported results do not support the claim that IMProv can well generalize to these standard computer vision tasks. Commonly used metrics for these tasks should be adopted for evaluation. In addition, the results of X-to-images look poor, where the generated images are blurry and lack details.
+
+4. For the ablation study, I have a few concerns.
+
+    a) Dataset ablation: This is not a valid ablation. IMProv trained with different datasets can indicate the benefits brought from larger datasets, not different methods trained with different datasets.
+
+    b) The authors claim that Figure 4 suggests a trade-off between visual and text prompts. However, the visual prompts are the same for a query in Figure 4.
+
+    c) In Figure 5, what are the specific settings for these variants? “w/o text prompt” means no text prompt during 1) training and inference or 2) just inference? I think only the former could showcase the importance of incorporating text prompts. 
+
+5. There are no comparisons with other SOTA in-context learning methods such as Painter [1*] (only a small comparison for the task of colorization is given in the appendix which is far less than enough) and Prompt Diffusion [2*].
+
+    Overall, I think the paper presented an interesting idea for multimodal in-context learning. However, significant flaws in terms of experiments (see above points 2-5) make the claims of this paper very unconvincing.
+
+    [1*] Images speak in images: A generalist painter for in-context visual learning. In CVPR, 2023.
+
+    [2*] In-context learning unlocked for diffusion models. arXiv, 2023.
+
+### Questions
+See weaknesses. Questions are embedded into weakness points.
+
+### Soundness
+2 fair
+
+### Presentation
+1 poor
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 4
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The paper explores in-context visual learning with multimodal prompting, i.e., automatically completing corresponding dense vision tasks according to either visual prompts, text prompts or a combination of both. To achieve this, the authors collected a new dataset of figures in computer vision papers and the associated caption, from the Semantic Scholar website. Based on the previous method MAE-VQGAN, the authors add text as input and use cross-attention layers to fuse the text tokens and image tokens. The model achieves higher performance than the previous self-supervised visual prompting method, and can follow both textual and visual prompts for novel tasks.
+
+### Strengths
+- In-context visual learning is a very interesting and significant topic. This paper presents new capabilities of multimodal prompting along this direction.
+- The proposed Semantic Scholar Computer Vision dataset (S2CV) provides new angles to leveraging unlabeled in-context data with both text and images. The dataset can be useful for future research.
+- The method is simple and straightforward, not novel but can be easy to follow and adapt.
+- The papers show many qualitative cases and comparisons in studying the properties of the proposed IMProv model, e.g., comparison with stable diffusion, which provides a lot of insights.
+
+### Weaknesses
+- It would be more convincing to have more quantitative experiments on more tasks, e.g., one-shot or few-shot tasks. Although it might be challenging, it will give readers a bigger picture.
+- What about using multiple prompts? For example, multiple images, or even multiple image-text pairs as the prompt. It would be interesting to see what happens and how can further unleash the potential of the model.
+- Failure cases should be analyzed and discussed.
+
+### Questions
+- The authors use ViT-L be default. Did you tried backbone at different scales?
+- If we want to further scale up, how can we get more data like Semantic Scholar Computer Vision dataset? It would be interesting to have more discussion.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

@@ -1,0 +1,184 @@
+# Harnessing Query Heterogeneity for Cost-Effective Proactive Caching in LLM Inference
+
+- Decision: Reject
+- Avg Score: 5.25
+- Scores: 6, 6, 6, 3
+
+## Abstract
+As Large Language Models (LLMs) significantly enhance the capabilities of AI systems, the increasing volume of query processing requests presents challenges for cost-effective inference, particularly due to repetitive queries that lead to unnecessary resource consumption and increased costs. Caching strategies are employed to store a small set of previous queries, enabling direct retrieval of repetitive queries without reprocessing by the LLMs. However, existing caching algorithms often assume uniform query lengths, simplifying cache selection to a top-$K$ problem, which is inadequate for real-world scenarios with heterogeneous lengths. To address this issue, we propose a bandit learning algorithm for proactive query caching in LLMs, specifically considering variable-sized queries. We cast the optimal cache query cache problem as a knapsack problem. Since the repetitive pattern and processing cost are unknown and has uncertainty, we cast the learning-to-cache problem as a bandit learning problem. Compared to conventional bandit learning frameworks, a new technical challenge is that the reward of an arm would not be observed if it is pulled. To tackle this, we propose an Lower confidence bound (LCB)-type algorithm, which we prove has a $\tilde{O}(\sqrt{T})$ order of regret and show that our regret does not deteriorate compared to previous results when incorporating a variable size setting. Furthermore, we demonstrate that our online cache policy effectively reduces the additional computational overhead typically associated with calculating the optimal cache.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4
+
+### Summary
+The paper studies the problem of efficient LLM inference through caching the seen queries with online learning. It focuses on the setting when the query legnth can be different.
+
+### Strengths
+The paper is built up on Zhu et al 2024, but proposes some new modifications that deal with 
+(1) variable query size, which is more realistic in real-world settings; 
+(2) the case when the length of the query is on par with the length of the cache size.
+
+The authors provide new algorithms that guarantee near-optimal rate for the case of variable query length.
+
+### Weaknesses
+It's a little unclear to me how the main contirbution of the paper differs from that of Zhu et al. 2024. In particular, it seems that the lower bound directly applies here since Zhu et al. 2024 can be viewed as a special case of the condition the authors considered?
+
+It is also unclear why the authors are using $O$ instead of $\Omega$ for the presentation of the lower bound. Furthermore, the length of the output for an LLM is usually non-deterministic since LLM often samples with a non-zero temperature. So it seems that $A(q)$ here shall be a random variable. How does the algorithm account for it? Finally, given that the tightness w.r.t. $T$ is clear from prior work, can the authors also provide comments on the tightness with respect to the other parameters?
+
+### Questions
+1. For the presentation of lower bound, why are the authors using $O$ but not $\Omega$?
+2. The length of the output for an LLM is usually non-determinisitic since LLM often samples with a non-zero temperature. So it seems that $A(q)$ here shall be a random variable. How does the algorithm account for it?
+3. Given that the tightness w.r.t. $T$ is clear from prior work, can the authors also provide comments on the tightness with respect to the other parameters?
+
+### Soundness
+2
+
+### Presentation
+3
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+2
+
+### Summary
+This interesting paper studies the caching of query responses for LLMs and addresses a few fundamentally different aspects of this problem namely: a) cost is not observed for already cached queries; b) cost varies by query (and they are of different sizes).  In order to solve this problem the authors note that: a) this is a bandit problem, but reward is only (re)observed at the time an item is placed in the cache b) the constrained optimization problem can be framed as a 0-1 knapsack problem.  Building upon the work of Zhu et al the authors propose two algorithms.  The first is a purely theoretical construct that applies a pessimistic LCB bandit formulation using an oracle to solve the knapsack problem, the second algorithm is an actually practically implementable algorithm which the authors show performs in more general settings to the algorithm of Zhu et al.  They provide regret bounds to support their simulation studies showing a O(root(T)) regret bound.
+
+### Strengths
+The content of this paper ventures outside areas of my expertise in a few respects, but I have a generally positive disposition to it.  
+
+The paper reads well, and to the best of my understanding addresses an important problem and makes an important contribution.  The main arguments and experimentation appear sound to me.  The scope is narrow and well-defined.
+
+### Weaknesses
+Some general comments / suggestions
+
+I don't feel expert enough to comment in detail on the magnitude of the contribution.  While the problem formulation is interesting, I am doubtful it could be deployed as  real caching solution for LLMs due to some practical reasons (need to store cost and count of all queries, uncertainty on cost seems not too uncertain to me) - but am open to having the authors change my mind on these.
+
+While the writing is technically quite good (with occasional lapses), I think the structuring of the overall argument could be improved.  Some interesting points are brushed over (e.g. LCB vs USB).  The core contribution is a bit of work to disentangle from the presentation.
+
+This paper makes a contribution to cache bandits motivated by an LLM use case, I think the motivation could be altered to make the paper a bit more general.  That is explain cache bandits, what is known about them, what is lacking, and how current solutions are not applicable to LLM use cases.
+
+Line 151, usually people consider contextual bandits to be a simplification of RL.
+Line 215 opening quotes should be backticks
+Line 374 and be more reasonable. -> and is more reasonable.
+Line 455-458.  If I am not wrong it should be q_t not q in a few places.
+Line 143.  Does the problem perfectly reduce to the knapsack problem or do simplifications need to be made?  Specifically why use the phrasing “we regard”, rather than “the problem reduces to”.
+
+The differences between algorithm 1 and 2 are hard to see and understand, I would suggest colour might be useful to do a “diff” to help here.
+
+### Questions
+I would like to raise the following questions:
+•	The use of pessimism as an exploration heuristic could be explained in more detail.  In a conventional setting UCB/optimism is based on: if an arm might be good select it, you will either receive a good reward, or learn quickly it isn’t good.  I can see that only observing a reward on the first arm pull might change this situation, but to me this argument isn’t fully developed.
+•	I would expect the variation in the computational cost to be quite small in practice, i.e. the variance in epsilon, so I wonder about the utility of averaging over multiple observations of the reward.
+•	Algorithm 2 is presented as being a more practical version of Algorithm 1, but it still requires maintaining a count of how many times each query was observed and it’s cost.  Is this really realistic?
+•	Does your work provide any guidance on how large the cache should be?
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3
+
+### Summary
+This paper considers the caching problem in LLM inference. Note that for a prompt, doing LLM inference to generate tokens can be costly. A way to reduce the cost is to do KV caching such that for the prompt stored in the cache, generating tokens will be costless. The paper formulates this procedure as a bandit problem. To be specific, the action is cache $M_t$. The paper assumes that the prompt arrives following an unknown distribution, generating a fixed inference cost when the prompt is not in the cache $M_t$ and generating zero cost when the prompt is in the cache $M_t$. Therefore, each possible cache is associated with an unknown expected cost. The paper takes a bandit learning approach to approximate the optimal caching. The whole procedure has $T$ rounds and at each round $t$, the decision maker estimates the costs, selects a cache $M_t$, and observe new information. Finally, the paper derives a $O(\sqrt{T})$ regrets bound of their algorithm and conducts numerical experiments to test the empirical performance of their algorithms.
+
+### Strengths
+1. The paper provides a bandit model to study the optimal caching problem and the model is more general than the models in the previous literature, such as Zhu et al. (2023). The model in the paper is more general and practical.
+
+2. The paper provides a reasonable algorithm to approximate the optimal caching based on an online learning idea. The algorithm enjoys a strong $O(\sqrt{T})$ regret bound. The paper also conducts numerical experiments to illustrate the empirical performances of their algorithm.
+
+### Weaknesses
+1. The regret bound established in the paper depends on $1/p_{\min}$, where $p_{\min}$ is the minimum probability for a prompt to show up. However, this probability can be very small, especially when the set of possible prompts is very large. It is not known whether such a weak dependency on $p_{\min}$ is necessary or not.
+
+2. The algorithms in the paper require an oracle to generate the optimal caching based on the current estimated costs. However, it is not discussed in the paper whether assuming the existence of such an oracle is practical or not. That is, what is the computational complexity of the oracle and what is the feasibility in real-world applications?
+
+### Questions
+1. Could you discuss whether the dependency on $p_{\min}$ is necessary or not? I think $1/p_{\min}$ can be very large.
+
+2. Could you discuss what should be the oracle that outputs $M_t$? Is it a knapsack problem and is it easy to solve it?
+
+### Soundness
+2
+
+### Presentation
+3
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4
+
+### Summary
+This paper studies the cost-effective caching problem in LLM inference. Increasing volume of query brings increasing resource consumption. Using caching to store important/frequent queries and answers can help to save the computational resources. This paper proposes a Knapsack bandit framework to characterize the learning process of unknown queries’ costs and find the optimal caching strategy. The paper proposes both a batched and online version of algorithm to solve the problem. The former with $O(T)$ computation cost and larger memory cost achieve $O(\sqrt{T}\log^{3/2}T)$ regret and the latter with $O(\log T)$ computation cost achieve $O(\sqrt{T}\log^{2}T)$ regret. Experiments on both synthetic and real-world datasets show advantage over baselines.
+
+### Strengths
+1.	The paper study a more general knapsack bandit problem for caching in LLM inference that considers the cost and weight differences over different queries. 
+2.	The paper proposes an Online Stream Cache Bandits algorithm to deal with the problem. The algorithm calls the oracle at most $O(\log T)$ times and can achieve sub-linear regret when learning the optimal caching strategy.
+
+### Weaknesses
+1.  In assumption 2, it has been assumed that each query would appear with probability at most ½. This assumption may be too strong. What would happen if this assumption is not satisfied? Specifically, in real-world scenarios, a few queries might exhibit significantly higher frequencies, potentially exceeding 1/2. The theoretical implications of violating this assumption, particularly on the regret bound, need further clarification. It's unclear how the algorithm would behave if a single query dominates the request stream.
+2.  The regret depends on $1/p^*$ where $p^*$ is the minimum sampling probability among all queries. This term may be very large and dominate the result. Intuitively speaking, though there may exist a query with smaller sampling probability and it is hard to observe its cost, its influence to the final reward is also very limited. So in this case, the query does not need to be observed enough times as though queries with larger sampling probability, and thus the dependence on $1/p^*$ can be improved. Can authors comment on this? This dependence on the minimum sampling probability seems overly sensitive to rare queries, and it's unclear if this is a fundamental limitation or an artifact of the analysis. The analysis should explore whether the regret can be bounded by a more robust measure that is less sensitive to the smallest probabilities.
+3.  In Algorithm 2, the authors claim that it does not need to store all queries and answers. However, in Line 3-7, the algorithm still needs to check whether the query has been seen before. So it still needs to store all query information and pay additional memory cost. The claim of reduced memory cost is misleading since the algorithm still needs to maintain a record of all queries to check for prior occurrences. This aspect needs to be clarified, and the actual memory savings should be quantified.
+4.  Line 205, typo.
+5.  Line 409, ‘additional computational cost’ may bring confusion.
+6.  In experiments Line 518, what does cache length mean? Does it refer to the number of queries that can store or the number of chars in the query?
+
+### Questions
+Please see the last part.
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+2

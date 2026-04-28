@@ -1,0 +1,182 @@
+# Refined Tensorial Radiance Field: Harnessing coordinate based networks for novel view synthesis from sparse inputs
+
+- Decision: Reject
+- Avg Score: 4.75
+- Scores: 5, 3, 5, 6
+
+## Abstract
+The multi-plane encoding approach has been highlighted for its ability to serve as static and dynamic neural radiance fields without sacrificing generality.
+This approach constructs related features through projection onto learnable planes and interpolating adjacent vertices. This mechanism allows the model to learn fine-grained details rapidly and achieves outstanding performance. 
+However, it has limitations in representing the global context of the scene, such as object shapes and dynamic motion over times when available training poses are sparse. 
+In this work, we propose refined tensorial radiance fields that harness coordinate-based networks known for strong bias toward low-frequency signals.
+The coordinate-based network is responsible for capturing global context, while the multi-plane network focuses on capturing fine-grained details.
+We demonstrate that using residual connections effectively preserves their inherent properties.
+Additionally, the proposed curriculum training scheme accelerates the disentanglement of these two features. 
+We empirically show that the proposed method achieves comparable results to multi-plane encoding with high denoising penalties in static NeRFs. Meanwhile, it outperforms others for the task with dynamic NeRFs using sparse inputs.
+In particular, we prove that excessively increasing denoising regularization for multi-plane encoding effectively eliminates artifacts; however, it can lead to artificial details that appear authentic but are not present in the data. 
+On the other hand, we note that the proposed method does not suffer from this issue.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes a new approach for novel view synthesis from sparse input images with neural field representations. Based on  the existing work "TensorRF", this paper extends the representation with an additional coordinate-based network that should capture global context. Furthermore, the authors propose a progressive weighting scheme for enabling low-frequency modeling with the coordinate-based network and fine-grained details with a triplane representation. 
+The authors conduct experiments on static and dynamic scenes and compare them to various baseline methods such as TensoRF, INGP, FreeNeRF, HexPlane and more.
+
+### Strengths
+The paper is well written and the method is explained in detail.
+The visuals in paper are very pleasing and help to understand the method, especially Figure 2 and 3. 
+Related work is well covered.
+Various baseline methods are used.
+
+### Weaknesses
+1) In my view, the related work section misses concrete details on the relation of existing works to the proposed paper, e.g. in the “NeRFs in the sparse inputs” paragraph it stays unclear which of the mentioned limitations is resolved with the proposed method. Please provide more discussion here.
+
+2) A major limitation of the experimental evaluation is that there is no discussion of training time and overall model size/ number of parameters. A major contribution of previous works (TensoRF and iNGP) is the extremely fast training time (TensoRF ~10min) and model compactness which mainly comes from the fact that only shallow MLPs are used. I’m wondering how the proposed approach performs in training time and model size.
+
+3) It would be great to have experiments on more realistic data, e.g. for the dynamic case there is the  Plenoptic Video dataset used in the HexPlane paper.
+
+4) The contribution is rather limited to extended architecture, additional loss function and a weighting strategy. Even though numbers improve, the technical novelty on top of existing work, e.g. Hexplanes and TensorRF is minor and it remains unclear if it is even worse in terms of training time and model size.
+
+### Questions
+It would be great to hear the authors opinion on the weaknesses 2) about the training time and model size. Can you provide numbers for the training time in comparison to the baselines on both tasks?
+
+Please follow up on 1) to get a more concrete idea how the author's works position in this field.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes to use a hybrid of coordinates and multi-plane features for novel view synthesis from sparse inputs. The paper finds that coordinate-based network is better for capturing global context while the multi-plane features are better for fine-grained details. Therefore, the paper also proposes a curriculum training scheme for coarse-to-fine training. The coordinate network is first trained to learn global context, which provides a good initialization especially in the case of dynamic motion and sparse inputs. Then the multi-plane features are activated and increasingly weighted in accordance with the training iterations. Experiments show that the proposed method outperforms dynamic NeRFs using sparse inputs.
+
+### Strengths
+- The paper provides enough literature review and backgrounds.
+- The paper proposes some effective techniques to improve the existing nerf model. The idea of using the hybrid of coordinate network (for global context) and multi-plane features (for details) seems reasonable to me, especially from the view of optimization. To better train the model, the author also provides a curriculum training scheme. The paper provides experiments to validate the idea.
+- Codes are provided.
+
+### Weaknesses
+ - The main concern for the paper is the limited novelty. Although the paper does provide some effective techniques, the majority part of the design heavily relies on several existing methods, such as the multi-plane features and the Laplacian smoothness. The combination of the existing two popular design (coordinate network and multi-plane features) seems direct and straight-forward to me. For me, the contribution of this paper is mainly technical (but still limited). It would be better if any theoretical explanation is provided.
+- Some parts of the paper are not clear and some experiments might be needed (see Questions).
+- The paper lacks a thorough analysis of the computational cost. While the authors mention the method is slower than some baselines, there's no detailed breakdown of where the computational overhead comes from. This makes it difficult to assess the practical applicability of the method, especially for real-time or resource-constrained scenarios. The paper should include a more detailed analysis of the time complexity and memory usage, and compare it with the baselines under similar conditions.
+- The paper does not adequately address the potential limitations of the proposed curriculum training scheme. While the idea of coarse-to-fine training is intuitive, the paper lacks a discussion on the sensitivity of the method to the specific weighting function and the schedule used for the multi-plane features. It is unclear how these parameters are chosen and whether the method is robust to different choices. An ablation study on different weighting functions and schedules would be beneficial to understand the impact of these design choices.
+
+### Questions
+- "The key difference is a channel-wise weighting function for multi-plane features": are there any quantitative ablation studies on the training scheme?
+- Figure 3 is quite confusing, which is inconsistent with Figure 4. In Figure 3, is the coarse rendering image just for illustration or is it indeed generated as intermediate output?. What does the MLP and Residual MLP correspond to in Figure 4?
+- Equation (3): the two conditions seem overlapped.
+- What is the run time of the proposed method compared to baselines?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes a simple but effective improvement for NeRF from sparse inputs, which combines multi-plane encoding with coordinate-based networks. Specifically, the coordinate-based network captures low-frequency structure and the multi-plane encoding is used to model the high-frequency details of the reconstruction. Experimental results justify the effectiveness of the proposed method.
+
+### Strengths
+- The proposed idea is easy to understand.
+- The results are good and look visually-pleasing.
+
+### Weaknesses
+ - The technical novelty is limited. Specifically, the proposed method is a simple combination of multi-plane encoding with coordinate-based networks, both of which are from previous methods, i.e., HexPlane and the original NeRF. The curriculum weighting strategy is more similar to a training trick. Few new technologies were proposed.
+- It would be better to put the results side by side in the supplementary video to facilitate comparison.
+
+### Questions
+Please see weaknesses above.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The paper proposes a method called refined tensorial radiance fields that combines coordinate-based networks and multi-plane encoding for novel view synthesis from sparse inputs. The propose method utilizes the propoties of coordinate-based networks to capture the low-freqency signals of the scene, and employs multi-plane encoding to focus on the high-frequency details. A curriculum training scheme is also proposed to progressively adjusts the weights of multi-plane features to prevent overfitting.
+The paper conducts experiment on both static and dynamic NeRF datasets with sparse inputs. The proposed method outperforms the baselines in terms of PSNR, SSIM, and LPIPS metrics. Experiments also demonstrate the robustness and stability of the proposed method across different scenes and regularization values.
+
+### Strengths
+Strengths:
+- Overall idea is simple and easy to understand. Writting is overall clear.
+- Enough information is provided for reproduce. Code is also provided as supplemental materials to improve reproducibility.
+- Dense ablation studies are provided in the paper and supplemental materials.
+
+### Weaknesses
+ - This paper looks like a technical report more than a technical paper. The key insight I read from this paper is that "the coordinate-based features are responsible for capturing global context, while the multiple-plane features are responsible for capturing fine-grained details.". Yet there lacks further explanation and in-depth discussions related to this insight. Specifically, it is well known for NeRF that coordinate input itself struggles at fitting high-frequency details, and thus freq-based positional encoding and its variants [1, 2, 3] has been proposed to resolve this problem. Specifically, in [1] there are discussions and analysis (from NTK perspective) that coordinate input with Fourier representations is able to (1) learn high-freq details and (2) with some progressive learning strategy it is able to learning the frequency space in a coarse-to-fine manner. More technical (or theoretical) discussions regarding the coordinate input and its frequency behavior would make this paper far more interesting.
+
+- Including coordinate inputs inevitably increase the computational cost, as each coordinate has to go through a (usually larger) MLP network instead of grid sampling and small MLP feed-forward as multi-plane feature input. In fact, one key motivation of multi-plane methods is decreasing the training and rendering time required. The paper seems not include any information and discussions regarding training time, computation cost, FPS, etc., which makes comparisons to multi-plane based methods incomplete.
+
+### Questions
+- Regarding the coordinate input: What kind of positional encoding is used?
+- Regarding the results (especially for supp. video): How many input views used for objects shown in supp. video? It seems improvements over HexPlane on Dynamic NeRFs are subtle - there are still strong ghost artifacts between frames and the rendered image is noisy.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

@@ -1,0 +1,166 @@
+# Spike-driven Transformer V2: Meta Spiking Neural Network Architecture Inspiring the Design of Next-generation Neuromorphic Chips
+
+- Decision: Accept
+- Avg Score: 5.67
+- Scores: 6, 6, 5
+
+## Abstract
+Neuromorphic computing, which exploits Spiking Neural Networks (SNNs) on neuromorphic chips, is a promising energy-efficient alternative to traditional AI. CNN-based SNNs are the current mainstream of neuromorphic computing. By contrast, no neuromorphic chips are designed especially for Transformer-based SNNs, which have just emerged, and their performance is only on par with CNN-based SNNs, offering no distinct advantage. In this work, we propose a general Transformer-based SNN architecture, termed as ``Meta-SpikeFormer", whose goals are: \romannumeral1) \emph{Lower-power}, supports the spike-driven paradigm that there is only sparse addition in the network; \romannumeral2) \emph{Versatility}, handles various vision tasks; \romannumeral3) \emph{High-performance}, shows overwhelming performance advantages over CNN-based SNNs; \romannumeral4) \emph{Meta-architecture}, provides inspiration for future next-generation Transformer-based neuromorphic chip designs. Specifically, we extend the Spike-driven Transformer in \citet{yao2023spike} into a meta architecture, and explore the impact of structure, spike-driven self-attention, and skip connection on its performance. On ImageNet-1K, Meta-SpikeFormer achieves 80.0\% top-1 accuracy (55M), surpassing the current state-of-the-art (SOTA) SNN baselines (66M) by 3.7\%. This is the first direct training SNN backbone that can simultaneously supports classification, detection, and segmentation, obtaining SOTA results in SNNs. Finally, we discuss the inspiration of the meta SNN architecture for neuromorphic chip design.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The authors describe a new spiking transformer architecture and
+investigate the performance on a number of benchmarks, such as image
+classification (ImageNet-1k), object detection and activity
+recognition. They based their architecture mainly on the previously published
+spike-driven transformer (Yao et al. 2023), however, more initial conv layers are
+added, the attention mechanism is changed somewhat, as well as some
+other previously published aspects are incorporated (e.g. repconv, sepconv). The
+model improves the SNN result for ImageNet compared to earlier works,
+and shows good performances on the other benchmarks as well.
+
+### Strengths
+In general, it is a well written paper discussing an improved model
+architecture and showing its performance. While performance is indeed
+improved the architecture seems very much in spirit of Yao et al. with
+some tweaks (e.g. more CNN layers) and a changed attention (matrix
+product instead of hadamard, which however, has worse
+complexity).   Here, it is shown additionally that the
+model performs well on other tasks as well, which is,
+however, generally known for a transformer-like architectures and
+thus not very surprising. The comparison and ablations with different
+attention mechanisms and short-cut structures is interesting.
+
+### Weaknesses
+While the study is well done, the contributions are
+rather incremental as the bulk of the model architecture was
+presented in earlier papers.
+
+
+
+### Questions
+- The main argument and novelty of the paper seems to be the "meta"
+aspect of the architecture. I am not following the argument made
+here. What exactly is meant with "meta" here? Its broad versatility for
+different datasets? 
+
+- While the accuracy on ImageNet-1k is improved compared to Yao et
+al. (79.7\% versus 76.3\%), the energy consumption is almost 10x the
+number (52.5 versus 6.1 mJ, according to Table 1). Maybe this is due
+to the more complex attention algorithm (although in the ablation
+table 5 only a moderate energy reduction from SDSA-3 -> SDSA-1 is
+mentioned)?  However, in section 4.1 the power numbers written look
+very comparable between the models (11.9 versus 10.2mJ) since one is
+apparently stated for T=1 and the other for T=4. Should one not
+compare T=4 with T=4? Would be also helpful to discuss the 10x power
+increase and the dependence on T.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper extends the previous Spike-driven Transformer into a meta-structure with new macro-level conv and new self-attention SNN block designs, achieving SOTA accuracies on four types of vision tasks with controlled model parameters.
+
+### Strengths
+- Clear paper structure and easy-to-follow presentation.
+- Compared to the previous Spiken-driven Transformer, the proposed new one achieves the best accuracy.
+- Extensively evaluated on four vision tasks: image classification, event-based action recognition,  currently the largest event-based human activity recognition dataset), object detection, and semantic segmentation.
+- Novel new self-attention SNN implementation that contributes to accuracy gain.
+
+### Weaknesses
+ * Only focus on ViT. Although the paper claims a general spike-driven Transformer, it only discusses vision tasks and elaborates on a Transformer design for vision tasks with a two-stage Conv Block. It would be more beneficial to add a discussion on how to extend to language tasks.
+
+### Questions
+* Can the authors comment on how to extend the proposed techniques to Transformer for language tasks?
+* Can the authors provide the training costs of the Spiking Transformer with vanilla Transformer models?
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This work proposes a transformer-based spiking neural network, Meta-SpikeFormer, that can achieve 1) low power; 2) versatility; and 3) high accuracy by a meta architecture. This work explore the impact of structure, spike-driven self-attention, and skip connection on the performance of Meta-SpikeFormer. On ImageNet-1K, Meta-SpikeFormer achieves 80.0% top-1 accuracy (55M), surpassing the current state-of-the-art (SOTA) SNN baselines (66M) by 3.7%.
+
+### Strengths
++ This work proposes a transformer-based spiking architecture consisting of RepConv2, SDSA, and ChannelMLP.
++ This work compares itself against prior SNN-based designs.
+
+### Weaknesses
+ - The motivation of this work is weak. Why is SNN important?
+- A metric of the result is not clear. How is the "power" value computed?
+
+- "On ImageNet-1K, Meta-SpikeFormer achieves 80.0% top-1 accuracy (55M)" is not the state-of-the-art. There are many prior works which can outperform this result. see: https://paperswithcode.com/sota/image-classification-on-imagenet
+
+For example, tinyVIT https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136810068.pdf
+tinyVIT can achieve top-1 accuracy 80% on imagenet-1k by only 5M parameters.
+
+Another example is, efficientNet B3: https://proceedings.mlr.press/v97/tan19a/tan19a.pdf
+efficientNet B3 can obtain top-1 accuracy 81.1% on imagenet-1k by only 12M parameters.
+
+### Questions
+1. Why is the SNN architecture interesting and important?
+"On ImageNet-1K, Meta-SpikeFormer achieves 80.0% top-1 accuracy (55M)" is not the state-of-the-art. There are many prior works which can outperform this result. see: https://paperswithcode.com/sota/image-classification-on-imagenet
+
+For example, tinyVIT https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136810068.pdf
+tinyVIT can achieve top-1 accuracy 80\% on imagenet-1k by only 5M parameters.
+
+Another example is, efficientNet B3: https://proceedings.mlr.press/v97/tan19a/tan19a.pdf
+efficientNet B3 can obtain top-1 accuracy 81.1\% on imagenet-1k by only 12M parameters.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

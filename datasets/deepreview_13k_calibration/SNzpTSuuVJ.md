@@ -1,0 +1,177 @@
+# Every Mistake Counts: Spatial and Temporal Beliefs for Mistake Detection in Assembly Tasks
+
+- Decision: Reject
+- Avg Score: 4.50
+- Scores: 5, 5, 3, 5
+
+## Abstract
+Assembly tasks, as an integral part of daily routines and activities, involve a series of sequential steps that are prone to error. This paper proposes a novel method for identifying ordering mistakes in assembly tasks based on knowledge-grounded beliefs. The beliefs comprise spatial and temporal aspects, each serving a unique role. 
+Spatial beliefs capture the structural relationships among assembly components, indicating their topological feasibility. Temporal beliefs model the action preconditions and enforce sequencing constraints. Furthermore, we introduce a learning algorithm that dynamically updates and augments the belief sets in an online manner. 
+To evaluate our approach, we first test its ability to deduce the predefined rules using synthetic data from industry assembly, and then apply it to a real-world dataset, enhanced with a new collection of annotations providing part information. We demonstrate our framework achieves superior performance in detecting ordering mistakes under both synthetic and real-world settings.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper presents a method for detecting ordering mistakes in assembly tasks. The authors introduce two beliefs (spatial and temporal beliefs) in the method for modeling the part relationships and propose BeliefBuilder/Inferencer for training/test. The method is tested on a synthetic dataset and a real dataset Assembly101.
+
+### Strengths
+- The proposed spatial and temporal beliefs, and the mechanism for modeling the part assembly ordering, make sense and look valid.
+- Empirical results show improved performance over baseline methods.
+
+### Weaknesses
+ - The paper is hard to read and follow. The system is described in a complicated way, though the underlying mechanism is straightforward.
+- The paper only tackles ordering assembly mistakes, which is just one type of failures. LEGO construction tasks are also excluded.
+- The method avoids perception and reasoning, but instead resorts to human annotations for the parts and the steps, which is an unrealistic simplification of the problem.
+
+### Questions
+See weakness
+
+### Soundness
+2 fair
+
+### Presentation
+1 poor
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper is concerned with identifying ordering mistakes in assembly tasks. The proposed approach uses spatial and temporal beliefs that store structural and ordering constraints respectively. These are then used to infer mistakes in action sequences. The paper evaluates on both synthetic and real-world data.
+
+### Strengths
+- Interesting subject matter and difficult problem. The paper explains well the non-obvious challenges behind detecting ordering mistakes.
+
+- The modeling of the temporal belief is intuitive and well thought out.
+
+### Weaknesses
+ - Writing needs some improvements. For example, the task needs to be explained better. Especially for readers that are unfamiliar with the assembly ordering mistake task, it is not clear whether the input is a sequence of images or labels representing the actions. I assume it is the latter, since the authors provide a separate Visual Integration experiment towards the end of the paper. Moreover, if the part-to-part annotations and the synthetic dataset are treated as contributions, then more information should be included in the main paper, rather than the supplementary material. Please add a couple examples of the synthetic sequences with mistakes.
+
+- In my understanding, the BeliefBuilder is creating an explicit rule graph that only applies to a specific object and its set of components. Aren't explicit knowledge grounded beliefs very limited in terms of generalization? Wouldn't it be more useful to learn a soft graph with latent representations that could potentially be applied to new objects?
+
+### Questions
+- What is the performance of the Inferencer on Seen vs Unseen objects?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper studies a relatively new and interesting problem of mistake detection in assembly tasks. In particular, the paper deals with the detection of ordering mistakes only using the spatial and temporal knowledge of the part names and their action verbs (attach or detach). Spatial knowledge represents the topological conformity, whereas the temporal knowledge accounts for the sequencing constraints. The paper does not deal with assembly mistakes occurring due to orientation or fastening, and also leaves out the perception problems that need to be addressed for this task. The method uses synthetic dataset to determine the efficacy of their pre-conditions with respect to the state of the art method Sohn et al. The mistake detection of this proposed approach is evaluated on the annotated toy assembly dataset - Assembly 101.
+
+### Strengths
+The paper presents a timely work that focuses on a new and understudied problem of ordering mistake detection in assembly tasks.
+The paper is well written and structured, providing clarity to the reader through good examples in the text, wherever required.
+
+### Weaknesses
+Trivial task definition: Examining only the errors related to the ordering in assembling tasks using the ground truth annotated object names and action verbs seems trivial, unless the issues related to orientation or fastening and the uncertainties in the object detection, shape, size or pose estimation are taken into consideration.
+Perception is ignored : Perception is an essential component of this problem statement. The real-life applicability and deployment seems impractical, unless the method is evaluated properly with a perception module that addresses object detection, shape & pose estimation etc. The results shown in the paper using the TSM perception to predict only the action verbs - attach or detach, shows a drop in recall by 35.9% and precision by 16.1%, highlighting the significance of perception for this problem.
+Limitations in the approach : The proposed approach is based on pure logic, set theory and graph representation of the spatial and the temporal relations. The entire pipeline relies on hard-coded logic and does not employ any learning mechanisms, leading to re-initialisation and re-population of the spatial and temporal knowledge, along with the preconditions, each time this method needs to assess a new object assembly. On top of that further improvements in this deterministic pipeline needs to be manually accounted for, hence inclusion of this paper is of little importance to the learning community.  
+Limited evaluation : The Assembly 101 dataset has only 328 distinct action sequences to construct 101 different toys and out of this only 1 randomly selected sequence is used for testing for each toy and remaining are used to create the spatial & temporal knowledge and the preconditions. The complexity of sequence in assembling a toy is not an apt illustration of the difficulty in assembling an object with numerous parts, involving a large complex sequence, say an electronic gadget, automobile etc. In addition, this dataset is too small in size to effectively represent all the possible scenarios of ordering mistakes that occur in real-life large scale assembly, for example a factory. The criteria of the logic module appears to be tailor made for the toy assembly dataset. Therefore, its performance in a different assembly scenario, with more parts and complex sequences needs to be sufficiently evaluated to establish the generalizability.
+Limitations in the logic : In Tab. 1, the proposed method shows a significant improvement over Sohn et al. (2020), but that is likely because of the inclusion of an additional case (intransitive temporal error) in the logic module. Yet, the proposed approach is unable to achieve 100% accuracy, precision or recall, clearly showing gaps in their logic module to determine all the possible cases of preconditions. Similarly in Tab. 2,  the proposed approach performs better than the existing methods, but I am unable to contemplate a reason for its failure to achieve perfect accuracy and F1, except the possibility of missing out on certain scenarios in its logic criterion, despite being a hard coded algorithm.
+Minor Weaknesses : 
+Clumsy Notations : Too many redundant symbols and equations appear in the paper whose purpose could have been simply stated in words.
+Clarity in Fig 3 : Edges for both transitive and intransitive graphs have the same color. Especially in the intransitive graph, the “final mistake” edge could have been highlighted differently.
+Clarity in Fig 5 : Please state the numerical identity of the assembly parts clearly to make the figure more intelligible
+
+### Questions
+Is it really difficult to integrate state of the art perception with this pipeline? If so, why? It would be really helpful if you could provide the end-to-end results of this method and state-of-the-art (SOTA) with perception. A real-time video demonstration showing the ordering mistake detection in the assembly task, using only the RGB frame, would be very intriguing. 
+Is it not possible to create and evaluate this method and SOTA on a larger dataset with different objects, more complex sequences and more parts? If so, what are the difficulties? A larger dataset would alleviate the concerns of generalizability.
+If perception is included in this pipeline and you are able to estimate the object pose, how difficult would it be to extend this method to detect orientation errors?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The proposed paper introduces an approach for identifying ordering mistakes in sequential assembly tasks by leveraging knowledge-grounded belief sets. Belief sets are defined to either be spatial or temporal and allow expressing unique characteristics of assembly tasks. The introduced method is validated on synthetic and real datasets.
+
+### Strengths
+- By focusing on solving ordering mistakes of assembly tasks, this paper addresses an important and open research problem toward solving assembly tasks. 
+- Experiments are based on synthetic as well as on real data. 
+- The paper extends Assembly101, an existing dataset, with new labels (although it is not clear if the authors are willing to share their labels and to contribute to the existing work). 
+- The proposed framework of belief construction (BeliefBuilder) and belief learning (Inferences) appears technically sound and novel.
+
+### Weaknesses
+ - The paper does not discuss any limitations. 
+- The paper lacks a better exposition (text quality, mathematical notation, figures), which makes it difficult to fully assess the contribution. 
+- Missing ablation studies.
+
+### Questions
+- Section 3.2: What is meant by 'given by definition as A_{ij}'?
+- The in-text description of Figure 2 refers to 'edges', but no edges are shown in Figure 2 (left). Does this mean the graph has no edges?
+- Section 3.2: The text states that 'completion occurs when the episodic context M fully traverses the graph'. Does this refer to the rule graph?
+- What is a 'focal component pair'?
+- The mathematical notation appears convoluted and more difficult to follow that it seems necessary. After 
+reading Section 3.2 and 3.3, it was not clear how Spatial and Temporal beliefs are defined. 
+- Given the quality of the exposition, I have the impression that this paper was rushed and that the text needs to be refined prior to publishing this work. 
+- Section 4.3: What are 'fine-grained' mistakes?
+- To assess the performance of the Inferences vs the BeliefBuilder, I would appreciate ablation studies.
+
+### Soundness
+2 fair
+
+### Presentation
+1 poor
+
+### Contribution
+3 good

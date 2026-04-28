@@ -1,0 +1,368 @@
+\title{Zero Shot Generalization of Vision-Based RL Without Data Augmentation}
+
+\begin{abstract}
+Generalizing vision-based reinforcement learning (RL) agents to novel environments remains a difficult and open challenge. Current trends are to collect large-scale datasets or use data augmentation techniques to prevent overfitting and improve downstream generalization. However, the computational and data collection costs increase exponentially with the number of task variations and can destabilize the already difficult task of training RL agents. In this work, we take inspiration from recent advances in computational neuroscience and propose a model, Associative Latent DisentAnglement (ALDA), that builds on standard off-policy RL towards zero-shot generalization. Specifically, we revisit the role of latent disentanglement in RL and show how combining it with a model of associative memory achieves zero-shot generalization on difficult task variations \textit{without} relying on data augmentation. Finally, we formally show that data augmentation techniques are a form of weak disentanglement and discuss the implications of this insight. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Training generalist agents that can adapt to novel environments and unseen task variations is a longstanding goal for vision-based RL. 
+RL generalization benchmarks have focused on data augmentation to increase the amount of training data available to the agent while preventing model overfitting and increasing robustness to environment perturbations \citep{drq, sada, svea}.
+This follows the current trend in the broader robot learning community of training large models at scale on massive datasets \citep{open-vla, td-mpc2, octo} with the hope that the model will generalize.
+However, a significant drawback of these approaches is, intuitively, that they require larger models, more training data, longer training times, and have greater training instability that must be dealt with care when training RL agents. 
+
+Yet when we examine biological agents, we find that humans and, indeed, many other primates are able to quickly adapt to task variations and environment perturbations \cite{brain_solve_recognition, friston2010free}.
+While all aspects of biological intelligence that contribute to generalization have yet to be understood, there is some understanding in the recent neuroscience literature of aspects related to representation learning that we look to for inspiration. 
+Many parts of the brain in human and non-human primates contain neurons that represent single factors of variation within the environment, such as grid cells \citep{grid_cells}, object-vector cells \citep{obj-vec-cells}, and border cells \citep{border_cells} that represent euclidean spaces, distance to objects, and distance to borders, respectively. 
+Such \textit{disentangled representations} have been theorized to facilitate compositional generalization \citep{disentangle_comp_gen} and have been studied with curated datasets where the factors of variation are known \citep{bVAE, bio_ae}, and even within the context of RL \citep{darla}. 
+It is then to our surprise, with limited exceptions \citep{ted, midlevel_reps}, that disentangled representation learning has not garnered much attention within robot learning or RL more generally. 
+One potential reason for this is that learning disentangled representations while simultaneously learning an RL policy is extremely difficult. 
+Indeed, \citet{darla} required a two-stage approach where the disentangled representation was learned first, followed by policy learning. 
+In addition, \citet{sac_ae} found that using a $\beta$-VAE directly led to training instability and worse performance, instead opting to use a deterministic autoencoder with softer constraints. 
+Finally, there is counter-evidence by \citet{disentangle_not_generalize} to suggest that, while disentangling representations may \textit{facilitate} generalization, it alone cannot achieve out-of-distribution (OOD) generalization. 
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\linewidth]{images/associate.pdf}
+    \caption{Disentanglement + association. A disentangled representation is learned using the original training data (top). When encountering an OOD sample (bottom), individual latents can be compared and mapped back to known values (colored green). Latent dimensions that are more OOD (colored red) can be mapped back without affecting other latent dimensions.}
+    \label{fig:associate}
+\end{figure}
+
+We hypothesize that one of the potential key missing ingredients to OOD generalization is \textit{associative memory} mechanisms that use prior experiences to help inform decision-making in light of new data in a \textit{disentangled} latent space.
+Intuitively, if the representation of a stored memory and new observation are disentangled, then the projection of the new observation onto the stored memories becomes a factorized projection in which individual factors can be compared independently of other factors (Figure \ref{fig:associate}).
+Indeed, many of the aforementioned single-factor neurons exist in the entorhinal cortex in the hippocampus \citep{grid_cells}, responsible for, amongst other things, memory recollection and association. 
+Recent literature suggests that the hippocampus learns flexible representations of memories by decomposing sensory information into reusable components and has been implicated in other cognitive tasks such as planning, decision-making, and imagining novel scenarios \citep{behrens2018cognitive, rubin2014role}.
+It would then seem that the disentanglement of high-dimensional data into a modular, reusable representation is simply the first step in a multi-step process that enables generalization in biological agents. 
+Inspired by these two ingredients found in nature, we propose a new method, ALDA (Associative Latent DisentAnglement), that 1. learns a disentangled representation from the training data and 2. uses an associative memory model to recover data points in the original training distribution zero-shot given OOD data. 
+We demonstrate how this approach enables zero-shot generalization on a common generalization benchmark for vision-based RL without using data augmentation techniques or techniques that remove distractor variables from the latent space. 
+Finally, we provide a formal proof showing that data augmentation methods for vision-based RL create what we refer to as "weak" disentanglement, where the latent space is perhaps partitioned into two or more categories but not perfectly factorized into individual subcomponents. 
+We conclude by discussing the implications of this insight and future directions of this line of research. 
+
+
+\section{Background}
+
+\subsection{Reinforcement Learning}
+
+We wish to learn a policy $\pi$ that maps states to optimal actions that maximize cumulative reward. 
+The agent-environment interaction loop is typically formulated as a Markov Decision Process (MDP) $(\mathcal{S}, \mathcal{A}, \mathcal{R}, \mathcal{P}, \gamma)$, where $\mathcal{S}$ and $\mathcal{A}$ are the state and action spaces, $\mathcal{R}(s, a)$ is the reward function, $\mathcal{P}(s' | s, a)$ is the probabilistic transition function, and $\gamma$ is the discount factor. 
+The policy $\pi$ learns a mapping of state to action with the objective of maximizing cumulative discounted return $G_t = \mathbb{E}\left[ \sum_{t=0}^T \gamma^t R(s_t, a_t) \right]$.
+In vision-based RL, we do not assume access to the low dimensional state $s_t \in \mathcal{S}$. 
+Instead, we must infer $s_t$ given high-dimensional image observations $o_t \in \mathcal{O}$, making the problem a partially observable MDP, or POMDP $(\mathcal{S}, \mathcal{A}, \mathcal{R}, \mathcal{P}, \mathcal{O}, \gamma)$, where $\mathcal{O}$ is the space of high-dimensional observations. 
+
+\textbf{Soft Actor-Critic} \citep{sac} is an off-policy actor-critic algorithm that jointly trains a policy $\pi$ and state-action value function $Q$ using the maximum entropy framework. 
+The policy optimizes the maximum entropy objective $\text{argmax}_{\pi} \sum_{t=1}^T \mathbb{E}_{(s_t, a_t) \sim \rho_{pi}}[r_t + \alpha \mathcal{H}( \pi(\cdot | s_t  ))]$.
+The optimal $Q$ function $Q^*(s, a)$ is estimated using temporal difference learning \citep{td_learning} by minimizing the soft Bellman residual:
+
+\begin{equation*}
+    J(Q) = \mathbb{E}_{(s_t, a_t, s_{t+1} \sim \mathcal{D}}\left[  (Q(s_t, a_t) - r_t - \gamma y)^2  \right].
+\end{equation*}
+
+Here, $y$ is the soft $Q$-target, which is computed as $y = r(s_t, a_t) + \gamma ( \text{min}_{\theta_{1, 2}} Q_{\theta_i^{'}} (s_{t+1}, a_{t+1}) - \alpha \text{log}\pi(\cdot | s_{t+1}))$. We can then describe the policy's objective as: 
+
+\begin{equation*}
+    J(\pi) = \mathbb{E}_{s_t \sim \mathcal{D}} \left[  \text{min}_{i=1,2} Q_{\theta_i}(s_t, a_t) - \alpha \text{log} \pi (a_t | s_t)  \right].
+\end{equation*}
+
+A replay buffer $\mathcal{D}$ is maintained that contains transition tuples $(s_t, a_t, s_{t+1}$) collected from prior interactions of a potentially different behavior policy. 
+Since the off-policy RL formulation does not require transitions to be from the current behavior policy, we can reuse prior experience to update the policy and the $Q$-function.
+We use SAC as a foundation for our method, and while we propose some architectural changes to improve the synergy between SAC and our method, the changes are generally applicable to most off-policy RL algorithms. 
+
+\subsection{Disentangled Representation Learning.}
+
+\textbf{Nonlinear ICA}: The disentanglement problem is sometimes formulated in the literature \citep{qlae} through nonlinear independent component analysis (ICA) due to their conceptual similarity. We follow suit since the notation will be useful in later sections. Suppose there are $n_s$ nonlinear \textit{independent} variables $s_1, ..., s_{n_s}$ that are the sources of variation of the images in the data distribution. A data-generating model maps sources to images: 
+
+\begin{equation}
+    p(\textbf{s}) = \prod_{i=1}^{n_s} p(s_i), \textbf{o} = g(\textbf{s})
+\end{equation}
+
+where $g: \mathcal{S} \rightarrow \mathcal{O}$ is the non-linear data generating function.
+The nonlinear ICA problem is to recover the underlying sources given samples from this model. Similarly, the goal of latent disentanglement is to learn a latent representation \textbf{z} such that every variable $z_1, ..., z_{n_s} \in \textbf{z}$ corresponds to a distinct source $s_1, ..., s_{n_s}$. 
+Unfortunately, nonlinear ICA is \textit{nonidentifiable} -- that is, there are many decompositions of the data into sets of independent latents that fit the dataset, and so recovering the true sources reliably is impossible. 
+Thus, the field of disentangled representation learning has focused more on empirical results and evaluation metrics on toy datasets where the true sources of variation are known. 
+Given a dataset of paired source-data samples ${(\textbf{s}, \textbf{o} = g(\textbf{s}))}$, the goal is to learn an encoder $f: \mathcal{O} \rightarrow \mathcal{Z}$ and a decoder $\hat{g}: \mathcal{Z} \rightarrow \mathcal{O}$ such that the disentanglement evaluation metrics are high while also maintaining acceptable reconstructions of the data. 
+Disentanglement models are typically constructed as (variational) autoencoders \citep{bio_ae, qlae, bVAE} and are rarely applied outside of toy datasets. 
+
+\subsection{Generalization in Vision-Based RL}
+
+Image augmentation methods have shown success and have become the go-to method for generalizing vision-based RL algorithms such as Soft Actor-Critic (SAC) \citep{sac} and TD3 \citep{td3}, generally using augmentations such as random crops, random distortions, and random image overlays to simulate distracting backgrounds. 
+Methods such as DrQ \citep{drq}, SADA \citep{sada}, and SVEA \citep{svea} regularize the $Q$ function by providing the original and augmented images as inputs into the critic. 
+In many cases, however, the image augmentations can put the training data within the support of the distributions of the evaluation environments.
+For example, the "random convolution" image augmentation changes the color of the agent and/or background, and the policy is evaluated on an environment where the color of the agent is randomized. 
+This brings into question whether these methods are truly capable of zero-shot \textit{extrapolative} generalization when the training data is made to be sufficiently similar to the test data.
+
+Beyond image augmentation techniques are methods that perform self-supervision using auxiliary objectives.
+Note that image augmentations for RL are also sometimes referred to as self-supervised objectives, however we wish to make the distinction between methods that leverage data augmentation and those that don't.
+DARLA \citet{darla}, to the best of our knowledge, is the only prior method that learns a disentangled representation of the image inputs using a highly regularized $\beta$-VAE \citep{bVAE} for zero-shot generalization in RL. 
+DARLA's approach is two-stage, where an initial dataset is collected by sampling random actions to first learn a disentangled latent representation, and then a policy is trained on this representation to maximize future return. 
+However, a significant shortcoming is that random actions may not cover the full state distribution of the agent for more complicated tasks, whereas our method jointly learns the disentangled representation and the policy. 
+SAC+AE \citep{sac_ae} trains a decoder to reconstruct the images, resulting in a rich latent space that improves performance and sample efficiency on many vision-based tasks. 
+Interestingly, SAC+AE mentions $\beta$-VAE's used by DARLA and proposes using a deterministic variant with similar constraints that shows some zero-shot generalization capability, but the authors make no mention of disentanglement and instead conclude that the key ingredient was adding a reconstruction loss as an auxiliary objective. 
+
+Another promising approach to generalization is learning a task-centric or object-centric representation using auxiliary objectives. \citet{tarp} learn a task-centric representation by using expected discounted returns as labels, with the auxiliary task being to minimize the error between the predicted and true return values using the learned representation.
+\citet{focus, dear} use segmentation masks to learn object-centric representations that are robust to background distractors. 
+One drawback of these approaches is that the latent representation overfits to the task by excluding all other information not relevant to the immediate task, usually citing that irrelevant information in the latent space hinders generalization performance. 
+However, adapting to a new task that involves information that was previously considered irrelevant becomes a challenge for these methods.
+We hypothesize that the issue is not having "irrelevant" information in the latent space but rather that the latent variables are entangled without strong priors for disentanglement. 
+A disentangled representation then paves the way for association, whereby individual dimensions of latent vectors from OOD images can be independently zero-shot mapped back to known values of those latent variables learned from the training data.
+
+\subsection{Associative Memory}
+
+An associative memory (AM) network stores a set of patterns with the intent to retrieve the most similar stored pattern given an input. 
+The best-known form is a Hopfield network, originally proposed in \citet{hopfield1982neural}, which was inspired by how the brain is capable of recalling entire memories given partial or corrupted input (e.g., recalling a food item given a particular smell).
+Classical Hopfield networks could only store and recall binarized memories, whereas modern (dense) Hopfield networks \citep{dense_AM} can work with continuous representations and are trainable as differentiable layers within existing Deep Learning frameworks \citep{hopfield_all_you_need}.
+The memory retrieval dynamics are typically formulated as a function of energy minimization. 
+Let $\xi \in \mathbb{R}^d$ be the input query pattern, and $\textbf{X} := [x_1, ... x_M] \in \mathbb{R}^{d \times M}$ be memory patterns. 
+In AM models, memories are stored on the local minima of the energy landscape, where the goal is to retrieve the closest stored pattern to $\xi$ by minimizing energy. 
+Modern Hopfield networks assume the following general form for the energy function:
+\begin{equation*}
+    E = - \sum_{i=1}^M F(x_i^T \xi).
+\end{equation*}
+In particular, by setting $F = -lse(\beta, \textbf{X}^T\xi) + \frac{1}{2} \xi^T \xi$ (\textit{lse} = log-sum-exponent), the retrieval dynamics becomes $\xi^{new} = \textbf{X}\text{softmax}(\beta \textbf{X}^T \xi)$, which is the attention mechanism \citep{vaswani2017attention} and the backbone of modern Hopfield networks.
+Follow-up works such as \citet{transformer_AM} show a tight connection between the learning dynamics of Transformers and models of associative memory. 
+
+
+
+\section{On the Relationship Between Disentanglement and Data Augmentation}
+
+\label{sec:da_and_disentangle}
+
+We begin by motivating the case for learning a disentangled representation for RL agents by showing a connection between data augmentation and disentangled representation learning. 
+Specifically, we formally prove that data augmentation is a \textit{weak} disentanglement of the latent space.
+We define weak disentanglement as a partial factorization of some but perhaps not all latent dimensions of the latent space.
+Strong disentanglement, on the other hand, is a complete factorization where each latent dimension $z_k \in \textbf{z}$ encodes for a unique source $s_i \in \textbf{s}$ and is thus linearly independent of other latent dimensions, which is the goal of disentangled representation learning. 
+\textbf{Theorem 1}: Suppose we are given a $\textbf{z} = f_{\theta}(g(\textbf{s}))$, where some latent dimension $z_k \in \textbf{z}$ approximates one or more sources. We will denote the approximations as $\hat{s_i}$.
+We can categorize the sources \textbf{s} into two categories, $D$ and $E$, which correspond to task-relevant and task-irrelevant sources, respectively.
+For any such $z_k$, if $Q^*(\textbf{z}, a)$ is an \textit{optimality invariant optimal Q-function} immune to distractor variables, then the following must be true of \textbf{z}:
+
+\begin{equation}
+ cov(\hat{s_i}, \hat{s_j} | z_k) = 0 \text{  } \forall s_i \in D, s_j \in E, z_k \in \textbf{z}.
+\end{equation}
+
+Intuitively, if data augmentation enables learning a latent representation such that the $Q(\textbf{z}, a)$, a function of \textbf{z}, is immune to distractor variables, then any dimension of the latent space that encodes for task-relevant variables cannot also encode for task-irrelevant variables. 
+Otherwise, distribution shifts involving the task-irrelevant variables would affect the $ Q$ function and, thus, the performance of the agent. 
+One of two conditions must be true: either \textbf{z} is partitioned, where some variables approximate only sources from $D$, and others only sources from $E$, or \textbf{z} contains no information about sources in $E$ altogether, both of which are a form of weak disentanglement. 
+
+We take a probabilistic perspective to see why this relationship is important. 
+Suppose $s_{1...,k} \in D$ and $s_{1+k, ..., n_s} \in E$.
+In order to learn a latent representation that contains no information about task-irrelevant sources $s_{1+k, ..., n_s}$, data augmentation methods essentially estimate the marginal distribution over task-relevant sources: 
+
+\begin{equation}
+    \label{eq:marginalize}
+    p(s_1, ..., s_k) =  \sum_{s_{k+1}} \times \sum_{s_{k+2}} \times ... \times \sum_{s_{n_s}} p(s_1, ..., s_k, s_{k+1}, ... s_{n_s}).
+\end{equation}
+
+The implication of \ref{eq:marginalize} is that we must collect data for \textit{every} possible variation of the task-irrelevant sources, which may be prohibitively expensive for real-world applications. 
+Instead, a model with strong priors that leads to disentanglement without data augmentation essentially achieves the same result without the additional costs. 
+Although the latent representation of such a model may still contain task-irrelevant features, the policy can learn to simply ignore them or associate them with known values in the presence of OOD data, as is the case with ALDA. 
+In addition, these task-irrelevant features may become relevant if the task changes (e.g., if the current task is for a manipulator to stack a blue cube, and the next task is to stack a red cube), and so it may, in fact, be important to keep them. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{images/method_diagram.pdf}
+    \caption{Diagram of our method SAC+ALDA. Trainable components are colored yellow. A strongly regularized autoencoder and the quantized latent space enable latent disentanglement. The latent model is also responsible for association when encountering OOD inputs.}
+    \label{fig:method_diagram}
+\end{figure}
+
+
+
+\section{Method}
+
+
+\textbf{Experimental Setup}. 
+We first describe the generalization benchmark and our evaluation criteria to provide additional context. 
+We train on four challenging tasks from the DeepMind Control Suite \citep{dmcontrol}.
+To evaluate zero-shot generalization capability, we periodically evaluate model performance under challenging distribution shifts from the DMControl Generalization Benchmark \citep{soda} and the Distracting Control Suite \citep{distract_cs} throughout training. 
+Specifically, we have two evaluation environments: \textbf{color hard}, which randomizes the color of the agent and background to extreme RGB values, and \textbf{distracting cs}, which applies camera shaking and plays a random video in the background from the DAVIS 2017 dataset \citep{davis}.
+
+\subsection{Disentanglement}
+
+We now describe our framework for jointly learning a disentangled representation and performing association. 
+For latent disentanglement, we choose to use QLAE \citet{qlae}, the current SOTA disentanglement method, which trains an encoder $f_{\theta}$ that maps to a continuous disentangled latent space, a discrete, parameterized latent model $l_{\psi}$, and a decoder $g_{\phi}$ that reconstructs the observation.
+Similar to VQ-VAE \citep{vqvae}, QLAE uses a discrete codebook for the latent space, except that each dimension uses its own separate scalar codebook. 
+Concretely, $Z$ is the set of latent codes defined by the Cartesian product of $n_z$ scalar codebooks $Z = V_1 \times ... \times V_{n_z}$ i.e., there are $n_z$ latent variables and $|V_j|$ discrete categories per variable.
+The continuous outputs of the encoder are the latent variables, each of which is quantized to the nearest scalar value in their respective codebooks.
+
+\begin{equation}
+    z_{d_j} = \text{argmin}_{v_{jk} \in \textbf{v}_j} |f_{\theta}(x)_j - v_{jk}|, j=1,...,n_z.
+    \label{eq: quantize}
+\end{equation}
+
+Since we cannot differentiate through $argmin$, as with VQ-VAE, the authors of QLAE use quantization and commitment losses and a straight-through gradient estimator \citep{straight_through_grad}:
+
+\begin{equation}
+    \label{eq:qlae_obj}
+    \mathcal{L}_{\text{quantize}} = || \text{StopGradient}f_{\theta}(x)) - z_{d}||_2^2, \text{   }
+    \mathcal{L}_{\text{commit}} = || f_{\theta}(x) - \text{StopGradient}(z_{d})||_2^2.
+\end{equation}
+
+The authors claim that while this is a failure mode for vector quantization, $Z$ is low-dimensional enough that, in practice, it does not meaningfully impact performance.
+While this may be true for standalone disentanglement benchmarks, we find that it causes training instability and performance degradation when jointly learning a policy for high-dimensional continuous control problems
+We propose a solution in section \ref{sec:associate} from the viewpoint of associative memory.
+
+It is common practice in many vision-based RL algorithms to utilize framestacking to incorporate temporal information into the latent space. 
+This means that the encoder accepts as input, and the decoder produces a stack of RGB images in $\mathbb{R}^{B \times Ck \times H \times W}$, where $k$ is the number of frames. 
+However, latent disentanglement models have only been shown to work on datasets of singular images and struggle to disentangle sources of individual images when given stacks of images as inputs.
+
+To resolve this issue, we fold $k$ into the batch dimension and encode/decode batches of single images in $\mathbb{R}^{Bk \times C \times H \times W}$, resulting in a batch size $Bk$ of disentangled latent vectors $z_{d} \in \mathbb{R}^{Bk \times n_{s_i}}$.
+To incorporate temporal information, we reshape the batch of latent vectors into $\mathbb{R}^{B \times k n_{s_i}}$ and feed it into a 1D convolutional neural network (CNN), producing our final latent vector $z \in \mathbb{R}^{B \times e}$. 
+$z$ is used as the state representation for the actor and critic networks, while the decoder network for the disentanglement model only ever receives the disentangled representation $z_{d}$ as input. 
+
+\subsection{Association}
+\label{sec:associate}
+
+The naive approach to performing association would be to feed the quantized latent representation through a Hopfield network.
+However, upon closer inspection of QLAE's latent dynamics, we find that most of the components of a generic associative memory model are already present, i.e., QLAE is implicitly also a Hopfield network. 
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \includegraphics[width=0.5\textwidth]{images/bio_ablation.pdf}
+    \caption{Ablation comparing SAC+QLAE to SAC+BioAE on the two distribution shift evaluation environments for the walker walk task.}
+    \label{fig:bio_ablation}
+\end{wrapfigure}
+Figure \ref{fig:bio_ablation} shows a comparison of using SAC with QLAE vs with BioAE \cite{bio_ae}, another disentanglement method that uses biologically inspired constraints and achieves comparable results on disentanglement benchmarks \citep{qlae}.
+BioAE achieves strong initial performance on the two evaluation environments, but slowly degrades over the course of training. 
+We suspect both models overfit to the training environment, but QLAE is capable of zero-shot mapping OOD latent variables to in-distribution values. To see the similarity, we first present the general framework described in \citet{universal_hopfield} of a universal Hopfield network that all feedforward associative memory networks in the literature can be factorized as: 
+
+\begin{equation}
+z = P \cdot \text{sep} (\text{sim}(X, \xi)).
+\label{eq:universal_hopfield}
+\end{equation}
+
+$P$ is a projection, \textit{sep} is a separation function, and \textit{sim} is a similarity function between the stored memories $X$ and query $\xi$.
+While $P$ is originally described as a projection matrix, we extend the definition of $P$ to be any function that projects $X$ and $\xi$ into a shared embedding space. 
+In this case, equation \ref{eq: quantize} can be interpreted as follows: $f_{\theta}$ is the projection function that projects high-dimensional images $\textbf{o}$ into an embedding space shared by the scalar codebooks $Z$, which can be interpreted as predetermined memories. 
+The closest memory is recovered by computing the $L_1$ distance, which serves as the similarity function, and $sep$ is the \textit{argmin} function.
+Through this view, we can rewrite the latent dynamics of QLAE in many ways, perhaps exchanging the similarity function for $L_2$ distance or dot product, changing the separation function, etc., as long as it follows the framework of \ref{eq:universal_hopfield}.
+Since $Z$ is a product of scalar codebooks, $L_1$ distance remains an appropriate choice for the similarity function.
+Instead, we augment the latent dynamics with a Softmax separation function as follows: 
+
+\begin{equation}
+    z_{d_j} = \text{Softmax}(-\beta L_1(f_{\theta}(\textbf{o})_j, \textbf{v}_j)) \odot \textbf{v}_j
+    \label{eq:aql}
+\end{equation}
+
+where $\beta$ is a scalar temperature parameter. 
+Equation \ref{eq:aql} can be interpreted in two ways. 
+From an associative memory perspective, attention-based Hopfield models apply Softmax to separate the local minima (stored memories) on the energy landscape, where $\beta$ controls the degree of separation, and so we've recovered the modern Hopfield memory retrieval dynamics. 
+From a purely mathematical perspective, we have what resembles the Gumbel-Softmax categorical reparameterization \citet{gumbel_softmax}, although we do not perform any sampling in our method.
+This lends a novel view on attention-based Hopfield networks -- models with a high-temperature parameter can be interpreted as classifiers over $|\textbf{X}|$ classes, where $|\textbf{X}|$ is the number of stored memories whose local minima are well separated on the energy landscape. 
+
+In the limit, as $\beta$ goes to infinity, we achieve maximum separation between memories and recover equation \ref{eq: quantize}. 
+
+Since large $\beta$ values can cause downstream gradients to vanish, we find that keeping the commitment loss from equation \ref{eq:qlae_obj} helps keep the outputs of the encoder close to the values of the latent model. 
+However, we do not optimize the codebook towards the encoder outputs i.e., we omit $\mathcal{L}_{\text{quantize}}$.
+This can be interpreted as having a set of task-optimized memories that the encoder must learn to map to under the Hopfield interpretation.
+Our final objective for ALDA is as follows: 
+\begin{equation} 
+\begin{aligned}
+            J(ALDA) &= \mathcal{L}_{\text{commit}} + \mathcal{L}_{\text{reconstruct}} \\
+        &= \mathbb{E}_{\textbf{o}_t \sim \mathcal{D} } \Big[ \Big.  || \text{StopGradient}(f_{\theta}(\textbf{o})) - \left[ \text{Softmax}(-\beta L_1(f_{\theta}(o), V)) \odot V \right]||_2^2 \\ 
+        &+ \log g_{\phi}(\textbf{o}_t | \textbf{z}_d^t) + \lambda_{\theta} ||\theta||^2 + \lambda_{\phi}||\phi||^2 \Big] \Big.
+\end{aligned}
+\end{equation}
+
+where the last two terms are weight-decay on the encoder and decoder parameters controlled by $\lambda_{\theta} \text{ and } \lambda_{\phi}$, respectively. Observations collected by the policy are stored in a replay buffer $\mathcal{D}$, from which batches are randomly sampled to train ALDA.
+We observe that this formulation considerably improves training and evaluation performance on the "color hard" environment and to a degree, on the DistractingCS environment, as shown in Figure \ref{fig:qlae_ablate}.
+
+The obvious question is, how do we set the dimensionality of $z_d$, which should 1:1 correspond to the number of sources $n_s$ if the number of sources is unknown? While there is no rigorous method to derive $|z_d|$ at this time, we empirically found that setting $|z_d|$ to within the ballpark of the size of the observation spaces for the proprioceptive, \textit{state-based} versions of the tasks seemed to work well. $|z_d|$ is set to 12 for all reported tasks. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.7\linewidth]{images/qlae_ablation.pdf}
+    \caption{Ablation comparing ALDA and QLAE. Average of 5 seeds, shaded region represents a 95\% confidence interval.}
+    \label{fig:qlae_ablate}
+\end{figure}
+
+
+
+\section{Experiments}
+
+We compare against several baselines that together represent the full range of different learning paradigms in the literature that attempt to elicit zero-shot generalization. 
+\textbf{DARLA} \citep{darla} is, to the best of our knowledge, the only other algorithm that attempts to learn a disentangled representation of the image distribution towards zero-shot generalization of vision-based RL. 
+\textbf{SAC+AE} \citep{sac_ae} uses a deterministic autoencoder with an auxiliary reconstruction objective and strong regularization that demonstrates decent zero-shot generalization capability. 
+\textbf{RePo} \citep{repo} is a model-based RL algorithm that learns a task-centric latent representation immune to background distractors. 
+Finally, \textbf{SVEA} \citep{svea} is an off-policy RL algorithm that improves training stability and performance of off-policy RL under data augmentation.
+As in their paper, we use the random overlay augmentation for SVEA, where images sampled from the Places \citep{zhou2017places} dataset of 10 million images are overlayed during training. 
+The training curves and evaluation on "color hard" and DistractingCS are presented in Figure \ref{fig:main_plots}.
+
+Excluding SVEA, ALDA outperforms all baselines on both distribution shift environments. 
+ALDA also maintains stability and high performance on the training environment, despite the disentanglement auxiliary objective and extremely strong weight decay ($\lambda_{\theta}, \lambda_{\phi} = 0.1$) on the encoder and decoder. 
+We do not expect to outperform SVEA since it uses additional data sampled from a dataset of 1.8 million diverse real-world scenes, likely putting the training data within the support of the data distributions of the evaluation environments. 
+Nevertheless, ALDA performs comparably and, in some cases, is equal to SVEA despite only seeing images from the original task. 
+Performance degrades severely for all algorithms on the DistractingCS environment.
+We suspect that, in addition to the already difficult task of ignoring the background video, camera shaking affects the implicitly learned dynamics, and thus, additional finetuning may be unavoidable for this task. 
+Still, ALDA performs better than all baselines excluding SVEA on Distracting CS as well, even matching the performance of SVEA on cartpole balance and finger spin. 
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=1.0\linewidth]{images/main_plots.pdf}
+    \caption{Top row: performance on the training environment. Middle and bottom rows are evaluation results on the "color hard" and DistractingCS evaluation environments, respectively. Average of 5 seeds, shaded region represents a 95\% confidence interval.}
+    \label{fig:main_plots}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.7\linewidth]{images/both_latent_traversals.pdf}
+    \caption{Visualization of different latent perturbations. \textbf{Top:} Traversal of select latents for the standard training environment. \textbf{Bottom:} Traversal of select latents when training directly on the color hard environment. 
+    Latents that encode for distractor variables (e.g., color) seemingly do not simultaneously encode for task-relevant variables (e.g., agent dynamics). 
+}
+    \label{fig:perturb_latents}
+\end{figure}
+
+The disentangled representation learning field primarily uses toy datasets where the ground truth sources of the data distribution are known. 
+Therefore, all disentanglement metrics we are aware of require knowing the sources, making it difficult to quantitatively evaluate disentanglement performance on DMControl. 
+In the absence of any quantitative disentanglement metrics, we opt to show empirical evidence of disentanglement in our model, presented in Figure \ref{fig:perturb_latents}.
+In this experiment, we encode an observation \textbf{o} into the disentangled latent representation $z_d = l_{\psi}(f_{\theta}(\textbf{o}))$. 
+We pick a latent variable $z_{d_i}$, traverse it while holding all other latent variables fixed, and decode the resulting latent vectors into reconstructed observations $\textbf{o}' = g_{\phi}(z_d')$.
+We find that each latent tends to learn information about a single aspect of the robot, for example, the orientation of the torso or the rotation of the left/right leg. 
+We also find empirical evidence that ALDA does not discard task-irrelevant information, but rather encodes it separately from task-relevant latent variables when training ALDA directly on the color hard environment. 
+
+
+\section{Discussion}
+
+As stated previously, the disentanglement problem by extension of nonlinear ICA is underdetermined, so there are many ways the latent space may factorize, perhaps by representing the sky and background with one latent or by separating them into two latents, etc. Given that both the task and reconstruction gradients of the critic/decoder affect the latent model/encoder, an interesting scientific and philosophical implication is that the model is potentially biased towards a disentangled representation that is \textit{useful}, although there is no way to quantitatively or qualitatively show such a result at this time. Nevertheless, it remains an interesting line of further investigation from a scientific standpoint, and perhaps, philosophically, says something about whether the question "What is the ground truth factorized representation that best explains the data?" is even the right question to ask. 
+
+RL agents deployed in the real world must constantly adapt to changing environmental conditions. 
+Much of the variance can be captured with a sufficiently large dataset.
+However, there remains a portion of the distribution containing every possible edge case and unaccounted-for variation, commonly referred to as "the long tail," that remains elusive because it is prohibitively expensive to account for every possible variation.
+Unfortunately, these uncaptured variations are frequent enough due to the ever-changing dynamical nature and complexity of the real world that deploying agents in the real world remains challenging. 
+Therefore, it seems the case that data augmentation techniques, collecting massive datasets, and the like are not sufficient to develop generalist agents capable of adaptation the way humans and other animals are. 
+That's not to say that data isn't important or a fundamental ingredient to training machine learning models. 
+In fact, the method proposed in this paper can also utilize data augmentation techniques presented in prior work, as it should. 
+Instead, our proposition is that \textit{if a data-driven model can generalize better with less data, then it will scale better with more data.}
+
+In Section \ref{sec:da_and_disentangle}, we showed how data augmentation and disentangled representation learning aim to achieve the same result -- a factorization of the latent space into separate components in order to improve downstream generalization performance. 
+Given the additional computational and data collection costs and potential training instabilities that data augmentation methods may incur, it seems more fruitful to investigate models with inductive biases that elicit modular and generalizable representations without relying on data scaling laws. 
+While presenting the model with sufficiently large and diverse datasets remains unquestionably important, we cannot rely solely upon the data in hopes that the model learns a good representation.
+As with any other inductive biases, such as using CNNs for vision tasks or transformers for NLP tasks, inductive biases that elicit modular representations \textit{while leveraging data} are worth studying if we are to develop agents that can perform and adapt well in the real world. 
+
+We hope that the work presented here inspires future research into novel models and architectures to learn representations that enable the adaptability we see in our biological counterparts. 
+We discuss some limitations of our method and promising directions for future research. 
+One notable limitation is that our disentangled latent representation $z_d$ does not explicitly account for temporal information since it primarily estimates the sources that produce the image distribution. 
+Instead, we must capture temporal information in the downstream 1D-CNN layer as shown in Figure \ref{fig:method_diagram}.
+How to learn a disentangled representation that contains sources of both the image data and temporal information for decision-making tasks remains an open question. 
+Another limitation is that, while we introduce a simple Hopfield model as a modification to QLAE, we do not take advantage of the more recent literature involving learnable attention-based or energy-based Hopfield networks \citep{hopfield_all_you_need, energy_hopfield}. 
+Stronger Hopfield models that synergize well with disentangled 
+representations is another potentially fruitful research direction. 
+
+Given that we use a very compact disentangled latent space with strong empirical evidence that individual latents capture information about specific aspects of the agent, an interesting research direction is to investigate whether all or parts of the proprioceptive state representation can be recovered from image observations. 
+
+Beyond interpretability, such a model may yield better performance since state-based RL agents tend to perform better than vision-based agents. 
+Finally, while our work was inspired by the role of the hippocampus in biological intelligence, the exact mechanisms of the machinery and how they interact with decision-making, planning, and imagination components of biological brains are by no means precisely modeled in this paper, nor are all of the computations the hippocampus may be performing fully understood. 
+Future collaborative research between the machine learning and neuroscience fields into data-driven computational models of these mechanisms may yield even better-performing, adaptable agents. 
+
+
+
+\section{Acknowledgements}
+
+
+We would like to thank Tommaso Salvatori for advice and insightful discussion on modern Hopfield networks. 
+We also thank David Millard, Shashank Hegde, and Yutai Zhou for providing feedback on the proof. 
+
+\newpage
+
+
+
+
+

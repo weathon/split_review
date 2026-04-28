@@ -1,0 +1,162 @@
+# Constructing Semantics-Aware Adversarial Examples with Probabilistic Perspective
+
+- Decision: Reject
+- Avg Score: 5.25
+- Scores: 5, 5, 5, 6
+
+## Abstract
+In this study, we introduce a novel, probabilistic perspective for generating adversarial examples. Within this view, geometric constraints on adversarial examples are interpreted as distributions, facilitating the transition from geometric constraints to data-driven semantic constraints. Proceeding from this perspective, we develop an innovative approach for generating semantics-aware adversarial examples in a principled manner. Our approach empowers individuals to incorporate their personal comprehension of semantics into the model. Through human evaluation, we validate that our semantics-aware adversarial examples maintain their inherent meaning. Experimental findings on the MNIST, SVHN and CIFAR10 datasets demonstrate that our semantics-aware adversarial examples can effectively circumvent robust adversarial training methods tailored for traditional adversarial attacks.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper propose a novel and simple methods for constructing semantic-aware adversarial examples. The proposed frame work use a probabilistic perspective method to generate semantics-aware adversarial examples.  As depicted in the figure of this paper, it seems this attack successfully attack classifiers while retaining the original image's semantic information.
+
+### Strengths
+* The method for generating semantics-aware adversarial examples is very intuitive.
+* This paper is well-written. The problem this paper focuses is important, and the proposed method is interesting.
+
+### Weaknesses
+Please correct me if I have some misunderstanding of the paper.
+
+1. Since this paper proposes a semantics-aware method, the human evaluation is important to verify the validity of adversarial examples.
+
+2. It lacks a comparison on the number of queries. Specifically, the paper should compare the number of queries needed to generate adversarial examples with other state-of-the-art methods. This is crucial for understanding the efficiency of the proposed approach, especially in scenarios where query budgets are limited.
+
+3. There is a lack of an ablation experiment. In $p_{adv}$, what will happen if $p_{dis}$ uses L2 or other methods to calculate Figure 1 or Table 1? It's important to understand the impact of different distance metrics on the generated adversarial examples. For example, how would using L1 distance or cosine similarity affect the semantic preservation and the attack success rate, compared to the current method?
+
+### Questions
+Please see the weakness section.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The paper presents a probabilistic approach to construct semantically meaningful adversarial examples by interpreting geometric perturbations as distributions. The approach relies on training an energy based model (EBM) to emulate such distributions. The approach is evaluated on a variety of image classification datasets.
+
+### Strengths
+1. The proposed approach is a principled take on the semantic adversarial attacks where in the authors derive an EBM-style formulation to generate geometric adversarial examples.
+
+2. The algorithm presents high attack success rates on adversarially trained models.
+
+### Weaknesses
+1. The paper is missing several references, and is relatively sparse with regards to related work. Similar works include Spatially Transformed Adversarial Examples (Xiao et al., ICLR 2018), Semantic Adversarial Attacks (Joshi et al, 2019, ICCV 2019), Semantic Adversarial examples (Hosseini et al, CVPRW, 2018) and Unrestricted adversarial examples (Bhattad et al, ICLR 2020). Several of these works use generative models to generate semantic adversarial examples and should be discussed and contrasted in this work.
+
+2. The experiments are limited to just two adversarially trained networks. Furthermore, the adversarially trained models do not appear to have been trained under the semantic attack threat model and hence unlikely to be robust to such attacks. 
+
+3. The attack also relies on adversarially trained models learning semantically meaningful features. However, the images shown in the figures appear to be distorted which could be a consequence of the models overfitting on a subset of semantic features.
+
+### Questions
+Could the authors clarify the training setup for the adverarially trained models?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper introduces generating adversarial examples from a probabilistic perspective. The geometric constraints of adversarial examples are interpreted as distributions, thus facilitating the transition from geometric constraints to data-driven semantic constraints. The paper introduces relevant background knowledge in detail and introduces four techniques that enhance the performance of our proposed method in generating high-quality adversarial examples.  The effectiveness of the proposed method was verified on some simple dataset.
+
+### Strengths
+1. It provides detailed background knowledge on paper writing and is very reader-friendly.
+2. The author models adversarial examples from a probabilistic perspective and proposes an energy model-based adversarial example generation method.
+
+### Weaknesses
+1. Although the author models the generation process of adversarial examples through the energy model, there is no essential difference between the previous adversarial example generation processes (they all use gradients to find optimization targets，the objective function used in this paper is still the C&W attack.). 
+2. The method has only been verified on some small datasets( e.g., MNIST and CIFAR), and the effectiveness of the method needs to be verified on larger-scale and more complex semantic datasets(e.g., ImageNet). Although the authors discuss this weaknesses.
+
+### Questions
+Some questions：
+1:  Generating adversarial samples through the energy model requires multiple data transformations. The author discussed changes in semantic distribution and geometric distribution. Can defenders train a classifier to filter adversarial samples generated based on the energy model?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper aims to generate adversarial examples while avoid compromising semantic information. To achieve this goal, they propose a semantic distance which replaces the geometrical distance. Then, they utilize the technique of Langevin Monte Carlo to search the adversarial examples. Instead of generate adversarial examples in a geometrical constraint, they transition to a trainable, data-driven distance distribution, which can incorporate personal comprehension of semantics into the model. The generated adversarial examples shown in Experiment seem more natural and untouched than the tradition PGD-generated examples.
+
+### Strengths
+* The problem is interesting to me. Although adversarial examples are widely known as imperceptible to human eyes, some adversarial examples are vague compared to the original images. This work generates more clear adversarial examples, which are harder for humans to detect.
+* The algorithm is theoretically supported and empirically efficient.
+
+### Weaknesses
+ * Although the generated adversarial examples are indeed elusive to human eyes, it is unknown whether these examples are harder for the defense methods to detect.
+* It would be better if the authors can also validate the efficacy of the proposed method on larger network such as ResNet-50, and more difficult task such as CIFAR-100 and ImageNet.
+
+### Questions
+What is the perturbation radius used in Figure 1?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

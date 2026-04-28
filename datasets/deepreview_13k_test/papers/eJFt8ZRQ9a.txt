@@ -1,0 +1,341 @@
+\title{IMProv: Inpainting-based Multimodal Prompting for Computer Vision Tasks}
+
+\begin{abstract}
+In-context learning allows adapting a model to new tasks given a task description at test time. In this paper, we present \model~- a generative model that is able to in-context learn visual tasks from multimodal prompts. Given a textual description of a visual task (e.g. “Left: input image, Right: foreground segmentation”), a few input-output visual examples, or both, the model in-context learns to solve it for a new test input.  We train a masked generative transformer on a new dataset of figures from computer vision papers and their associated captions, together with a captioned large-scale image-text dataset. During inference time, we prompt the model with text and/or image task example(s) and have the model inpaint the corresponding output. We show that training our model with text conditioning and scaling the dataset size improves in-context learning for computer vision tasks by over $+10\%$ AP for Foreground Segmentation, over $+5\%$ gains in AP for Single Object Detection, and almost $20\%$ lower LPIPS in Colorization. Our emperical results suggest that vision and language prompts are complementary and it is advantageous to use both to achieve better in-context learning performance.\footnote{Project page: \url{https://jerryxu.net/IMProv/}}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In-context learning (ICL)~\citep{gpt3, chan2022data, xie2021explanation}, also known as few-shot prompting, is an exciting new paradigm in machine learning that allows a model to adapt to novel downstream tasks without fine-tuning or changing the model's weights. In natural language processing (NLP), ICL is considered an emergent property of large language models~\citep{gpt3, touvron2023llama, chowdhery2022palm} and it was first introduced in the seminal paper of GPT-3~\citep{gpt3}. A few-shot prompt typically includes examples of (input, output) pair(s). The few-shot performance of large language models has been shown to achieve competitive results on NLP tasks, sometimes surpassing prior state-of-the-art fine-tuning approaches~\citep{gpt3}.
+
+In computer vision, the full potential of in-context learning (ICL) is still far from being realized. To enable a model to perform in-context learning during test time, there are two key challenges that need to be addressed. Firstly, the model's architecture should be designed in such a way that it can effectively process prompts from various vision tasks. This means it should be capable of receiving task instructions and/or input-output examples as inputs to the model. Secondly, a different approach to training these models is required. While in natural language processing (NLP), the emergence of ICL has been facilitated by utilizing large-scale, non-curated data, in computer vision, even generative models trained on billions of non-curated text-image pairs have failed to achieve similar results.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/teaser.pdf}
+    \caption{
+    \textbf{I}npainting-based \textbf{M}ultimodal \textbf{Pro}mpting for \textbf{v}ision (IMProv). \textit{Top:} Our model~in-context learns to solve computer vision tasks by inpainting the masked area with the task solution (shown in red square) using visual input-output examples (a), a textual task description (b), or both (c). \textit{Bottom:} \model~prediction examples.}
+    \label{fig:teaser}
+\end{figure}%
+
+A possible approach to enable test-time few-shot prompting for computer vision tasks is to train a multi-task inpainting model \citep{wang2022images, wang2023seggpt, bargandelsman2022visual}. For example, previous approaches \citep{wang2022images, wang2023seggpt} adopted a fully supervised paradigm to train a model over a predetermined set of vision tasks. However, this line of study requires a handful of manual annotations and thus struggles to scale and generalize well to unseen vision tasks. Instead of explicitly designing the tasks, \cite{bargandelsman2022visual} took a different unsupervised approach by proposing to learn from unstructured Computer Vision Figures data, where images have implicit task supervision and grid-like structure. However, using vision-only prompting~\citep{bargandelsman2022visual} suffers from ambiguities and is limited in its ability to describe a specific visual task.
+
+To alleviate these difficulties, we propose to multimodal ICL by prompting using input that consists of both pixels and text. Intuitively, these two modalities can work in synergy to enhance the understanding of the world and its complexities. For example, during a conversation, people use language to communicate ideas and vision to perceive facial expressions and conversational gestures~\citep{cassell1999speech, mcneill2019gesture}. For prompting, conditioning vision models on text can enable describing instructions in an efficient manner and reduce ambiguities without the necessity for multiple high-quality visual examples.
+
+Equipped with this intuition, we train a model, dubbed \model, to inpaint randomly masked regions given the rest of the image and a caption as context
+\textit{Our training does not require explicit definitions of tasks and annotations for each task.} 
+To demonstrate multimodal learning can be boosted by larger dataset, we collected a new dataset of image-text pairs from Semantic Scholar, which is three times larger than the largest existing computer vision figures dataset. We train a new model by performing inpainting on randomly masked images from a combination of the newly constructed data and LAION 400M~\citep{laion}. At test-time, our model exhibits emerging capabilities such as zero-shot prompting for vision tasks, e.g., performing foreground segmentation with only a textual description of the task without any image examples. 
+
+We explore the outcomes of interchanging and combining image and textual prompts in our model. We find that when using both modalities our model achieves improved ICL performance compared to past vision-only approaches (Figure~\ref{fig:teaser}), improving average precision by over $10\%$ in Foreground Segmentation, over $4\%$ for single object detection, and closing over $40\%$ of the gap between current ICL approaches to state-of-the-art 1-shot training approaches that utilize supervised base-class training data. Beyond visual recognition, IMProv can be applied to general vision tasks including edge estimation, depth estimation, and conditional image synthesis as shown in Figure~\ref{fig:teaser}. 
+
+
+\begin{figure*}
+  \centering
+  \includegraphics[width=0.8\textwidth]{figures/arcitecture.pdf}
+  \caption{\textbf{\model~Architecture}. During training, the input image is patchified, masked, and fed to the model together with the associated caption CLIP~\citep{clip} embeddings. For each masked token, the decoder outputs a distribution over a frozen pretrained VQGAN~\citep{esser2021taming} codebook. The model is trained with cross-entropy loss.} 
+  \label{fig:architecture}
+\end{figure*}
+
+
+
+\section{Prompting Inpainting Models via Images and Text}
+
+
+We start by presenting our \model~model and how to train it in Section~\ref{subsec:method:model}, and subsequently, in Section~\ref{subsec:method:prompt}, we explain the approach for prompting the model using visual and textual prompts. Finally, in Section~\ref{subsec:method:data}, we describe the new dataset of images and associated captions we collected.
+
+\subsection{\model~- Text Conditional Inpainting Model}
+\label{subsec:method:model}
+
+We introduce a model with \textbf{I}npainting-based \textbf{M}ultimodal \textbf{Pro}mpting capabilities for \textbf{v}ision tasks (IMProv). It receives both text and masked input image as context and outputs a reconstructed image. 
+
+Given an input image $x \in \mathbb{R} ^ {H \times W \times 3}$, a binary mask $m \in \{0, 1\} ^ {H \times W}$, and a sentence $t \in K\times V$ where $V$ is the vocabulary and $K$ in the sentence length, the goal of our inpainting model $f$ is to generate a new image
+$y \in \mathbb{R} ^ {H \times W \times 3}$, with the masked regions filled according to the input image context and the sentence:
+\begin{equation}
+    y = f(x, m, t)
+\end{equation}
+Our model $f$ has an encoder-decoder structure like MAE-VQGAN~\citep{bargandelsman2022visual}, where the encoder and decoder are Vision Transformers~\citep{dosovitskiy2020image}.
+In contrast to~\cite{bargandelsman2022visual,mae}, after every self-attention layer, we add a cross-attention layer between image tokens and textual tokens, thereby effectively allowing each image token to attend to text token: 
+\begin{equation}
+    \begin{aligned}
+    Z_i &= \sum_{j=1}^{n}a_{ij}V_j
+    \end{aligned}
+     \qquad  \qquad
+    \begin{aligned}
+    a_{ij} &= \frac{\exp(K_j^T Q_i))}{\sum_{m=1}^{n}\exp(K_m,Q_i))}
+    \end{aligned}
+\end{equation}
+Where $V$ is the set of textual token values, $K$ is the set of text token keys and $Q$ is the set of image token queries. The resulting output sequence $Z$ represents the attended image features that are most relevant to the text tokens. 
+
+\textbf{Training.} To train the model, the input image $x$ is split into patches and randomly masked by dropping a fixed percent of the patches ($75\%$ in our experiments). Similarly, the input textual sentence is tokenized and every token is mapped to its corresponding CLIP~\citep{clip} embedding. Given the subset of non-masked patches and the textual tokens image, the model is then trained to predict the visual tokens corresponding to masked patches. The model is trained with a cross-entropy loss applied between the model predictions and the corresponding visual tokens for each masked patch. The ground truth visual tokens are obtained by mapping the input image to visual tokens indices using a pre-trained VQGAN encoder \citep{esser2021taming}. Formally, our text-conditioned MAE-VQGAN models the distribution $p(z_i|x, m, t)$, where $z_i$ is a visual token from the VQGAN vocabulary that corresponds to the $i$-th image patch. 
+
+
+\begin{wraptable}{R}{0.6\textwidth}
+  \caption{\textbf{Examples of different textual prompts used for inference with~\model.}}
+  \label{tab:text_prompts}
+  \centering
+    \resizebox{\linewidth}{!}{
+  \begin{tabular}{l|l}
+    \toprule
+    Prompt & Full Text Examples\\
+    \midrule
+    
+    No Text & $\phi$ \\ 
+    \rule{0pt}{3ex}
+    Task & \Verb|Image Segmentation|
+    \\
+    \rule{0pt}{3ex}    
+    + Location & \Verb|Left - input image, right: Black and white|
+    \\
+    & \Verb|foreground background segmentation|
+    \\
+    \rule{0pt}{3ex}
+    + Class Name & \Verb|Left - input image, right: Black and white|
+    \\
+    & \Verb|foreground background segmentation of a horse|
+    \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{wraptable}
+
+ 
+
+\subsection{Multimodal Prompt}
+\label{subsec:method:prompt}
+At inference time, prompting the trained model can be done via text, via a visual prompt, or by combining both. To prompt the model via visual prompt we apply the same task formulation of \cite{bargandelsman2022visual} - we form a grid-like image composed of task input-output example(s) (e.g. input images and their segmentation masks), and a new query image, and apply the model to inpaint the corresponding result for the query. To prompt the model via text, we provide to $f$ a description of the task (e.g. "Left: input images, Right: foreground/background segmentation results"). 
+
+Formally, Let $S=\{(x_i, y_i)\}_{i=1}^n$ be the set of input-output examples where $x_i$
+is an image and $y_i$ is the corresponding vision task output, let $t$ be a textual task description and let $x_q$ be a query image. We introduce an arrangement function $g_1$ that arranges $S$ and $x_q$ into a grid (visual prompt), denoted by $x_{vp}$ and provides a mask $m$ for the inpainting function:
+\begin{equation}
+    x_{vp}, m = g_1(S, x_q)
+\end{equation}
+
+Similarly, we have a corresponding arrangement function $g_2$ that generates a textual prompt that is used to instruct the model how to inpaint the image given attributes like the task name, location details, and the image class name:
+\begin{equation}
+    t = g_2(task, loc, class)
+\end{equation}
+
+For example, for the task of image segmentation of an airplane, the output can be ``Left: input image of an airplane, Right: corresponding image segmentation''. For more examples see Table~\ref{tab:text_prompts}.
+
+The model $f$ is then applied to reconstruct the masked area $m$ given the visual prompt and the task description: 
+\begin{equation}
+    y = f(x_{vp}, m, t)
+\end{equation}
+
+When the task description is an empty string, no textual prompt is given and the model has to infer the task solely from the examples of $S$. When $S$ is an empty set, and a textual prompt is given, the model performs zero-shot completion by relying only on the textual instructions.  
+
+\subsection{Image-Text Dataset for Computer Vision}
+\label{subsec:method:data}
+The grid-like visual prompt images inpainted by \model~have a different distribution from natural images. 
+Vision task descriptions (e.g. "left: input, right: segmentation mask"),  paired with images, do not appear often in widely used language-and-vision datasets. 
+Thus, a model that was trained on these datasets will have trouble completing the inpainting task successfully due to the distribution shift.  To mitigate this domain gap, we collect a new dataset of figures, paired with their associated captions, extracted from computer vision papers.
+
+\begin{wraptable}{r}{0.5\textwidth}
+  \caption{{\textbf{Dataset comparison.} 
+  }}
+\label{tab:compare_dataset}
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{c|cccc}
+\toprule
+   Dataset & images  & papers    & with text & source           \\
+\midrule
+   CVF  & 78,227  & 20,764    & no        & arxiv            \\
+   S2CV & 268,118 & 261,225 & Yes       & Semantic Scholar \\
+\bottomrule
+\end{tabular}
+}
+\end{wraptable}
+Our dataset, The Semantic Scholar Computer Vision dataset (\datasetnew), is collected from computer vision papers that appear on ``Semantic Scholar'' website. This website contains papers from 40 conferences and journals from the years 2010 to 2022. We extracted pairs of figures and their captions from each paper on the website, resulting in 1,417,398 pairs. We then filtered out figures that do not include images (e.g. plot of loss curve). Finally, the filtered~\datasetnew~dataset includes 268,118 captioned figures and is 3 times larger than the largest existing figures dataset, the Computer Vision Figures dataset (CVF;~\cite{bargandelsman2022visual}). See comparison in Table~\ref{tab:compare_dataset}, full details about \datasetnew ~in the dataset datasheet~\citep{gebru2021datasheets}, and provided examples in Figure~\ref{fig:dataset_img}.
+
+We also extend the existing CVF by repeating its data collection process and extracting the captions of the figures in the dataset. This results in 78,227 image-text pairs. This dataset, \datasetours{} (Captioned-CVF), serves as a baseline in our experiments.
+
+
+\section{Experiments and Results}
+
+
+We train a \model~with a ViT-L backbone on a combination of our~\datasetours{}, \datasetnew{} dataset and LAION-400M~\citep{laion}. During the training process, we create mini-batches by randomly selecting half of the data from the LAION-400M dataset and the other half from~\datasetours{} and \datasetnew{}, ensuring that the model learns from a diverse set of figure-like images.
+
+We evaluate~\model~on a variety of computer vision tasks. By default, our visual prompt consists of a $2\times2$ grid where the bottom-right quarter is masked, the top row contains the input-output example, and the bottom-left image represents the query. The visual example and the textual prompt are defined according to the task (see Section~\ref{subsec:exp:vision}).  
+
+\begin{figure}
+  \centering
+  \includegraphics[width=\textwidth]{figures/results_v2.pdf}
+  \caption{\textbf{Multimodal prompting prediction examples.} An example text prompt that was provided to \model~together with the presented visual prompt appears below them. For each prompt, the result is marked in red. Please see the supplementary material for more results.} 
+  \label{fig:other_results}
+\end{figure}
+
+ \begin{figure}[h]
+   \centering
+   \includegraphics[width=\textwidth]{figures/segmentation.pdf}
+   \caption{\textbf{Detailed textual prompts~\model~performance}. We experiment with textual prompts with varied amounts of detail, e.g., from no text to instructions that include the task, specific locations, and object class names. See examples of full-text prompts in Table~\ref{tab:text_prompts}. Please see the supplementary material for more results.} 
+   \label{fig:tradeoff}
+ 
+ \end{figure}
+ 
+
+\subsection{Implementation Details}
+During training, we utilize images and their associated captions. We follow the resized cropping and flipping augmentations of \cite{mae} and train on $224\times224$ crops. We use AdamW~\citep{adamw} optimizer with a learning rate of $2e^{-4}$ and weight decay of $0.05$. We train our models on one machine with 8 A100 GPUs with a batch size of 2048 for 150k iterations. Our learning-rate schedule consists of 2k linear warm-up steps followed by a cosine learning rate decay. We use a pre-trained frozen CLIP ViT-L/14 model as our text encoder and a pre-trained VQGAN codebook with a vocabulary size of $1024$, provided by \cite{esser2021taming} and a spatial dimension reduction of $\times16$. During training, we drop the text conditioning with a probability of $0.1$. 
+
+\subsection{Downstream Computer Vision Tasks}
+\label{subsec:exp:vision}
+Next, we include the evaluation results of~\model~on a wide range of computer vision tasks. When trained on~\datasetours{}/~\datasetnew{} and LAION 400M~\citep{laion},~\model~significantly improves ICL performance over a wide range of computer vision downstream tasks when compared to vision-only ICL approaches. 
+
+\textbf{Foreground Segmentation.} In this task, the goal is to segment the query image into two classes - foreground and background. The input-output example is a random image with its corresponding binary segmentation mask (e.g. black for the background and white for the foreground). We define the textual prompt to be: ``Left - input image, right - Black and white foreground-background segmentation of \{class\}'', where the \{class\} is the class of the foreground object, annotated in Pascal-$5^i$.  We follow the evaluation protocol of \cite{bargandelsman2022visual} and test \model~on four splits of Pascal-$5^i$ dataset \citep{pascal_5i}. Results are reported in Table~\ref{tab:main_table}. 
+
+\textbf{Object Detection.} Similar to the task of Foreground Segmentation, our objective here is to perform binary segmentation of the object present in the query image. However, this task is more challenging as the input-output examples contain a rectangle-shaped mask, derived from a bounding box which is less accurate compared to a fine detailed segmentation mask. We define the textual prompt to be: ``Left - input image, right - Black and white foreground background segmentation of \{class\} of rectangle shape'' where the \{class\} is the class of the foreground object. We use the Pascal VOC 2012 dataset \citep{Everingham15}, which consists of images along with their associated detection boxes. Our results are reported in Table~\ref{tab:main_table} in terms of the mean Intersection over Union (mIOU) metric.
+\textbf{Colorization.} The goal is to map a gray-scale image to a color image. The example pair is a gray-scaled image and the corresponding color image. We define the textual prompt to be: ``Colorization results: Left - input image, Right - Colorized image of {class}'' where the \{class\} is the class of object present in the image. We randomly sampled $1000$ example pairs and image query from ImageNet~\citep{ILSVRC15} validation set and converted them to gray-scale to obtain gray-scale and color version for each image. MSE and LPIPS~\citep{zhang2018unreasonable} Results are reported in Table~\ref{tab:main_table}.
+\textbf{Other Tasks.} We evaluate our models on the dataset created by \cite{wang2023incontext}, which includes around 310k image-caption pairs that were automatically annotated by using state-of-the-art pre-trained models for a wide range of vision tasks. Specifically, each image is annotated with depth and normal maps obtained from Midas~\citep{Ranftl2022}, segmentation maps obtained from Uniformer~\citep{uniformer}, and object boundary maps detected by HED~\citep{hed}. For each vision task X, we evaluate our model on two tasks - X-to-images and images-to-X. As each task has a different evaluation metric, and as our model produces image outputs, we simplify the evaluation by comparing the generated image to the rendered annotation of the task by calculating LPIPS~\citep{zhang2018unreasonable}. We report the results in Table~\ref{tab:other_res} and plot qualitative results in Figure~\ref{fig:other_results}.
+
+
+
+\section{Analysis}
+
+ 
+ \textbf{Dataset Ablation.} 
+ We report our results and compare them with prior works in Table~\ref{tab:main_table}.
+\model{} trained on a combination of LAION-400M and our~\datasetnew{} dataset outperforms the prior work~\citep{bargandelsman2022visual} trained solely on the CVF dataset by more than $\sim 12$ points in mIOU. It demonstrates \model{} could benefit from training on additional amounts of unlabeled images
+
+\begin{table}
+   \centering
+   \caption{\textbf{Comparison between previous visual prompting results to multimodal prompting on computer vision tasks.} For Foreground Segmentation and Single Object Detection, we report the \textit{mIOU} score. For Colorization, we report the \textit{MSE} and \textit{LPIPS}. Training dataset appears in parentheses.}
+ \resizebox{\linewidth}{!}{
+ 
+   \label{tab:main_table}
+   \begin{tabular}{l|rrrr|rrrr|cc}
+     \toprule
+     Model &  \multicolumn{4}{c}{Foreground Segmentation~$\uparrow$} & \multicolumn{4}{c}{Single Object Detection~$\uparrow$} & \multicolumn{2}{c}{Colorization~$\downarrow$} \\
+          & Split 0 & Split 1 & Split 2 & Split 3 & Split 1 & Split 2 & Split 3 & Split 4 & MSE & LPIPS \\
+     \midrule
+     BEiT (CVF)         & 5.38 & 3.94 & 3.20 & 3.29 & 0.17 & 0.02 & 0.14 & 0.16 & 0.60  & 0.70\\
+     VQGAN (CVF) &  12.56 & 17.51 & 14.27 & 15.06 & 2.27 & 2.37 & 2.48 & 1.99 & 1.50  & {0.56}\\
+     MAE (CVF)       & 17.42 & 25.70 & 18.64 & 16.53 & 5.49 & 4.98 & 5.24 & 5.84 & \textbf{0.43} &  {0.55}\\ % using threshold +100
+     MAE-VQGAN (CVF)  & 27.83 & 30.44 & 26.15 & 24.25 & 24.19 & 25.20 & 25.36 & 25.23 & 0.67  & 0.40 \\ % using threshold +100
+     
+     \midrule
+     \model~(S2CV + LAION)  & \textbf{42.58} & \textbf{44.81} & \textbf{40.73} & \textbf{33.72} & \textbf{30.03} & \textbf{30.73} & \textbf{29.8} & \textbf{31.32} & 0.57 & \textbf{0.34}\\ % using threshold +100
+ \bottomrule
+   \end{tabular}
+   }  
+ \end{table}
+ 
+ \textbf{Textual Prompts Ablation.} We experiment with textual and visual prompts that have different relevance to the query image and task. For the visual prompt, we choose the input-output examples using three different retrieval strategies: (1) \textit{Random Class}, a random example pair in which the class of the foreground object is chosen randomly, (2) \textit{Same Class}, where a random example pair of the same class is chosen randomly, and (3) The example is chosen via \textit{Nearest Neighbor} from all the images with the same foreground object class, using the model from~\cite{zhang2023makes}.
+ We evaluate our~\model~model on Pascal $5^i$ with and without a textual prompt that contains Task, Location, and Class Name. 
+
+\begin{wraptable}{r}{0.4\textwidth}
+  \caption{{\textbf{Text prompting helps.} 
+  Adding textual prompts to ``\textit{Random Class}'' visual prompts improves Foreground Segmentation on Pascal $5^i$.
+  }}
+\label{tab:compare_diff_rand}
+\centering
+\begin{tabular}{l|cccc|l}
+\toprule
+Model                & Avg.   \\
+\midrule
+MAE-VQGAN (CVF)      & 23.52 \\
+IMProv(CCVF)         & 26.13 \\
+IMProv(CCVF + LAION) & 36.29 \\
+\bottomrule
+\end{tabular}
+\end{wraptable}
+ Firstly, we compare against \cite{bargandelsman2022visual} under (1) \textit{Random Class} visual prompt setting and report results in Table~\ref{tab:compare_diff_rand}. In this setting, the visual prompts describe the task (e.g., segmentation) but are not curated from the same class (the setting in Table~\ref{tab:main_table}), or chosen via nearest neighbors as in~\cite{zhang2023makes}.  Using non-curated visual prompts is most realistic, as finding a perfectly aligned visual example might be as hard as solving the original input. The result shows that conditioning on text improves average mIoU by 3 points when using reasonable non-curated visual prompts. Moreover, \model{} trained on a combination of LAION and our~\datasetours{} dataset further boost the mIoU by 10 points.
+
+ \begin{wrapfigure}{r}{0.4\textwidth}
+   \centering
+ \includegraphics[width=0.3\textwidth]{figures/text_helps1.pdf}
+   \caption{\textbf{Performance w/ or w/o text, using visual prompts with varying degrees of quality}. Incorporating textual prompts alleviates the requirement for a meticulous selection of visually relevant prompts, such as Nearest Neighbor.
+   }
+   \label{fig:text_help}
+ \end{wrapfigure}
+
+In Figure~\ref{fig:text_help} we plot the results under different textual prompts. We find that the textual prompts play a big role in the performance of the model~(see Figure~\ref{fig:text_help}).
+To dive deeper into the effect of textual prompt, we plot the relation between textual prompt and visual prompt in Figure~\ref{fig:tradeoff}.
+It shows adding text prompts improves the results for any type of visual prompt, from the least related Random Class examples to the most relevant Nearest Neighbors examples. In addition, we find that by using text, it is possible to achieve similar performance with lower-quality visual examples (using the Same Class example rather than the Nearest Neighbor~\citep{zhang2023makes}). 
+Similarly, higher-quality visual examples improve the results for all the tested textual prompts. Interestingly, the results suggest a trade-off between the two modalities - high-quality textual prompts can alleviate the need for carefully chosen visual prompts, and vice versa.
+
+Moreover, as shown in Figure~\ref{fig:letters}, when the textual prompt is inconsistent with the visual example, the model may follow the more certain textual instruction. We include additional results for different combinations of visual and textual prompts in the Supplementary Material. 
+
+  \begin{wrapfigure}{r}{0.5\textwidth}
+   \centering \includegraphics[width=1\linewidth]{figures/letter.pdf}
+   \caption{\textbf{Textual prompts effect on text inpainting.} When there is an inconsistency between the textual and visual prompt, the model may follow the textual prompt.}
+   \label{fig:letters}
+ \end{wrapfigure}
+
+ \textbf{Does Structured Data Improve In-Context Learning?} The key insight of our approach is to train~\model~on \textit{unstructured} data in a fully unsupervised manner without parsing the image or the text. Here we experiment with training~\model~on additional \textit{structured} data in a fully supervised manner. We use the dataset of \cite{brooks2022instructpix2pix}, which consists of 310k input-output image editing pairs and their corresponding descriptions. For training, we use random pairs as our input-output examples. We embed them into a grid structure, in a similar manner to the structure we use at test-time. The grid images that we construct for training consist of $1\times2$ and $2\times2$ images by randomly selecting 1 or 2 input-output examples for each caption in the original dataset.
+ 
+ We test our models on a held-out set of vision tasks. As shown in Table~\ref{tab:other_res}, we find that training on structured supervised data alone leads to poor generalization and ICL performance on the test tasks. Training on both unstructured~\datasetnew~and LAION-400M, together with the structured data improves ICL results on the test tasks compared to our base model.
+ 
+ \begin{table}
+   \caption{\textbf{Training on additional annotated data improves ICL.} We train~\model~on unstructured and structured data. We find that adding structured and fully annotated data during training can help ICL performance on $8$ \textit{held-out} computer vision tasks.}
+   \label{tab:other_res}
+   \centering
+ \resizebox{\linewidth}{!}{
+ 
+   \begin{tabular}{l|lllllllll}
+     \toprule
+          &  Depth$\rightarrow$ & Image$\rightarrow$ & HED$\rightarrow$ & Image$\rightarrow$ & Seg$\rightarrow$ & Image$\rightarrow$ & Normals$\rightarrow$ & Image$\rightarrow$ \\
+          & Image & Depth & Image & HED & Image & Seg & Image  & Normals\\
+     \midrule
+     Supervised ICL (InstructPix2Pix)
+     & 0.65 & 0.60 & 0.59 & 0.62 & 0.64 & 0.61 & 0.62 & 0.55 \\ 
+     \model~(\datasetnew{}+LAION) & 0.61 & 0.52 & 0.51 & 0.46 & 0.59 & 0.50 & 0.56 & 0.48 \\ 
+     \model~(\datasetnew{}+LAION+InstructPix2Pix)
+     & \textbf{0.55} & \textbf{0.43} & \textbf{0.47} & \textbf{0.37} & \textbf{0.54} & \textbf{0.46} & \textbf{0.51} & \textbf{0.44} \\ 
+     
+ \bottomrule
+   \end{tabular}
+   }
+ \end{table}
+
+\textbf{Comparison to Finetuning and Few-Shot Baselines.} We compare~\model~to classic 1-shot baselines, which we view as an upper bound of our approach. Approaches like FWB~\citep{nguyen2019feature} and CyCTR~\citep{zhang2021few} utilize a fully labeled base classes train set (2086 to 5883 on different Pascal $5^i$ splits) with architectures that are optimized for foreground segmentation (e.g, by utilizing higher resolutions). We also compare to MAE-VQGAN~\citep{bargandelsman2022visual} that performs visual prompting without text and to finetuning baselines with $K=\{1, 4, 16\}$ training examples for each target class. The results in Table~\ref{tab:few_comparison} indicate that~\model~closes over $40\%$ of the accuracy gap between MAE-VQGAN to supervised one-shot approaches. This demonstrates the potential of our approach to scale with more data.
+
+ \begin{table}[h]
+    \caption{{\textbf{Comparison to fine tuning and classic 1-shot segmentation baselines.} MAE-VQGAN image query and output resolution is 111$\times$111. CyCTR and FWB resolution is 473$\times$473 and 512$\times$512, both approach utilize Pascal $5^i$ labeled baseclasses data.}}
+ \label{tab:few_comparison}
+ 
+   \centering
+   \resizebox{1\linewidth}{!}{
+     \begin{tabular}{llllrrrrrr}
+     \toprule
+         Pretraining & \# Labeled Images & \# Shots & Model & Split 0 & Split 1 & Split 2 & Split 3 \\
+     \midrule
+     \multirow{3}{*}{Unlabeled ImageNet} & 1 & 1 & \multirow{3}{*}{Finetuned MAE~\citep{mae}} & 11.1 & 13.4 & 13.0 & 12.3  \\
+     & 4 & 4 & & 12.9 & 15.8 & 14.3 & 15.0  \\
+     & 16 & 16 & & 13.7 & 16.1 & 16.8 & 17.1 \\
+     \midrule
+     \dataset~+ IN & 1 & 1 & MAE-VQGAN~\citep{bargandelsman2022visual} & 32.5 & 33.8 & 32.7 & 27.2 \\
+     \datasetours~+ LAION & 1 & 1 & \model & 45.6 & 46.6 & 45.3 & 39.1 \\
+     \datasetnew~+ LAION & 1 & 1 & \model & \textbf{49.1} & \textbf{49.7} & \textbf{45.5} & \textbf{42.1} \\
+     \midrule 
+     \multirow{2}{*}{\shortstack[l]{\textbf{Labeled} Pascal 5i  \\ (Segmentation masks)}} & \multirow{2}{*}{$2086-5883$} & 1 & FWB~\citep{nguyen2019feature} & 51.3 & 64.5 & 56.7 & 52.2 \\
+     & & 1 & CyCTR~\citep{zhang2021few} & 67.2 & 71.1 & 57.6 & 59.0 \\
+     \bottomrule
+   \end{tabular}
+ }
+ \end{table}
+ 
+ 
+
+
+\section{Related Work}
+
+
+\textbf{Prompting in NLP.} The ability to prompt a language model to solve a specific task, also known as ICL, is a recently discovered property of generative language models that were trained on a large corpus of text~\citep{gpt3, touvron2023llama, chowdhery2022palm, bubeck2023sparks}.
+\cite{gpt3} have shown that existing NLP tasks can be described in unstructured text, and then fed into a large language model to complete the missing part without any finetuning~\citep{radford2019language, gpt3}. More recently different approaches to prompting have emerged including Prompt Engineering~\citep{gpt3, lu2021fantastically}, Prompt Ensembling~\citep{jiang2020can}, Prompt Prefix Tuning~\citep{li2021prefix,prompt_ensemble}, and Chain of Thought Prompting~\citep{wei2022chain}. The Flamingo~\citep{alayrac2022flamingo} model extends language-only models, and conditions the model on both image and text. Our approach is different in that our model outputs pixels and not text. Therefore, it is suited to solve a variety of computer vision tasks that can be represented in pixel-space, like semantic segmentation or image colorization.
+\textbf{Visual Prompting}. Recently, multiple papers have proposed methods to visually prompt computer vision models~\citep{bahng2022exploring, jia2022visual, bargandelsman2022visual}. \cite{bahng2022exploring} proposes to add noise tensor to the input image to adapt the model to different tasks, while~\cite{jia2022visual} proposes to append learned tokens to Vision Transformers~\citep{dosovitskiy2020image}, which draws motivation from prefix tuning in NLP~\citep{li2021prefix}. These two approaches are trained on supervised data and thus struggle to scale and generalize to new tasks. \cite{bargandelsman2022visual} takes a different approach and trains on unstructured crops from computer vision paper figures. According to this approach, visual prompting is viewed as an Image Inpainting task by creating an image grid containing input-output examples and new image input. The goal of the inpainting model is then to complete the output in a way that is consistent with the input. We follow a similar definition of visual prompt as in~\citep{bargandelsman2022visual}, however, we propose to condition the model on textual input as well which might help to solve ambiguities in the task description and can more efficiently guide the visual model toward performing the desired task.
+\textbf{Image Inpainting and Image Synthesis}.
+Early image inpainting methods relied on the input image itself for inpainting~\citep{Efros99,bertalmio2000image,criminisi2004region,barnes2009patchmatch}, whereas more recent works leveraged image datasets for this purpose~\citep{Hays:2007,pathak2016context,yang2017high,liu2018image,Liu_2018_ECCV}. Lately, diffusion models have demonstrated large success in image inpainting and image synthesis~\citep{dalle2,ldm}, as well as other popular transformer-based methods~\citep{chen2020generative, yu2021diverse, esser2021taming, yu2021vector,chang2022maskgit}. Few of these approaches rely on discrete latent codebooks which induce a distribution over possible completions~\citep{van2017neural,ramesh2021zero,esser2021taming,yu2021vector,chang2022maskgit}. For instance, \cite{esser2021taming,yu2021vector} proposed to synthesize images using an autoregressive model on a codebook representation, while \cite{chang2022maskgit} applied iterative parallel decoding of the tokens. Few approaches also support image synthesis with text conditioning - MUSE~\citep{chang2023muse}, for example, is a transformer-based model that applies cross-attention from image embeddings (VQGAN~\citep{esser2021taming}) to the text embeddings extracted from a pre-trained model (e.g. T5~\citep{raffel2020exploring}) to condition on text. Our model is conceptually similar to MUSE~\citep{chang2023muse}, however, we focus on inpainting grid-like visual prompts that require reasoning across multiple sub-images and input text.
+\textbf{Few-Shot Learning.} In this setting, the algorithm is trained on a labeled dataset of base classes, from which it should transfer to a set of novel classes given only a few training examples (like 10 or 30)~\citep{nguyen2019feature,kang2019few,liu2020part,wang2020frustratingly,yang2020prototype,tian2020prior,zhang2021few,bar2021detreg}. Unlike Few-Shot approaches, here we do not assume access to a large training set of base-classes, and our architecture is not task-specific. Our approach is Few-Shot only in the sense that the visual part of our prompt usually contains one or two task examples.
+
+
+\section{Discussion}
+
+ We presented an approach for multimodal prompting of inpainting models. To unlock in-context learning capabilities in such models, we had to collect a specific dataset of figures with associated captions. To further scale this approach, we believe that other sources of unstructured data - visual, textual, and multimodal - should be incorporated during the training phase. To understand the feasibility of such a data collection effort, one must be able to predict and quantify the effect of different dataset sizes and types on the downstream in-context learning capabilities of models trained on them.  We plan to investigate it in future work. 
+
+
+
+
+

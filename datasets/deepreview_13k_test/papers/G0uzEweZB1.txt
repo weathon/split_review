@@ -1,0 +1,408 @@
+\title{FrAug: Frequency Domain Augmentation for Time Series Forecasting}
+
+\begin{abstract}
+Data augmentation (DA) has become a \emph{de facto} solution to expand training data size for deep learning. With the proliferation of deep models for time series analysis, various time series DA techniques are proposed in the literature, e.g., cropping-, warping-, flipping-, and mixup-based methods. However, these augmentation methods mainly apply to time series classification and anomaly detection tasks. In time series forecasting (TSF), we need to model the fine-grained temporal relationship within time series segments to generate accurate forecasting results given data in a look-back window. Existing DA solutions in the time domain would break such a relationship, leading to poor forecasting accuracy. To tackle this problem, this paper proposes simple yet effective frequency domain augmentation techniques that ensure the semantic consistency of augmented data-label pairs in forecasting, named \emph{FrAug}. We conduct extensive experiments on eight widely-used benchmarks with several state-of-the-art TSF deep models. Our results show that FrAug can boost the forecasting accuracy of TSF models in most cases. Moreover, we show that FrAug enables models trained with 1\% of the original training data to achieve similar performance to the ones trained on full training data, which is particularly attractive for cold-start forecasting. Finally, we show that applying test-time training with FrAug greatly improves forecasting accuracy for time series with significant distribution shifts, which often occurs in real-life TSF applications. Our code is available at \url{https://anonymous.4open.science/r/Fraug-more-results-1785}.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+
+
+
+
+
+
+
+
+Deep learning is notoriously data-hungry. Without abundant training data, deep models tend to suffer from poor convergence or overfitting problems. Since collecting and labeling real-world data can be costly and time-consuming, 
+data augmentation (DA) has become a \emph{de facto} solution to expand the training dataset size for performance improvement~\cite{cubuk2019autoaugment}. 
+With the proliferation of deep models for time series analysis, various time series DA techniques are proposed in the literature. As shown in~\cite{wen2020time}, most of them focus on the classification and the anomaly detection (AD) tasks, partly because the time series forecasting (TSF) task comes with natural labels without extra labeling efforts. However, the TSF task may also suffer from severe data scarcity problems. 
+For example, one important use case, cold-start forecasting, performs time series forecasting (TSF) with little or no historical data, e.g., sales prediction for new products. More importantly, even for time series with sufficient historical data, there might be significant distribution shifts in the forecasting horizon, rendering historical data less useful~\cite{pham2022learning}. Under such circumstances, we need to retrain the forecasting model to fit the new data distribution. Consequently, effective DA techniques are essential for the TSF task. 
+When using data augmentation for supervised learning, we create artificial data-label pairs from existing labeled data. It is critical to ensure the semantic consistency of such modified data-label pairs. Otherwise, \emph{augment ambiguity} is introduced, thereby deteriorating the performance of the model instead of improving it, as examined in several previous works in the computer vision (CV) field~\cite{gong2021keepaugment,wei2020circumventing}. In fact, DA for image data is less ambiguous when compared to that for time series data, because image data are relatively easy to interpret, enabling us to create semantics-preserving augmentations (e.g., rotation and cropping/masking less relevant regions). 
+
+In contrast, time series data are comprised of events generated from complicated dynamic systems. We are interested in the temporal relationship among continuous data points in the series. As any perturbations would change such a relationship, care must be taken to ensure that the semantics of the data-label pair is preserved, i.e., they are likely to occur according to the behavior of the underlying system. 
+For time series classification, we could perform window cropping~\cite{cui2016multi,le2016data}, window warping~\cite{wen2020time}, and noise injection~\cite{wen2019time} on time series without changing the classification labels as long as such manipulations do not yield class changes. Similarly, label expansion~\cite{gao2020robusttad} that manipulates the ``blurry'' start and end points of sequence anomalies brings performance improvements for the anomaly detection task. 
+
+However, time series forecasting is a regression task. It requires modeling the fine-grained temporal relationship within a timing window divided into two parts: the data points in the \emph{look-back window} and those in the \emph{forecasting horizon}, serving as the data and the label when training TSF models, respectively. Aggressive augmentation methods such as cropping or warping would cause missing values or periodicity changes in the series and hence do not apply to TSF models. In other words, the augmented data-label pairs for TSF should be much more stringent than those for other time series analysis tasks, which have not been thoroughly investigated in the literature.
+
+In this paper, we argue that well-designed data augmentations in the frequency domain can preserve the fine-grained temporal relationship within a timing window. For a dynamic system that generates time series data, its forecastable behavior is usually driven by some periodical events\footnote{The measurements contributed by random events are not predictable.}. By identifying and manipulating such events in the frequency domain, the generated data-label pairs would remain faithful to the underlying dynamic system. This motivates us to propose two simple yet effective frequency domain augmentation methods for TSF, named \emph{FrAug}. Specifically, FrAug performs \emph{frequency masking} and \emph{frequency mixing}, which randomly eliminate some frequency components of a timing window or mix up the same frequency components of different timing windows. Experimental results on eight widely-used TSF benchmark datasets show that FrAug improves the forecasting accuracy of various deep models, especially when the size of the training dataset is small, e.g., for cold-start forecasting or forecasting under distribution shifts. 
+
+
+
+Specifically, the main contributions of this work include: 
+
+\begin{itemize}
+    \item To the best of our knowledge, this is the first work that systematically investigates data augmentation techniques for the TSF task.
+    \item We propose a novel frequency domain augmentation technique named \emph{FrAug}, including two simple yet effective methods (i.e., frequency masking and frequency mixing) that preserve the semantic consistency of augmented data-label pairs in forecasting. In our experiments, we show that FrAug alleviates overfitting problems of state-of-the-art (SOTA) TSF models, thereby improving their forecasting performance. 
+    \item FrAug enables models trained with 1\% of the original training data to achieve similar performance to the ones trained on full training data in some datasets, which is particularly attractive for cold-start forecasting problems.
+    \item We further design a test-time training policy and apply FrAug to expand the training dataset size. We experimentally show that such a strategy greatly mitigates the distribution shift problem, thereby boosting forecasting accuracy considerably. In particular, for the ILI dataset with severe distribution shifts, we can achieve up to 30\% performance improvements.
+\end{itemize}
+
+
+\section{Related Work and Motivation}
+
+Data augmentation methods are task-dependent. In this section, we first analyze the challenges in time-series forecasting in Sec.~\ref{sec:related_challenge}. Next, in Sec.~\ref{sec:related_aug}, we survey existing DA techniques for time series analysis and discuss why they do not apply to the forecasting task. Finally, we discuss the motivations behind the proposed FrAug solution in Sec.~\ref{sec:related_opp}.
+
+\subsection{Challenges in Time Series Forecasting}
+\label{sec:related_challenge}
+Given the data points in a look-back window $x=\{x^t_{1}, ..., x^t_{C}\}{_{t=1}^{L}}$ of multivariate time series, where $L$ is the look-back window size, C is the number of variates, and $x^t_{i}$ is the value of the $i_{th}$ variate at the $t_{th}$ time step. The TSF task is to predict the horizon $\hat{x}=\{\hat{x}^t_{1}, ..., \hat{x}^t_{C}\}{_{t=L+1}^{L+T}}$, the values of all variates at future T time steps. When the forecasting horizon $T$ is large, it is referred to as a long-term forecasting problem, which has attracted lots of attention in recent research~\cite{zhou2021informer,zeng2022transformers}. 
+
+Deep learning models have dominated the TSF field in recent years, achieving unparalleled forecasting accuracy for many problems, thanks to their ability to capture complicated temporal relationships of the time series by fitting on a large amount of data. However, in many real applications, time series forecasting remains challenging for two main reasons. 
+
+First, the training data can be scarce. Unlike computer vision or natural language processing tasks, time series data are relatively difficult to scale. Generally speaking, for a specific application, we can only collect real data when the application is up and running. 
+Data from other sources are often not useful (even if they are the same kinds of data), as the underlining dynamic systems that generate the time series data could be vastly different. 
+In particular, lack of data is a serious concern in cold-start forecasting and long-term forecasting. In cold-start forecasting, e.g., sales prediction for new products, we have no or very little historical data for model training. In long-term forecasting tasks, the look-back window and forecasting horizon are large, requiring more training data for effective learning. Over-fitting caused by data scarcity is observed in many state-of-the-art models training on several benchmark time-series datasets. 
+
+Second, some time-series data exhibits strong distribution shifts over time. 
+For example, promotions of products can increase the sales of a product and new economic policies would significantly affect financial data. When such a distribution shift happens, the model trained on previous historical data cannot work well. To adapt to a new distribution, a common choice is re-training the model on data with the new distribution. However, data under the new distribution is scarce and takes time to collect.  
+
+\begin{table*}[h]
+\centering
+\small
+{
+\begin{tabular}{c|c|c|c|c|c|c|c}
+\toprule
+Method & Origin & Noise & Noise* & Mask-Rand. & Mask-Seg. &Flipping &Warping\\ \midrule
+DLinear & 0.373 & 0.444 & \textbf{0.371} & 0.803 &0.448 & 0.544 &0.401  \\
+FEDformer & \textbf{0.374} & 0.380 & 0.397 & 0.448 &0.433 & 0.420 &0.385  \\
+Autoformer & \textbf{0.449} & 0.460 & 0.476& 0.608 & 0.568  & 0.446 &0.465  \\
+Informer & 0.931 & 0.936 & 1.112 & \textbf{0.846} & 1.013 & 0.955 &1.265 \\\bottomrule
+\end{tabular}
+}
+\caption{Results of different models trained on the ETTh1 dataset augmented by existing augmentation methods. We can observe that these methods will degrade performance in most cases. Noise uses up to 5\% of the value perturbation. The forecasting length is 96. The metric is MSE, the lower, the better. Methods* are applied in both the look-back window and forecasting horizon.}
+\label{tab:Trad}
+\end{table*}
+
+\subsection{Data Augmentation Methods for Time Series Analysis}
+\label{sec:related_aug}
+
+Various time series DA techniques are proposed in the literature. For the time series classification task, many works regard the series as a waveform image and borrow augmentation methods from the CV field, e.g., window cropping~\cite{le2016data}, window flipping~\cite{wen2020time}, and Gaussian noise injection~\cite{wen2019time}. There are also DA methods that take advantage of specific time series properties, e.g., window warping~\cite{wen2020time}, surrogate series~\cite{keylock2006constrained,lee2019surrogate}, and time-frequency feature augmentation~\cite{keylock2006constrained,steven2018feature,park2019specaugment,gao2020robusttad}. For the time series AD task, window cropping and window flipping are also often used. In addition, label expansion and amplitude/phase perturbations are introduced in~\cite{gao2020robusttad}. 
+With the above, one may consider directly applying these DA methods to the forecasting task to expand training data. We perform such experiments with several popular TSF models, and the results are shown in Table~\ref{tab:Trad}. As can be observed, these DA techniques tend to generate reduced forecasting accuracy. 
+The reason is rather simple: most of these DA methods introduce perturbation in the time domain (e.g., noise or zero masking), and the augmented data-label pairs do not preserve the semantics consistency required by the TSF task. 
+There are also a few DA techniques for the forecasting task presented in the literature. \cite{hu2020datsing} proposes \emph{DATSING}, a transfer learning-based framework that leverages cross-domain time series latent representations to augment target domain forecasting. \cite{bandara2021improving} introduces two DA methods for forecasting: (i). Average selected with distance (ASD), which generates augmented time series using the weighted sum of multiple time series~\cite{forestier2017generating}, and the weights are determined by the dynamic time warping (DTW) distance; (ii). Moving block bootstrapping (MBB) generates augmented data by manipulating the residual part of the time series after STL decomposition~\cite{cleveland1990stl} and recombining it with the other series. It is worth noting that, in these works, data augmentation is not the focus of their proposed framework,
+and the design choices for their augmentation strategies are not thoroughly discussed.
+
+\iffalse 
+\begin{figure*}[h]
+\centering
+    \makebox[\textwidth][c]
+    {\includegraphics[width=1.1\textwidth]{images/temporal_Augmentation5.pdf}}
+    \caption{Augmentation result of some previous augmentation on the 1000$\sim$1192 frames of 'OT' channel of ETTh1 dataset. The first row shows the waveform of the augmented time series. The second row shows the amplitude spectrum (AS.) of input and output, where these methods break the consistency of input and target output. The third row shows the amplitude spectrum of the augmented time series and original time series, in which we find that these augmentation methods introduce random noise on the entire frequency bands. \red{As the second and third columns show, adding consistent noise on both the look-back window and horizon will more severely break the consistency.} For a better scale, we removed the 0 frequency components from the graphs.}
+    \label{fig:aug_compare}
+\end{figure*}
+\fi
+
+\subsection{Why Frequency Domain Augmentation?}
+\label{sec:related_opp}
+
+The forecastable behavior of time series data 
+is usually driven by some periodical events. For example, the hourly sampled power consumption of a house is closely related to the periodical behavior of the householder. His/her daily routine (e.g., out for work during the day and activities at night) would introduce a daily periodicity, his/her routines between weekdays and weekends would introduce a weekly periodicity, while the yearly atmosphere temperature change would introduce an annual periodicity. Such periodical events can be easily decoupled in the frequency domain and manipulated independently.
+
+Motivated by the above, we propose to perform frequency domain augmentation for the TSF task. By identifying and manipulating events in the frequency domain for data points in both the look-back window and forecasting horizon, the resulting augmented data-label pair would largely conform to the behavior of the underlying system. 
+
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}  % Use Input in the format of Algorithm
+\renewcommand{\algorithmicensure}{\textbf{Output:}} % Use Output in the format of Algorithm
+
+
+
+\section{Methods}
+
+
+In this section, we detail the proposed frequency domain data augmentation methods for time series forecasting. 
+
+
+
+
+
+
+\subsection{The Pipeline of FrAug}
+
+ We only apply FrAug during the training stage and use original test samples for testing. 
+
+
+As shown in Figure~\ref{fig:aug_pipeline}, in the training stage, given a training sample (data points in the look-back window and the forecasting horizon), FrAug (i) concatenates the two parts, (ii) performs frequency domain augmentations, and (iii) splits the concatenated sequence back into lookback window and target horizon in the time domain. The augmentation result of an example time series training sample is shown in Figure~\ref{fig:fraug-feature}. 
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\linewidth]{images/augpipeline.pdf}
+    \caption{Illustration of the training process with FrAug.}
+    \label{fig:aug_pipeline}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=1\linewidth]{images/freq_Augmentation_simplified.pdf}
+    \caption{Visualization results of FrAug on 1000$\sim$1192 frames of 'OT' channel of ETTh1 dataset. The second row shows the original look-back window and target horizon have a similar distribution in amplitude spectrum (AS.). FrAug can preserve such consistency.}
+    \label{fig:fraug-feature}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{images/freqmaskmix.pdf}
+    \caption{Illustration of the proposed augmentation methods.}
+    \label{fig:freq masking and mixing}
+\end{figure}
+
+\subsection{Frequency Masking and Frequency Mixing}
+
+We propose two simple yet effective augmentation methods under FrAug framework, namely Frequency Masking and Frequency Mixing. Specifically, frequency masking randomly masks some frequency components, while frequency mixing exchanges some frequency components of two training samples in the dataset. %We elaborate on the details below.
+
+\textbf{Frequency masking:} The pipeline of frequency masking is shown in Figure~\ref{fig:freq masking and mixing}(a). 
+For a training sample comprised of data points in the look-back window $x_{t-b:t}$ and the forecasting horizon $x_{t+1:t+h}$, we first concatenate them in the time domain as $s=x_{t-b:t+h}$ and apply real FFT to calculate the frequency domain representation $S$, which is a tensor composed of the complex number. Next, we randomly mask a portion of this complex tensor $S$ as zero and get $\tilde{S}$. Finally, we apply inverse real FFT to project the augmented frequency domain representation back to the time domain $\tilde{s}=\tilde{x}_{t-b:t+h}$. The detailed procedure is shown in Algorithm~\ref{alg: freqmasking}.
+
+\begin{algorithm}
+    \caption{Frequency Masking}
+    \label{alg: freqmasking}
+    \begin{algorithmic}[1]
+        \REQUIRE
+            Look-back window $x$, target horizon $y$, mask rate $\mu$
+        \ENSURE
+            Augmented Look-back window $\tilde{x}$, augmented target horizon $\tilde{y}$
+        \STATE $s = x || y$; \COMMENT {Concatenate x and y}
+        \STATE $S = rFFT(s)$; \COMMENT {Calculate the frequency representation $S$. $S$ is composed of complex numbers and have length of $(b+h) // 2 + 1$}
+        \STATE $m = CreateRandomMask(len(S), \mu)$ \COMMENT {Create random mask for frequency representation with mask rate $\mu$}
+        \STATE $\tilde{S} = Masking(S, m)$; 
+        \STATE $\tilde{s} = irFFT(\tilde{S})$;
+        \STATE $\tilde{x}, \tilde{y} = s[0:b], s[b:b+t]$; \COMMENT {Split the augmented training sample}
+        
+    
+    \end{algorithmic}
+\end{algorithm}
+
+Frequency Masking corresponds to removing some events in the underlying system. For example, considering the household power consumption time series, removing the weekly frequency components would create an augmented time series that belongs to a house owner that has similar activities on the weekdays and weekends. 
+
+\textbf{Frequency mixing:} The pipeline of frequency mixing is shown in Figure~\ref{fig:freq masking and mixing}, wherein we randomly replace the frequency components in one training sample with the same frequency components of another training sample in the dataset. The details of this procedure are presented in Algorithm~\ref{alg: freqmixing}.
+
+
+\begin{algorithm}
+    \caption{Frequency Mixing}
+    \label{alg: freqmixing}
+    \begin{algorithmic}[1]
+        \REQUIRE
+            Look-back window $x1$, target horizon $y1$, another training sample pair $x2$, $y2$, mix rate $\mu$
+        \ENSURE
+            Augmented look-back window $\tilde{x}$, augmented target horizon $\tilde{y}$
+        \STATE $s1 = x1 || y1, s2 = x2 || y2$; \COMMENT {Concatenate x and y}
+        \STATE $S1 = rFFT(s1), S2 = rFFT(s2)$; \COMMENT {Calculate the frequency representation $S$. $S$ is composed of complex numbers and have length of $(b+h) // 2 + 1$}
+        \STATE $m1 = CreateRandomMask(len(S), \mu)$ \COMMENT {Create random mask for frequency representation with mix rate $\mu$ no more than 0.5}
+        \STATE $m2 = BitwiseNOT(m1)$ \COMMENT {Create inverted mask for training sample 2}
+        \STATE $\tilde{S} = Masking(S1, m1) + Masking(S2, m2)$; 
+        \STATE $\tilde{s} = irFFT(\tilde{S})$;
+        \STATE $\tilde{x}, \tilde{y} = s[0:b], s[b:b+t]$; \COMMENT {Split the augmented training sample}
+    \end{algorithmic}
+\end{algorithm}
+
+
+
+Similarly, frequency mixing can be viewed as exchanging events between two samples. For the earlier example on household power consumption, the augmented time series could be one owner's weekly routine replaced by another's, and hence the augmented data-label pair largely preserves semantical consistency for forecasting.  
+Note that, frequency masking and frequency mixing only utilize information from the original dataset, thereby avoiding the introduction of unexpected noises compared to those dataset expansion techniques based on synthetic generation~\cite{esteban2017real,yoon2019time}. Moreover, as the number of combinations of training samples and their frequencies components in a dataset is extremely large, FrAug can generate nearly infinite reasonable samples.
+
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+In this section, we apply FrAug to three TSF application scenarios: long-term forecasting, cold-start forecasting, and test-time training. Due to space limitations, the experimental results for other applications (e.g. 
+
+\subsection{Experimental Setup}
+
+\begin{table*}[h]
+\begin{center}
+\small
+\begin{tabular}{c|ccccccc} \toprule
+\textbf{Dataset}       & Exchange-Rate & Traffic     & Electricity   & Weather      & ETTh1$\&$ETTh2       & ETTm1 $\&$ETTm2    & ILI          \\ \midrule
+Variates        & 8 & 862         & 321                       & 21 & 7          & 7    & 7           \\
+Frequency    & 1day          & 1hour       & 1hour          & 10min       & 1hour      & 5min & 1week
+\\ 
+Total Timesteps        & 7,588       & 17,544      & 26,304              & 52,696    & 17,420     & 69,680 & 966\\ 
+\bottomrule
+\end{tabular}
+\end{center}
+\caption{The statistics of the nine used datasets.}
+\label{tab:datasets}
+\end{table*}
+
+\input{Tables/ett_main_results.tex}
+\input{Tables/other_main_results.tex}
+
+\textbf{Dataset}. 
+All datasets used in our experiments are widely-used and publicly available real-world datasets, including Exchange-Rate~\cite{GuokunLai2017lstm}, Traffic, Electricity, Weather, ILI, ETT~\cite{zhou2021informer}.
+We summarize the characteristics of these datasets in Table~\ref{tab:datasets}. 
+
+\textbf{Baselines}.
+We compare FrAug, including Frequency Masking (FreqMask) and Frequency Mixing (FreqMix), with existing time-series augmentation techniques for forecasting, including ASD~\cite{forestier2017generating,bandara2021improving} and MBB~\cite{bandara2021improving,bergmeir2016bagging}. 
+\textbf{Deep Models}.
+In the main paper, we include four state-of-the-art deep learning models for long-term forecasting, including Informer~\cite{zhou2021informer}, Autoformer~\cite{wu2021autoformer}, FEDformer~\cite{zhou2022fedformer} and DLinear~\cite{zeng2022transformers}. 
+The effectiveness of augmentations methods is evaluated by comparing the performance of the same model trained with different augmentations. 
+
+\textbf{Evaluation metrics}.
+Following previous works~\cite{zhou2021informer,wu2021autoformer,zhou2022fedformer,zeng2022transformers,zhang2022less,zhou2022film,minhaoscinet}, we use Mean Squared Error (MSE) as the core metrics to compare forecasting performance. 
+
+\textbf{Implementation}.
+FreqMask and FreqMix only have one hyper-parameter, which is the mask rate/mix rate, respectively. In our experiments, we only consider {0.1, 0.2,0.3,0.4,0.5}. We use cross-validation to select this hyper-parameter.
+
+\subsection{Long-term Forecasting}
+\label{sec:main-results}
+
+Table~\ref{tab:ett-main} and Table~\ref{tab:four-main} show the results of long-term forecasting. We use different augmentation methods to double the size of the training dataset. 
+As can be observed, FreqMask and FreqMix improve the performance of the original model in most cases. However, the performances of ASD and MBB are often inferior to the original model. 
+
+Notably, FreqMask improves DLinear's performance by 16\% in ETTh2 when the predicted length is 192, and it improves FEDformer's performance by 28\% and Informer's performance by 56\% for the Weather dataset when the predicted length is 96. 
+Similarly, FreqMix improves the performance of Autoformer by 27\% for ETTm2 with a predicted length of 96 and the performance of Informer by 35\% for ETT2 with a predicted length of 720. These results indicate that FrAug is an effective DA solution for long-term forecasting, significantly boosting SOTA performance in many cases. 
+
+\begin{figure}[t]	
+	\subfigure[Curve of Autoformer] 
+	{
+		\begin{minipage}{4cm}
+			\centering          
+			\includegraphics[scale=0.234]{images/overfit_autoformer.pdf}
+		\end{minipage}
+	}
+	\subfigure[Curve of Informer] 
+	{
+		\begin{minipage}{4cm}
+			\centering          
+			\includegraphics[scale=0.234]{{images/overfit_informer.pdf}}   
+		\end{minipage}
+	}
+	\caption{The over-fitting problem of Autoformer(a) and Informer(b). We plot the training(red) and testing(blue) curve in the ETTh1 dataset and predict length 96. The X axis is the epoch and the Y axis is the loss. Models are trained with the early stop policy. The testing curve is much more flattened after applying FreqMask and FreqMix.} % 
+\label{fig:overfit}  %图片引用标记
+\end{figure}
+
+\begin{figure}[h]	
+	\subfigure[Autoformer, ETTh2] %第一张子图 289-6
+	{
+		\begin{minipage}{4cm}
+			\centering          %子图居中
+			\includegraphics[scale=0.13]{images/autoformer_mask_ETTh2_fig_6_289.pdf}   %以pic.jpg的0.4倍大小输出
+		\end{minipage}
+	}
+	\subfigure[Informer, Weather] %第二张子图 2790-6
+	{
+		\begin{minipage}{4cm}
+			\centering      %子图居中
+			\includegraphics[scale=0.13]{images/informer_mix_weather_fig_8_2790.pdf} 
+		\end{minipage}
+      
+	}
+	\subfigure[Autoformer, ETTh2] %第一张子图 967-4
+	{
+		\begin{minipage}{4cm}
+			\centering          %子图居中
+			\includegraphics[scale=0.13]{images/autoformer_mix_ETTh2_fig_4_967.pdf}   %以pic.jpg的0.4倍大小输出
+		\end{minipage}
+	}
+	\subfigure[Informer, Weather] %第二张子图 , 2927-17
+	{
+		\begin{minipage}{4cm}
+			\centering      %子图居中
+			\includegraphics[scale=0.13]{images/informer_mask_weather_fig_17_2927.pdf}   
+		\end{minipage}
+	}
+	\caption{Visualization of the forecasting curves of different methods. The X axis is the time steps, and the Y axis shows the forecasting value. With FrAug, models are less likely to overfit.} % 
+	\label{fig:visualize_overfit}  %图片引用标记
+\end{figure}
+
+We attribute the performance improvements brought by FrAug to its ability to alleviate the over-fitting issues. Generally speaking, a large gap between the training loss and the test loss, the so-called generalization gap, is an indicator of over-fitting. Figure~\ref{fig:overfit} demonstrates training loss and test error curves from deep models Autoformer and Informer. Without FrAug, the training loss of Autoformer and Informer decease with more training epochs, but the test errors increase. In contrast, when FrAug is applied to include more training samples, the test loss can decrease steadily until it is stable. This result clearly shows the benefits of FrAug. 
+\begin{figure*}[ht]	
+    \subfigure[DLinear, ETTh1] %第二张子图
+	{
+		\begin{minipage}{5.7cm}
+			\includegraphics[scale=0.32]{images/test_train/DLinear_ETTh1_336.pdf} 
+		\end{minipage}
+      
+	}
+	\subfigure[FEDformer, ETTh2] %第一张子图
+	{
+		\begin{minipage}{5.7cm}
+			\includegraphics[scale=0.32]{images/test_train/FEDformer_ETTh2_720.pdf}   
+		\end{minipage}
+	}
+	\subfigure[Autoformer, ILI] %第二张子图
+	{
+		\begin{minipage}{5.7cm}
+			\includegraphics[scale=0.32]{images/test_train/Autoformer_ILI_60.pdf} 
+		\end{minipage}
+      
+	}
+    \caption{Visualization of the forecasting curves of different methods in every part of the dataset under test-time training policy. We divide a dataset into 20 parts. The X axis is the index of each part, and the Y axis shows the corresponding test error. When a distribution shift happens, the forecasting error increases significantly. FrAug can mitigate such performance degradation.} % 
+\label{fig:test_train}  %图片引用标记
+\end{figure*}
+\begin{figure}[h]	
+    \centering
+    \includegraphics[scale=0.4]{images/distribution/national_illness_C6.pdf} 
+	\caption{Visualization of the last channel of the ILI dataset. Distribution shifts happen at the middle and the end of the dataset.} % 
+	\label{fig:ILI_distribution}  %图片引用标记
+\end{figure}
+In Figure~\ref{fig:visualize_overfit}, we visualize some prediction results with/without FrAug. Without FrAug, the model can hardly capture the scale of data, and the predictions show little correlation to the look-back window, i.e, there is a large gap between the last value of the look-back window and the first value of the predicted horizon. This indicates that the models are over-fitting. In contrast, with FrAug, the prediction is much more reasonable. 
+
+\begin{table*}[t]
+\setlength\tabcolsep{3pt} 
+\centering
+\normalsize
+\vskip 0.06in
+\scalebox{0.8}{
+\begin{tabular}{c|c|cccc|cccc|cccc|cccc}
+\toprule
+\textbf{Model}
+ & \textbf{Method} & \multicolumn{4}{c|}{\textbf{ETTh2}} & \multicolumn{4}{c|}{\textbf{Exchange Rate}} & \multicolumn{4}{c|}{\textbf{Electricity}} & \multicolumn{4}{c}{\textbf{Traffic}} \\
+  & & 96 & 192 & 336 & 720 & 96 & 192 & 336 & 720 & 96 & 192 & 336 & 720 & 96 & 192 & 336 & 720 \\\midrule
+\multirow{4}[2]{*}{{DLinear}} & Full Data & 0.295 & 0.378 & 0.421 & 0.696 & 0.079 & 0.205 & 0.309 & 1.029 & 0.140 & 0.154 & 0.169 & 0.204 & 0.410 & 0.423 & 0.436 & 0.466 \\ \cline{2-18}
+& 1\% Data & 0.572 & 0.704 & 0.628 & 0.662 & 0.280 & 0.549 & 1.711 & 0.897 & 0.196 & 0.205 & 0.218 & 0.280 & 0.764 & 0.658 & 0.825 & 0.908 \\
+& FreqMask & \textbf{0.351} & \textbf{0.467} & \textbf{0.541} & \textbf{0.640} & 0.174 & 0.258 & \textbf{0.777} & \textbf{0.820} & \textbf{0.172} & \textbf{0.183} & \textbf{0.197} & \textbf{0.257} & \textbf{0.466} & \textbf{0.484} & \textbf{0.509} & \textbf{0.539} \\
+& FreqMix & 0.464 & 0.531 & 0.590 & 1.005 & \textbf{0.139} & \textbf{0.252} & 1.205 & 0.897 & 0.176 & 0.185 & 0.200 & \textbf{0.257} & 0.486 & 0.510 & 0.515 & 0.578 \\
+\hline
+\multirow{4}[2]{*}{{Autoformer}} & Full Data & 0.432 & 0.430 & 0.482 & 0.471 & 0.145 & 0.385 & 0.453 & 1.087 & 0.203 & 0.231 & 0.247 & 0.276 & 0.624 & 0.619 & 0.604 & 0.703
+\\ \cline{2-18}
+& 1\% Data & 0.490 & 0.546 & 0.498 & 0.479 & 0.247 & 0.487 & \textbf{0.579} & 1.114 & 0.462 & 0.488 & 0.518 & 0.541 & 1.238 & 1.366 & 1.299 & 1.325 \\
+& FreqMask & \textbf{0.409} & \textbf{0.496} & \textbf{0.476} & \textbf{0.471} & \textbf{0.166} & \textbf{0.304} & 0.791 & \textbf{1.085} & \textbf{0.326} & 0.331 & 0.410 & 0.483 & 0.761 & \textbf{0.832} & \textbf{0.706} & \textbf{0.786} \\
+& FreqMix & 0.414 & 0.502 & 0.484 & \textbf{0.471} & 0.208 & 0.369 & 0.832 & 1.091 & 0.347 & \textbf{0.326} & \textbf{0.381} & \textbf{0.479} & \textbf{0.746} & 0.844 & 0.715 & 0.795 \\
+
+ \bottomrule
+\end{tabular}
+}
+\caption{Performance of models trained with the last 1\% training samples compared with that trained with the full training set. Performances are measured by MSE. The \textbf{best results} are highlighted in {\textbf{bold}} (row full data is not included). }
+\label{tab:few-shot}
+\end{table*}
+
+\subsection{Cold-start Forecasting}
+Another important application of FrAug is cold-start forecasting, where only very few training samples are available. 
+To simulate this scenario, we reduce the number of training samples of each dataset to the last 1\% of the original size. For example, we only use the 8366\textsuperscript{th}-8449\textsuperscript{th} training samples (83 in total) of the ETTh2 dataset for training. Then, we use FrAug to generate augmented data to enrich the dataset. In this experiment, we only consider two extreme cases: enlarging the dataset size to 2x or 50x, and the presented result is selected by cross-validation. Models are evaluated on the same test dataset as the original long-term forecasting tasks. 
+
+Table~\ref{tab:few-shot} shows the results of two forecasting models: DLinear and Autoformer on 4 datasets. We also include the results of models trained with the full dataset for comparison. As can be observed, FrAug maintains the overall performances of the models to a large extent. For the Traffic dataset, compared with the one trained on full training data, the overall performance drop of DLinear is 13\% with FrAug, while the drop is 45\% without FrAug. Surprisingly, sometimes the model performance is even better than those trained with the full dataset. For example, the performance of Autoformer is 5.4\% better than the one trained with the full dataset for ETTh2 when the predicted length is 96. The performance of DLinear is 20\% better than the one trained with the full dataset for Exchange Rate when the predicted length is 720. We attribute it to the distribution shift in the full training dataset, which could deteriorate the model performance. 
+\subsection{Test-time Training}
+Distribution shifts often exist between the training data and the test data. For instance, as shown in Figure~\ref{fig:ILI_distribution}, the distribution of data (trend and mean value) changes dramatically at the middle and the end of the ILI dataset.
+
+As time-series data is continuously generated in real applications, a natural solution to tackle this problem is to update the model when the new data is available for training~\cite{pham2022learning}. To simulate the real re-training scenario, we design a simple test-time training policy, where we divide the dataset into several parts according to their arrival times. The model is retrained after all the data points in each part are revealed. Specifically, the model is trained with the data in the first part and tested on data in the second part. Then, the model will be re-trained with data in both the first and second parts and tested on data in the third part. 
+
+In our experiments, we divide the dataset into 20 parts and use the above setting as the baseline. Then, we validate the effectiveness of FrAug under the same setting. FrAug can help the model fit into a new distribution by creating augmented samples with the new distribution. 
+Specifically, for data that are just available for training, which is more likely to have the same distribution as future data, we create 5 augmented samples. The number of augmented samples gradually decreases to 1 for old historical data. We conduct experiments on ETTh1, ETTh2, and ILI datasets, which have relatively higher distribution shifts compared to other datasets. 
+Figure~\ref{fig:test_train} shows the test loss of the models in every part of the dataset. As expected, when a distribution shift happens, the test loss increases. However, FrAug can mitigate such performance degradation of the model under distribution shift. Notably, in Figure~\ref{fig:test_train}(c), when the distribution shift happens in the 8th part (refer to Figure~\ref{fig:ILI_distribution} for visualization). With FrAug, the test loss decreases in the 9th part, while the test loss of the baseline solution keeps increasing without FrAug. This indicates that FrAug helps the model fit into the new distribution quickly.
+
+
+
+\section{Conclusion}
+
+
+
+This work explores effective data augmentation techniques for the time series forecasting task. By systematically analyzing existing augmentation methods for time series, we first show they are not applicable for TSF as the augmented data-label pairs cannot meet the semantical consistency requirements in forecasting. Then, we propose FrAug, an easy-to-implement frequency domain augmentation solution, including frequency masking and frequency mixing strategies that effectively expand training data size.  
+
+Comprehensive experiments on widely-used datasets validate that FrAug alleviates the overfitting problems of state-of-the-art TSF models, thereby improving their forecasting performance. 
+In particular, we show that FrAug enables models trained with 1\% of the original training data to achieve similar performance to the ones trained on full training data, making it an attractive solution for cold-start forecasting. Moreover, we show that applying test-time training with FrAug greatly improves forecasting accuracy for time series with significant distribution shifts, which often occurs in real-life TSF applications.
+
+\newpage
+
+
+
+
+
+
+

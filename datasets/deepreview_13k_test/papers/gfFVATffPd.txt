@@ -1,0 +1,203 @@
+\title{Attention Satisfies: A Constraint-Satisfaction Lens on Factual Errors of Language Models}
+
+\begin{abstract}
+We investigate the internal behavior of Transformer-based Large Language Models (LLMs) when they generate factually incorrect text. We propose modeling factual queries as constraint satisfaction problems and use this framework to investigate how the LLM interacts internally with factual constraints. We find a strong positive relationship between the LLM's attention to constraint tokens and the factual accuracy of generations. We curate a suite of 10 datasets containing over 40,000 prompts to study the task of predicting factual errors with the Llama-2 family across all scales (7B, 13B, 70B). We propose SAT Probe, a method probing attention patterns, that can predict factual errors and fine-grained constraint satisfaction, and allow early error identification. The approach and findings take another step towards using the mechanistic understanding of LLMs to enhance their reliability.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\renewcommand{\thefootnote}{\fnsymbol{footnote}}
+\footnotetext[2]{Correspondence to \texttt{merty@stanford.edu} and \texttt{besmira.nushi@microsoft.com}.}
+\footnotetext[3]{This work was done while at Microsoft Research.}
+\renewcommand{\thefootnote}{\arabic{footnote}}
+
+Large language models~(LLMs) encode substantial knowledge~\citep{petroni2019language, srivastava2022beyond}, yet they are prone to generating factually incorrect text. For instance, LLMs can generate confident-appearing completions with \textit{hallucinations}~\citep{zhang2023language,ji2023survey}, fabricating entities or factual claims. As LLMs reach wider audiences and are used for safety-critical applications, understanding the factuality of generations rises to paramount importance. However, our understanding of how LLMs process factual queries and produce errors is nascent. Existing approaches fall into two categories: i) treat the LLM as a black box and query it about generated factual claims, or ii) use white-box methods to study how LLMs internally process factual queries. %Though insightful and exploratory, each approach has limitations. 
+
+Black-box approaches center on analyzing the consistency of the claims of an LLM using follow-up questions with other LLMs~\citep{cohen2023lm} or having the LLM self-critique~\citep{zhang2023language, manakul2023selfcheckgpt}. However, explanations from LLMs are suggested to be unreliable~\citep{turpin2023language} or to convey contradictory signals, e.g., LLMs can produce an answer and then acknowledge that it is wrong~\citep{zhang2023language,mundler2023self}. Further, black-box methods typically involve multiple generations from LLMs, which may be prohibitively expensive to use in practice. 
+
+Mechanistic white-box approaches investigate the internal mechanisms of LLMs to dissect factual recall. For instance, \citet{meng2022locating, geva2023dissecting} focus on facts with the (subject, relation, object) structure~(e.g., Paris, capital of, France) and propose insightful mechanisms of how an LLM recalls a fact. They suggest that the multi-layer perceptron layers store facts, and attention layers transfer factual information from the subject tokens. However, these works focus on when the LLM generates factually correct responses. Mechanisms leading to factual errors are scarcely explored.
+
+\textbf{Our Contributions:} We investigate the internal mechanisms of LLMs, specifically the attention patterns, when they produce factual errors. We propose to view factual queries as constraint satisfaction problems (CSPs), where queries comprise constraints that completions should satisfy to be factually correct~(\S\ref{sec:csp-perspective}); e.g., in Figure~\ref{fig:figure1} the \textit{director name} or the \textit{award name} are constraints on the model's response to a search query for a movie. We investigate the interaction between constraints, attention, and factual correctness~(\S\ref{sec:attention-satisfaction}). Our key finding is that attention to constraint tokens correlates with LLM's factual correctness, where less attention to constraints is associated with inaccurate responses. Building on our insights, we propose {\method}, a method that predicts constraint satisfaction~(and thus factual correctness), using a simple probe of the LLM's attention to constraints~(\S\ref{sec:predict-factual-errors}). To test {\method}, we curate a suite of $10$ datasets of single- and multi-constraint queries with in total over \datasetsize prompts. We find that {\method} performs comparably to the LLM's confidence. Further, {\method} can predict factual errors halfway through the forward pass to stop the computation partway and save costs. Our findings contribute to the mechanistic understanding of LLMs and demonstrate the potential of model internals to understand and mitigate factual errors.
+
+\begin{figure}[t]
+\includegraphics[width=1.0\textwidth]{figures/figure1.pdf}
+\caption{\textbf{Tracking attention to predict constraint satisfaction and factual errors.} We consider factual queries to LLMs as constraint satisfaction problems i.e., factual queries impose a set of constraints that the LLM’s responses must satisfy. To predict constraint satisfaction~(i.e., factual correctness), we track the attention to the constraint tokens in an LLM (here, Llama-2 13B). We find that attention to the constraint tokens highly correlates with factual correctness. The \textcolor{BrickRed}{red} (resp. \textcolor{Blue}{blue}) text indicates factually incorrect (resp. correct) completions.}
+\label{fig:figure1}
+\end{figure}
+
+
+
+\section{Background: Language Models and Factual Recall}
+
+\label{sec:background}
+
+Our presentation of the Transformer architecture~\citep{vaswani2017attention} largely follows that of \citet{meng2022locating, geva2023dissecting, elhage2021mathematical}. For brevity, we omit the details around layer normalization. Assume an input sequence of $T$ tokens $t_1, ..., t_T$ and $t_{i} \in \mathcal{V}$ for a fixed vocabulary $\mathcal{V}$. A token $t_{i}$ is represented  initially with a $d$-dimensional vector $\rvx_i^0 \in \mathbb{R}^{d}$ using an embedding matrix $E \in \mathbb{R}^{|\mathcal{V}|\times d}$. We use $\mathcal{V}^+$ to denote a sequence of tokens.
+
+The architecture consists of $L$ layers that transform the input token embeddings to a sequence of hidden states $\rvx_{1}^{\ell}, \ldots, \rvx_{T}^{\ell}$ at each layer $\ell$ where $\rvx_i^\ell$ denotes the state of token $i$. Often, each hidden state vector has the same number of dimensions, i.e., $\forall \, i, \ell \,\, \rvx_{i}^{\ell} \in \mathbb{R}^{d}$. The states are obtained by 
+\begin{equation}
+\label{eq:residual}
+\rvx_i^\ell = \rvx_i^{\ell-1} + \rva_i^{\ell} + \rvm_i^{\ell},
+\end{equation}
+where we call $\rvm_i^{\ell}$ the \textit{MLP contribution} and $\rva_i^{\ell}$ the \textit{attention contribution} to a token $i$ at layer $\ell$, respectively. The LLM produces a predicted probability distribution for the next token $\hat{\mathbb{P}}(t_{T+1}|t_{1:T})$ using a linear softmax layer on the last layer representation $x_T^L$. In this work, we study the interactions among tokens. 
+
+The \textbf{attention} operation updates each token's state using the previous states at all positions, i.e., the representation for a token is updated by `attending' to all other tokens. Formally, the operation involves four projection matrices $W_Q^\ell, W_K^\ell, W_V^\ell, W_{O}^{\ell} \in \mathbb{R}^{d \times d}$ that correspond to the `query', `key', `value', and `output' projections. Each of these is split into multiple heads, where $W_Q^{\ell, h}, W_K^{\ell, h}, W_V^{\ell, h} \in \mathbb{R}^{d \times d_{h}}$ and $ W_{O}^{\ell, h} \in \mathbb{R}^{d_h \times d}$ denote the matrices for head $h$, $H$ is the total number of heads, $d_{h}$ is the dimensionality for each head for $h \in [H]$. Often, embeddings are split into equal parts such that $d_{h} = \frac{d}{H}$~\citep{elhage2021mathematical, dar2022analyzing, touvron2023llama2}. The \textit{attention contribution} from the token $j$ to token $i$, $\rva_{i, j}^{\ell}$, is defined as:
+
+\begin{equation}
+    \rva_{i, j}^{\ell} = \sum_{h=1}^H A_{i, j}^{\ell,h} (x^{\ell-1}_{j} W_V^{\ell,h}) W_O^{\ell,h},\label{eq:attention-contribution}
+\end{equation}
+\begin{equation}    
+    A^{\ell,h} = \textrm{Softmax}\Bigg(\frac{\Big(X^{\ell-1}W_Q^{\ell,h}\Big)\Big(X^{\ell-1}W_K^{\ell,h}\Big)^T}{\sqrt{d_{h}/H}}\Bigg)\label{eq:attention_weights},
+\end{equation}
+
+where $\rva_{i}^{l} = \sum_{j \in [T]} \rva_{i, j}^{l}$ and Softmax is taken row-wise. $A^{\ell,h} \in \mathbb{R}^{T \times T}$ are the \emph{attention weights} computed by the $h$-th attention head at layer $\ell$, and $A^{\ell, h}_{i, j}$ is the entry in the $i$-th row and $j$-th column of the matrix. For autoregressive LLMs, $A^{\ell, h}$ is lower triangular since each token can only attend to the representation of the previous tokens. For brevity, we use $[H]$ to denote the sequence of integers from $1$ to $H$, and superscript $[H]$ indicates stacking items for all $h \in [H]$, i.e., $A^{\ell, [H]}_{i, j} = \{A^{\ell, h}_{i, j}\}^{H}_{h=1}\in \mathbb{R}^{H}$. 
+
+\textbf{Mechanics of Factual Recall in Language Models:} Recent work investigates the internal activations of LLMs to understand the mechanics of factual recall. By studying factual queries of the form (subject, relation, object), \cite{meng2022locating, geva-etal-2021-transformer} provide evidence that MLP layers store factual associations and \cite{geva2023dissecting, meng2022locating, elhage2021mathematical} suggest that attention layers transfer factual knowledge to where it will be used. As an example, when an LLM is given the prompt \textit{LeBron James professionally plays}, the information \textit{LeBron James professionally plays basketball} is extracted by the MLP contribution to the tokens for \textit{LeBron James}~(subject). Next, the attention layers transfer the information from the tokens of the subject to the last token for the LLM to generate \textit{basketball}~(object). While these works mostly study internal mechanisms when the LLM's completions are factually correct, we focus on \emph{when LLMs produce factually incorrect text}. 
+
+
+\section{Factual Queries as Constraint Satisfaction Problems}
+
+\label{sec:csp-perspective}
+Choosing the right framework to study factual errors is challenging. One can naively categorize completions as factually correct or incorrect, yet this binary view can fall short. For example, queries that are easy for the LLM and ones that it barely gets right are indistinguishable since both are labeled as `correct'. Further, binary labeling prevents us from building an understanding of why some queries are more difficult than others or which parts of the queries drive the LLM to failure. 
+
+To systematically study factual queries and LLMs' internal behavior, we propose taking a CSP view:
+\begin{definition}[Factual Query as a CSP] A factual query is specified by a set of constraints $\mathcal{C} = \{(C_{1}, V_{1}), \ldots (C_{K}, V_{K})\}$ where $C_{k} \in \mathcal{V}^{+}$ indicates the sequence of tokens for the constraining entity $k$\footnote{While it may be nontrivial to generally isolate tokens for the constraining entity for arbitrary queries, in our evaluations we investigate settings in which we assume we have access to this set.}, and $V_{k}: \mathcal{V}^{+} \to \{0, 1\}$ is a \emph{verifier} that takes a set of generation tokens as the input and returns whether the constraint indexed by $k$ is satisfied. Under this view, we call a completion $Y$ as a \textit{factual error} if $\exists \, k \in [K]:  V_{k}(Y)=0$, that is, if there is a constraint in the factual query that the response does not satisfy\footnote{Here, we focus on conjunctions of constraints, but the framework can be generalized to other operations.}. Otherwise, we call the response \emph{factually correct}.
+\end{definition} 
+
+A large set of factual queries can be viewed as a set of constraints that responses must satisfy to be correct, e.g., see Figure~\ref{fig:figure1}. This structure is comprehensive; for example, an important subset of queries made by users to search engines has historically been conjunctions of constraints~\citep{spink2001searching}. Structured and multi-constraint queries are also inherent to faceted search and information retrieval~\citep{tunkelang2009faceted,hahn2010faceted}. Further, under this definition, prior (subject, relation, object) queries~\citep{meng2022locating} can be seen to have a single-constraint structure. Similarly, instructions to LLMs are also constraints for controlling the output~\citep{ouyang2022training}. 
+
+Focusing on the constraints of a CSP can help us reason about the difficulty of a query and the behavior of the LLM. While there are several factors that can influence LLM's behavior, we shall start with two factors that can describe the difficulty of factual queries: i) the popularity of the constraining entity, and ii) the constrainedness of the query. 
+
+\begin{figure}[t]
+    \begin{subfigure}{0.5\textwidth}
+        \includegraphics[width=\textwidth]{figures/figure2a.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/figure2b.pdf}
+    \end{subfigure}
+    \caption{\textbf{Difficulty of the factual query vs LLM performance. Left: Popularity vs Correctness} We observe that the more popular the entity in the factual query is, the more correct the LLMs are. \textbf{Right: Constrainedness vs Correctness} We observe that the more constrained the problem is~(i.e., has a smaller set of potential solutions), the less correct the LLMs are.}
+    \label{figure:csp-complexity}
+\end{figure}
+
+\textbf{Popularity of the Entity vs LLM Performance:}
+Recent work has shown the correlation between training data frequency and memorization in LLMs~(\cite{carlini2022quantifying, biderman2023emergent}; \textit{inter alia}). However, even for many open-source LLMs, we cannot compute the frequency of facts since we do not have the training data or a trivial way to search for complex facts. As an accessible proxy for entities from WikiData, we use the number of site links on a page as the \emph{popularity} of entity; we hypothesize that it strongly correlates with the training data frequency or popularity. See Tables~\ref{table:popularity-basketball} and \ref{table:popularity-football} for examples of popularity statistics across basketball players and football teams. 
+
+For Figure~\ref{figure:csp-complexity} left, we use queries of the form \textit{Tell me the year the basketball player [name] was born in}~(see \ref{tab:datasets}) and evaluate LLMs' accuracy. We compare the correctness of the LLM for entities~(players) of varying popularity. We observe that i) LLM performance is better for entities with higher popularity, and ii) larger LLMs have better performance for entities that are less popular. Recent works show similar relationships with popular/typical input~\citep{mallen2022not, yuksekgonul2023beyond}. 
+
+\textbf{Constrainedness of the CSP vs LLM Performance:} A well-explored complexity metric for CSPs is constrainedness~\citep{gent1996constrainedness}. Here, we define constrainedness as the number of potential solutions to a given problem in the domain of the output. For instance, for a query of the form \textit{Tell me a word that starts with the letter e and ends with the letter t}, we quantify constrainedness by the number of such words\footnote{We use \texttt{nltk.corpus.words}~\citep{bird2009natural} to compute the number of such words.} in the English language that satisfy these constraints. Figure~\ref{figure:csp-complexity} right shows how constrainedness relates to success: i) LLMs have worse performance for more constrained problems, and ii) larger models perform better across all constrainedness levels.
+
+\textbf{Summary:} We argue that the CSP lens can provide a useful view to capture the difficulty of factual queries. Our goal is to build a framework to discuss how LLMs process factual queries and generate errors. Next, we investigate LLMs' internal mechanisms to understand factual errors.
+
+
+\section{Understanding Factual Errors via Attention to Constraints}
+
+\label{sec:attention-satisfaction}
+
+\begin{figure}[!t]
+\includegraphics[width=1.0\textwidth]{figures/figure1_singleconstraint.pdf}
+\caption{\textbf{Tracking attention to predict factual errors in single-constraint settings.} We track the attention contribution from the constraint tokens during generation. We observe a small-norm contribution~($||\rva_{i, T}^{\ell}||$) when the LLM makes a factual error and a larger-norm attention contribution when the LLM is factually correct. The \textcolor{BrickRed}{red} text indicates factually incorrect completions, whereas the \textcolor{Blue}{blue} text indicates factually correct completions.}
+\label{fig:single-constraint}
+\end{figure}
+
+Here, we explore how an LLM processes constraints when the model produces factually incorrect text. \citet{geva2023dissecting, meng2022locating} suggest that attention layers transfer the factual information from the source entity~(e.g., \textit{Bad Romance}) to the last token for generation~(to generate \textit{Lady Gaga}, Figure~\ref{fig:single-constraint}) when the LLM correctly addresses a query. However, these works do not explore the mechanisms when the model produces factually incorrect responses. Intuitively, we want to quantify how the LLM interacts with constraints to understand constraint satisfaction~(and thus factual errors).
+
+To study how the LLM processes a constraint, we focus on the attention \emph{to the constraint tokens}, i.e.,
+\begin{equation}
+    \va_{c, T}^{\ell, h} = A_{c, T}^{\ell, h}\big(x_{c}^{\ell-1}W_{V}^{\ell, h}\big)W_{O}^{\ell, h},\label{eq:attention_contribution_constraints}
+\end{equation}
+
+where $\va_{c, T}^{\ell, h} \in \mathbb{R}^{d}$ indicates the attention contribution from a constraint token $c$ through a head $h$ to the final token $T$~(where the $T+1$-th token will be generated). The total contribution to $T$ is then is $\va_{c, T}^{\ell} = \sum_{h} \va_{c, T}^{\ell, h}$. When the constraint comprises multiple tokens denoted by the set $C$, we take the maximum value across all constraint tokens, i.e., $A^{\ell, h}_{C, T} = \max_{c \in C} A^{\ell, h}_{c, T}$ or $\rva^{\ell, h}_{C, T} = \max_{c \in C} ||\rva^{\ell, h}_{c, T}||$\footnote{While there is earlier work that suggests the last constraint token could the most important, we observed that in practice there are subtleties.}. Figure~\ref{fig:figure1} shows an example. We track the regions that are marked by $C_{1}$ and $C_{2}$ that represent the constraints that the movies were directed by the given directors and won the given awards.
+
+To understand whether attention to constraints can help explain factual errors, we study three factors. First, we explore the relationship between attention and popularity of the constraining entity, as we find that LLM's correctness correlates with popularity~(Fig~\ref{figure:csp-complexity}). 
+Next, we explore the relation of attention to the LLM's confidence $\hat{\mathbb{P}}(Y|X)$, which estimates the probability of a completion $Y$ given the prompt $X$. Finally, we explore how attention patterns behave when we scale the LLMs.
+
+ In all Llama-2 models (7B, 13B, 70B), the predicted popularities using attention values significantly correlate with the ground truth popularity~(over a held-out set, with Spearman's Correlation $\rho \geq 0.65$ and p-value $p\approx0$ for all LLMs). 
+
+Popularity seems predictive, yet we may not always have access to a clean popularity measure or frequency of constraints in training data. Our main goal is to characterize and predict factual errors, thus we seek a more reliable indicator of factual correctness. % \emph{Why should we expect LLMs to have more attention to popular entities}? This finding aligns with the recent work that identifies a \emph{frequency bias} of attention layers,putting more attention on tokens that co-occur a lot with the query token during training~\citep{tian2023scan}.
+
+\textbf{Attention correlates with confidence and LLM's correctness:} In Figure~\ref{fig:analysis-confidence-mass} (left four panels), each row represents the attention flow across layers for a single sample and we sort the points by the confidence of the LLM. The leftmost panels show the attention for the $25$ most confident predictions and the middle panels show the $25$ least confident predictions, where the x-axis shows the layers, and colors indicate the norm of the attention contribution from the constraints~$\big(||\va_{C, T}^{\ell, [H]}||\big)$. The core observation is that \emph{when the LLM is accurate, there is more attention to constraint tokens}~(first column) in sharp contrast to cases where the LLM fails and the attention is weak~(second column).
+
+In Figure~\ref{fig:analysis-confidence-mass}'s rightmost plots, queries are sorted and grouped by the LLM's total attention contribution from the constraints across all layers ($\sum_{\ell}||\rva_{C, T}^{\ell}||$), and LLM's accuracy is computed for each group. We observe that \emph{the magnitude of attention to constraints correlates with accuracy}. This observation is not only interesting in hindsight; aforethought could have suggested either outcome (e.g., more attention correlating with hallucination). This is a positive observation that suggests attention to constraints can be used to predict LLM's success.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/figure_confidence_mass.pdf}
+    \caption{\textbf{Attention correlates with correctness. The first two columns of panels} give the $25$ samples for which the LLM makes the most and the least confident predictions. The color indicates the norm of the attention contribution from the constraint, where each column in the panel captures a layer in the LLM and each row is a specific sample. \textbf{The last column of panels} relates the total attention to constraints and accuracy, where the x-axis is the attention contribution percentile in the dataset and the y-axis is the accuracy in the bin.}
+    \label{fig:analysis-confidence-mass}
+\end{figure}
+
+\textbf{Language models grow larger, pay more attention, and succeed more:} In Figure~\ref{fig:analysis-scaling-consistency}, each panel compares the attention to constraints for the basketball player queries between two different LLMs, where the x-axis indicates the smaller LLM, the y-axis indicates the larger LLM and the coloring indicates the success of the pair of LLMs. We group prompts by the attention contribution, and color the cells by the the most frequent category. We find that more~(relatively) attention in both LLMs generally indicates success for both and less attention in both LLMs indicates failure for both. For cases on the top left, the larger LLM does pay more attention, and only the larger LLM succeeds. Overall, we note a consistent pattern between attention and correctness across model scales; performance improvements in larger LLMs correlate with increased attention to constraint tokens.
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/figure_scaling_consistency.pdf}
+    \caption{\textbf{Attention contribution and model scaling.} Here, the x-axis and y-axis show the attention to the constraints for the smaller LLM and the larger LLM, respectively, and \rebuttal{are normalized by dividing by the maximum value of total attention in the dataset}. Coloring is determined by which of the two LLMs succeeds in factual queries. We group the factual queries by their x-axis value and y-axis values and color the cell with the most frequent category in the cell.}
+    \label{fig:analysis-scaling-consistency}
+\end{figure}
+
+\textbf{Summary:} We explored the interaction between attention, constraints, and factual correctness. Our analyses suggest that attention can help us understand and predict factual errors. Next, we further pull this thread with extensive experiments to predict factual errors using LLMs’ attention patterns.
+
+
+\section{Predicting Factual Errors Using Attention to Constraints}
+
+\label{sec:predict-factual-errors}
+We now show how our mechanistic understanding can be used to predict the failures of LLMs. Let $X$ denote a prompt: a sequence of tokens that specifies a factual query with a set of constraints $\mathcal{C} = \{(C_{1}, V_{1}), \ldots (C_{K}, V_{K})\}$. Let $\hat{Y}$ be the response tokens obtained from the LLM after feeding $X$. Broadly, we want to design a function $f$ to estimate the probability that a constraint $k$ is satisfied:
+$$\hat{\mathbb{P}}(V_{k}(\hat{Y})=1) = f(X, \hat{Y}, C_{k}, \mathcal{M}),$$
+using the prompt, completion, constraint tokens, and the LLM $\mathcal{M}$. For single-constraint factual queries where there is a single correct completion $Y$, this can be reduced to the correctness $\hat{\mathbb{P}}(Y = \hat{Y}) = f(X, \hat{Y}, \mathcal{M})$. Note how this formalism closely matches that of selective classification~\citep{geifman2017selective}, where the goal is to abstain when the model would otherwise fail. 
+
+\textbf{Datasets:} For our evaluations, we curate a benchmark with \datasetcount datasets that are listed in Table~\ref{tab:datasets} containing over \datasetsize queries. For single-constraint queries, we curate 4 datasets using WikiData and 3 datasets using the existing CounterFact dataset~\citep{meng2022locating}. We further designed three $2$-constraint datasets, using WikiData~(Books), \citet{nobeldata}~(Nobel Winners), or hand-curation~(Words).
+
+\textbf{Constraint Verification~$(V_{k})$:} We use Exact Match\footnote{We acknowledge that exact match is a strict criterion that could introduce noise to our evaluations, and it constitutes a limitation where we use this verification. Evaluating factual correctness is still an evolving research topic~\citep{min2023factscore} and we do our best to find queries and prompt structures that suffer the least from this.} for single-constraint queries with a single solution. We probe WikiData to verify constraints when queries have multiple potential solutions.  
+
+\textbf{Models:} We use the 7B, 13B, and 70B parameter variants of Llama-2~\citep{touvron2023llama2} released at HuggingFace's Transformers~\citep{wolf2019huggingface}. We perform our experiments on a single NVIDIA A100-PCIE-80GB GPU. 80GB memory can only fit the Llama-2 70B in 8-bit precision~(\citet{dettmers2022llm} report marginal-to-no performance drop). 
+
+\textbf{Evaluation Metrics}: We use AUROC for the binary task of predicting failure or success as it does not require setting a threshold for the classifier. We also report $\text{Risk}_{\textrm{Top 20\%}}$~(the fraction of errors for the samples with top 20\% of the scores by the predictor $f$), $\text{Risk}_{\textrm{Bottom 20\%}}$~(the fraction of errors for the samples with the bottom 20\% of the scores by the predictor $f$). These metrics measure how well the model performs on the most and least reliable completions according to the predictor $f$. For a good success predictor, we want the error fraction to be low among high-score examples~(small $\text{Risk}_{\textrm{Top 20\%}}$) and have a large fraction of failures among low-score examples~(large $\text{Risk}_{\textrm{Bottom 20\%}}$).
+\input{tables/datasets}
+
+\subsection{Predicting Factual Correctness}
+\textbf{Predictors~($f$):} We propose the constraint satisfaction probe, \method, that predicts if an individual constraint is satisfied by only looking at self-attention. To demonstrate the simplicity, we let $f$ be a linear function of the attention weights to constraints: 
+$$\hat{\mathbb{P}}(V_{k}(\hat{Y})=1; A_{C_k, T}) = \sigma(w^TA_{C_{k}, T} + b),$$ where $A_{C_{k}, T}, w \in \mathbb{R}^{L \times H}, b \in \mathbb{R}$, $A_{C_{k}, T} = \{\forall \ell \in [L], h \in [H]: A_{C_{k}, T}^{\ell, h}\}$. We linearly probe the attention weights across all layers and attention heads and estimate $w$ and $b$ using Logistic Regression. In multi-constraint settings we use {\method} and combine the predictions for constraints:
+$$\hat{\mathbb{P}}(\prod_{k \in [K]} \mathbf{1}_{\{V_k(\hat{Y})=1\}}; A_{C_k, T}) = \prod_{k \in [K]} \hat{\mathbb{P}}(V_{k}(\hat{Y})=1; A_{C_k, T}).$$ \\
+\textbf{Baselines:} We compare {\method} to the \textsc{Confidence} of the model, $\hat{\mathbb{P}}(\hat{Y}|X)$, which concurrent work reports as a hallucination detector~\citep{varshney2023stitch}; and a \textsc{Constant} predictor that predicts the majority class~(either $0$ or $1$) as baselines. Note that while \textsc{Confidence} is a strong baseline, it only provides an overall estimate for the whole generation, and cannot predict the failure for individual constraints. We also use the \textsc{Popularity} baseline only in the single-constraint WikiData datasets that we curated -- as in other datasets, it is not accessible~(CounterFact) or unclear how to compute~(multi-constraint).g., $\rva_{C_{k}, T} = \{\forall \ell \in [L], h \in [H]: ||\rva_{C_{k}, T}^{\ell, h}||\}$, denoted by \method(a). \rebuttal{Finally, when predicting constraint satisfaction, we concatenate confidence to the set of attention features to the logistic regression and denote this by \textsc{Combined}.}
+
+\textbf{Results:} In Figure~\ref{fig:figure6-auroc}, we present the overall AUROC of predicting factual correctness for multi-constraint queries, and Table~\ref{tab:multiple-constraint-overall} contains all metrics. In this task, we find that {\method} performs comparably to the model's \textsc{Confidence} in the correctness prediction task, in addition to being able to provide fine-grained feedback~(i.e., which constraint is not satisfied, see \S\ref{sec:ablations}). Figure~\ref{fig:figure5-auroc} presents the AUROC results for the single-constraint setting. In the single-constraint setting, {\method} is comparable to \textsc{Confidence}. Further, we find that the approaches are comparably good in isolating highly reliable vs unreliable points~(Table~\ref{tab:single-constraint},\ref{tab:multiple-constraint-overall} show $\text{Risk}_{\textrm{Top 20\%}}$ and $\text{Risk}_{\textrm{Bottom 20\%}}$ metrics). \rebuttal{\textsc{Confidence} alone appears to be slightly more performant than attention alone, yet attention helps us more efficiently and identify the failures in a fine-grained manner~(see \S~\ref{sec:ablations}). \textsc{Combined} predictor that uses both attention and confidence gets the best performance across all three metrics in most scenarios. Notably, while they correlate, both predictors have different errors, e.g., there are cases where the LLM is overconfident yet there is almost no attention and it is a factual error, or vice-versa. This further provides insight into why the \textsc{Combined} predictor performs better overall.}
+
+Attention alone is significantly better than the \textsc{Constant} baseline which suggests that the signals relay a nontrivial amount of information, sometimes exceeding \textsc{Confidence}. Surprisingly, even though LLMs are optimized by maximizing the next token probability, probing attention patterns exclusively on the constraints can match or sometimes exceed this performance---\emph{without using hidden states or non-constraint tokens}. However, attention alone does not explain all failures~(we observe some attention on constraints where the model still fails), there is an opportunity for further investigation. \emph{Our findings demonstrate the value of studying the procedure by which a model produces an output, rather than only the output itself.}
+
+\begin{figure}
+    \centering
+    \begin{subfigure}[!ht]{\textwidth}
+        \includegraphics[width=\textwidth]{figures/fig6_auroc.pdf}
+        \caption{\textbf{Factual error prediction for multiple constraint queries.}}        
+        \label{fig:figure6-auroc}
+    \end{subfigure}
+    \begin{subfigure}[!ht]{\textwidth}
+        \includegraphics[width=\textwidth]{figures/fig5_auroc.pdf}
+        \caption{\textbf{Factual error prediction for single constraint queries.}}
+        \label{fig:figure5-auroc}
+    \end{subfigure}
+\label{fig:combinedfig-results}
+\caption{\textbf{Factual Error Prediction.} \rebuttal{{\method} is often comparable and marginally worse than \textsc{Confidence}, and better than \textsc{Popularity}. \textsc{Combined} predictor where attention and confidence are combined to predict failures mostly performs the best. Error bars show the standard error over 10 different random train/test splits. Tables~\ref{tab:single-constraint},\ref{tab:multiple-constraint-overall} contain the results in tabular form.}}
+
+\end{figure}
+\subsection{Extensions}
+\label{sec:ablations}
+We study 3 extensions to explore the potential of {\method} and propose avenues for future work. 
+\textbf{Early stopping:} Using {\method}, we can predict failures partway through the computation and save costs. Specifically, we use only attention weights up to an intermediate layer and predict failures ahead of time. For Llama-2 7B and 13B, we can stop the inference early without degradation in the average performance and save $50\%$ of wall-clock time on failures for most datasets. In 70-B, early stopping results in a slight drop in performance. For use cases where we have a high $\text{Risk}_{\textrm{Bottom 20\%}}$, we can isolate these most unreliable predictions and abstain from making a prediction. 
+
+\noindent\textbf{Predicting partial constraint satisfaction:} {\method} gives access to failure predictions for individual constraints. We report the partial constraint satisfaction results in Table~\ref{tab:multiple-constraint} where we report the failure prediction metrics for individual constraints and find comparable results to the single-constraint prediction task. While {\method} lets us test whether each constraint is satisfied, using the raw \textsc{Confidence} does not since it only outputs a single value for all constraints. We believe producing fine-grained reliability statements, such as reporting partial constraint satisfaction, can prove useful for debugging~(e.g., failing to follow specific instructions). 
+
+\noindent\textbf{Generalized predictors:} We explore using a single failure predictor across all constraint types. We observe the performance is competitive with training individual predictors for each constraint and better than \textsc{Popularity}. This suggests the potential of pursuing efforts to construct general factual error detectors.
+
+
+\section{Related Work}
+
+\citet{carlini2021extracting, carlini2022quantifying, biderman2023emergent} related the training data frequency of a string to memorization in LLMs. In recent work, \citet{mallen2022not,kandpal2023large, sun2023head} document the relation between the success/difficulty of factual queries and a measure/proxy for training data frequency. Several recent works investigated the mechanics of factual recall. Numerous works~\citet{elhage2021mathematical,devlin2018bert,olsson2022context,clark2019does,tian2023scan,htut2019attention,voita2019analyzing, burns2022discovering, gurnee2023finding} analyzed how specific attention heads exhibit certain functionalities, such as heads that encode syntax or induction heads that copy tokens. Further, \citet{meng2022locating, geva2023dissecting} discuss the role of attention in specifically transferring factual information, and \citet{hernandez2023linearity} studies how specific relations can be decoded with a linear transformation from the subject tokens. However, these works do not investigate the generation of factually incorrect text. \citet{halawi2022overthinking, belrose2023eliciting} study how LLMs internally deal with safety-critical input, such as false demonstrations for in-context learning or prompt injections. \citet{varshney2023stitch} detect and mitigate hallucinations using the model's \textsc{Confidence}. Closest in spirit, in concurrent work \citet{li2023inference} seek directions that encode `truthfulness' in the total attention contributions across all tokens and use these to intervene on LLMs; whereas we focus specifically on predicting factual errors, showing one can use only attention weights and look only at the constraints, contribute the analyses around fine-grained constraint satisfaction and early stopping. \citet{mundler2023self, manakul2023selfcheckgpt, zhang2023language} interact with the LLMs in a black box fashion and aim to determine factual errors through inconsistencies, but doing so requires several forward passes and conveys conflicting signals such as refuting an initial claim, which can diminish user trust~\citep{liao2023ai, huang2020challenges}. 
+
+
+\section{Conclusion and Future Work}
+
+Our analysis provides initial insights into leveraging LLM's internals to understand factual errors and it raises several exciting questions for future work. We studied only conjunctive factual queries, but the class of potential constraints is much broader~(e.g. instructions~\citep{ouyang2022training}, disjunctive queries). While this framework extends the scope of mechanistic investigations of factuality in LLMs, it does not cover all possible factual queries to LLMs.  In addition, this work assumed access to the constraint tokens; moving forward it is interesting to consider cases where we need to extract this information. The content of the information in attention patterns remains opaque and warrants further investigation. Future work could investigate how to perform different actions to fix errors, such as steering the model behavior by manipulating the attention to constraints. We hope that the methods and analyses of our study will help with the pursuit of reliable and safe generations from LLMs.
+
+

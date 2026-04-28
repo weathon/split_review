@@ -1,0 +1,321 @@
+\title{Accelerating Retrieval-augmented Language Model Serving with Speculation}
+
+\begin{abstract}
+Retrieval-augmented language models (RaLM) have demonstrated the potential to solve knowledge-intensive natural language processing (NLP) tasks by combining a non-parametric knowledge base with a parametric language model.
+Instead of fine-tuning a fully parametric model, RaLM excels at its low-cost adaptation to the latest data and better source attribution mechanisms.
+Among various RaLM approaches, iterative RaLM delivers a better generation quality due to a more frequent interaction between the retriever and the language model.
+Despite the benefits, iterative RaLM usually encounters high overheads due to the frequent retrieval step.
+To this end, we propose \Sys{}, a speculation-inspired framework that provides generic speed-up over iterative RaLM while preserving the same model outputs through {\em speculative retrieval} and {\em batched verification}.
+By further incorporating prefetching, optimal speculation stride scheduler, and asynchronous verification, \Sys{} can automatically exploit the acceleration potential to the fullest. 
+For naive iterative RaLM serving, extensive evaluations over three language models on four downstream QA datasets demonstrate that \Sys{} can achieve a speed-up ratio of $1.75$-$2.39\times$, $1.04$-$1.39\times$, and $1.31$-$1.77\times$ when the retriever is an exact dense retriever, approximate dense retriever, and sparse retriever respectively compared with the baseline.
+For KNN-LM serving, \Sys{} can achieve a speed-up ratio up to $7.59\times$ and $2.45\times$ when the retriever is an exact dense retriever and approximate dense retriever, respectively, compared with the baseline.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+Recent advancements in large language models such as LLaMA-2, GPT-3, and PaLM have shown promising results in diverse NLP tasks~\citep{touvron2023llama, brown2020language, chowdhery2022palm}.
+However, encoding a massive amount of knowledge into a fully parametric model requires excessive effort in both training and deployment. 
+The situation can be further exacerbated when the foundation model is required to adapt to new data or various downstream tasks \citep{retrieval-lm-tutorial}.
+To address this challenge, recent work introduces {\em retrieval-augmented} language models (RaLM), which integrate the parametric language model with a non-parametric knowledge base through retrieval augmentation \citep{khandelwal2019generalization, shi2023replug, ram2023context, khattab2022demonstrate}.
+
+Existing RaLM methods can be categorized into two classes based on the interaction between the knowledge base and language model.
+First, {\em one-shot} RaLM performs retrieval {\em once} for each request and combines the retrieved documents with the original request to assist generation.
+On the other hand, {\em iterative} RaLM enables iterative interactions between the language model and knowledge base for a request so that the language model can opportunistically query the knowledge base to retrieve more relevant documents during generation.
+Compared to iterative RaLM, one-shot RaLM introduces less retrieval overhead but is inherently limited when the required information varies from time to time during the generation process.
+On the other hand, iterative RaLM achieves better generative performance while suffering from frequent retrievals and thus high retrieval overhead. 
+This paper answers the following research question: {\em can we reduce the overhead of iterative RaLM without affecting generative quality?}
+
+We propose \Sys{}, a framework that employs {\em speculative retrieval} with {\em batched verification} to reduce the serving overhead for iterative RaLM while provably preserving the model output.
+A key bottleneck of existing iterative RaLM methods is the inefficiency of retrieval.
+In particular, due to the auto-regressive nature of generative language models, the retrieval step is usually performed with a single query summarizing the current context.
+As shown in \Cref{fig:iterative_ralm}, existing iterative RaLM approaches interleave the retrieval step and the generation step by constantly retrieving from the knowledge base with the latest context-dependent queries (i.e., $q_0, q_1$, and $q_2$).
+The corresponding retrieved contents (A, B, C) can then assist the generation process by contributing relevant information to the language model through a prompt or attention-level combination.
+However, issuing these queries for knowledge base retrieval {\em sequentially} is intrinsically inefficient.
+
+The idea of speculative retrieval is conceptually similar to speculative execution originated from the computer architecture literature \citep{burton1985speculative}.
+More specifically, \Sys{} replaces the expensive, iterative retrieval steps of existing RaLM methods with more efficient but less accurate speculative retrieval steps.
+Consequently, \Sys{} uses a {\em batched verification} step to correct any incorrect speculation resul and preserve the model's generative quality.
+More precisely, after a number of  speculative retrieval steps, \Sys{} initiates a verification step by performing a batched retrieval (i.e., \textcolor{BlueViolet}{\ding{197}} in \Cref{fig:realmspec}), where the queries in the batch are the corresponding queries in the speculative retrieval steps.
+If there is a mismatch between the speculated documents and the ground truth documents retrieved in the verification step, \Sys{} automatically corrects the mismatch by rolling back to the first mis-speculated position and rerunning language model decoding using the ground truth documents.
+As a result, a subpar speculation method with an early mismatch can result in additional overhead.
+In observing that the same or consecutive entries can be repetitively retrieved from the knowledge base when generating the response (i.e., temporal and spatial locality), \Sys{} maintains a {\em local retrieval cache} to store past documents for each request, and
+performs speculative retrieval by retrieving from the local cache instead of the knowledge base.
+\Sys{} updates the local cache by directly adding the same or consecutive documents retrieved from the knowledge base in each verification step.
+\Cref{fig:timeline} shows a timeline comparison between \Sys{} and existing iterative RaLM methods.
+\Sys{}'s latency saving is essentially obtained through efficient batched retrieval, i.e. retrieving from the knowledge base with $n$ queries is more efficient than executing $n$ retrievals sequentially. 
+We show evidence of the above claim in~\Cref{app:latency-per-query}.
+
+Besides maintaining a local cache for speculative retrieval, we further propose three additional techniques to further reduce RaLM serving latency. 
+First, \Sys{} can support {\em cache prefetching} by updating the local cache with the top-k retrieved documents from the knowledge base to boost \Sys{}'s speculative performance. 
+Second, \Sys{} enables an {\em optimal speculation stride scheduler} that dynamically adjusts the speculation stride (i.e., the number of consecutive speculation steps between two verification steps) to minimize the speculation overhead. Third, \Sys{} can exploit concurrency by allowing {\em asynchronous verification}, which enables an extra speculation step to be performed asynchronously with a verification step.
+\input{src/figure/scripts/Comparison}
+
+We test \Sys{} against two serving tasks: naive iterative RaLM serving and KNN-LM serving. For naive iterative RaLM serving, extensive evaluation of \Sys{} over the Wiki-QA \citep{yang-etal-2015-wikiqa}, Web Questions \citep{berant-etal-2013-semantic}, Natural Questions \citep{kwiatkowski2019natural}, and Trivia QA \citep{2017arXivtriviaqa} datasets on the GPT-2, OPT, and LLaMA-2 models show that \Sys{} can automatically adapt the speculation configuration and reduce the serving latency of the baseline implementation by up to 2.4$\times$, 1.4$\times$, 1.8$\times$ with an exact dense, approximate dense, and sparse retriever, respectively.
+For KNN-LM serving, \Sys{} can achieve a speed-up ratio up to $7.59\times$ and $2.45\times$ when the retriever is an exact dense retriever and approximate dense retriever, respectively.
+
+\paragraph{Contributions.} This paper makes the following contributions:
+
+\begin{itemize}
+\item We propose \Sys{}, a framework that reduces the serving latency of generic iterative RaLM approaches while preserving the same model outputs.
+\item Technically, by leveraging the temporal/spatial locality of the retrieved documents, \Sys{} uses a caching-based speculative retrieval mechanism with batched verification to reduce the retrieval overhead. We further propose three additional techniques to reduce RaLM serving latency, namely cache prefetching, asynchronous verification, and optimal speculation stride scheduling.
+\item Empirically, we validate that \Sys{} achieves significant RaLM serving latency reduction across different tasks, datasets, language models, and retriever types. These results indicate \Sys{} can be a generic acceleration framework for serving iterative RaLMs.
+\end{itemize}
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+
+\paragraph{Retrieval-augmented language models.}
+Since \citet{guu2020retrieval} first proposes to provide relevant information to the language model with retrieved documents from an external knowledge base, numerous works have started to leverage retrieval to improve the language model generation quality~\citep{shi2023replug, park2023generative, wang2023voyager, zhu2023ghost, rubin2023long, wang2023augmenting, zhou2023recurrentgpt}.
+As these works only perform retrieval once before the language model generation starts, we refer to them as one-shot RaLM.
+Besides one-shot RaLM approaches, another line of work performs retrieval regularly when serving a single request.
+\citet{ram2023context, lewis2020retrieval, jiang2023active, borgeaud2022improving, khattab2022demonstrate} retrieve constantly from the external database with the latest context and leverage the retrieved information to improve the generation quality either through direct concatenation or intermediate layer cross-attention, which we refer to as naive iterative RaLM approaches.
+K-Nearest Neighbour Language Models (KNN-LM), on the other hand, produces the next token distribution by interpolating between a weighted distribution over $k$ retrieved documents and the language model output~\citep{khandelwal2019generalization, drozdov2022you}.
+Compared with one-shot RaLM, iterative RaLM methods have been shown to provide higher quality responses at the cost of excessive latency overhead~\citep{khandelwal2019generalization, drozdov2022you, ram2023context}. 
+For instance, \citet{khandelwal2019generalization} retrieves up to 1024 documents for each token generated, which results in unaffordable serving overhead in practice.
+Reducing the serving overhead of iterative RaLM methods while preserving its high-quality output is thus the core of our work.
+
+\paragraph{Retrievers for RaLM.}
+Different retrievers have different tradeoffs between retrieval overheads and retrieval accuracy when serving RaLMs.
+Instead of using conventional sparse retrievers such as TF-IDF or BM25 \citep{ramos2003using, robertson2009probabilistic}, \citet{karpukhin2020dense} trains a dense retriever particularly for RaLM. 
+Similarly, \citet{izacard2021unsupervised} proposes to train a dense retriever by unsupervised contrastive learning.
+Later work further explores the possibility of end-to-end pretraining, where the retriever and language model are trained collaboratively \citep{izacard2022few, zhong2022training, khattab2020colbert, santhanam2021colbertv2}.
+Exact dense retrievers are inefficient but accurate, while approximate retrievers are fast to query but less accurate \citep{he2021efficient, xiong2020approximate}. 
+To demonstrate the generality of our design, we experiment \Sys{} with different retrievers (sparse, exact dense, and approximate dense retrievers).
+
+\paragraph{Iterative RaLM serving.}
+As for efficient iterative RaLM serving approaches, the work most relevant to ours is \citet{alon2022neuro}. 
+By using a pre-computed automaton state when a complete retrieval for the KNN-LM is unnecessary, \citet{alon2022neuro} can reduce the number of calls to the external knowledge base and thus save latency.
+However, \citet{alon2022neuro} is not guaranteed to preserve the same model output and hence might compromise model generation quality.
+To this end, our goal is to achieve generic and efficient serving for existing iterative RaLM approaches while guaranteeing to preserve model quality. 
+To the best of our knowledge, \Sys{} is the first work that achieves inference time speed-up for generic iterative RaLM approaches without compromising model output.
+The key intuition behind \Sys{} is speculative retrieval and batched verification.
+Speculation has a long history in the computer architecture field \citep{burton1985speculative}.
+Recent works further bring the concept of speculative decoding into Large Language Models (LLM) serving, which essentially reduces serving latency \citep{leviathan2022fast, stern2018blockwise, chen2023accelerating, miao2023specinfer, xiaspeculative, gante2023assisted, yang2023inference}.
+However, as far as we know, \Sys{} is the first work that incorporates the concept of speculative retrieval in RaLM serving and is orthogonal to the speculative inference technique for large language models (LLMs).
+
+
+
+\section{\Sys}
+
+\label{sec:methodology}
+
+A key observation that motivates the design of \Sys{} is that the {\em same or consecutive} documents in a knowledge base can be retrieved multiple times during the iterative retrievals of a generative task (e.g., the sequence of the retrieved documents can be $A, B, A, B, C$), also known as the temporal/spatial locality in the system domain.
+Leveraging this observation, 
+\Sys{} enables a caching-based mechanism for {\em speculative retrieval}.
+Combined with {\em batched verification}, \Sys{} can thus reduce the serving latency of iterative RaLM while provably preserving its generative quality.
+We describe the pipeline of \Sys{} in~\Cref{alg:pipeline}.
+\input{src/algorithm/SpeculativeRetrieval}
+\paragraph{Speculative retrieval.}
+For speculative retrieval, we maintain a local cache for each new request to store retrieved documents.
+As shown in~\Cref{fig:local-cache}, \Sys{} utilizes the local cache as a ``retrieval" cache instead of a typical exact match cache in the system literature, where a local cache retrieval is performed similarly to a knowledge base retrieval except for the number of documents in the local cache is far less.
+As there is no entry in the local cache at the start of the process, we perform a retrieval from the knowledge base using the initial query and populate the local cache with the retrieved key and value pairs.
+The key is usually a vectorized representation of the retrieved documents for dense retrievers or a set of local information (e.g., word level frequency) for sparse retrievers, while the value is the retrieved documents.
+For a retrieval step, instead of retrieving from the knowledge base, RaLMSpec retrieves from the local cache speculatively. 
+However, the speculative retrieval results might deviate from the actual retrieval results.
+To guarantee correctness, a verification step is required for every $s$ consecutive number of speculative retrieval steps performed.
+We refer to $s$ as the speculation stride.
+For instance, $s=3$ in~\Cref{fig:realmspec} for our approach.
+
+A fundamental property that ensures the effectiveness of leveraging a local cache for speculative retrieval is that for most dense and sparse retrievers, relative ranking between documents is preserved between the local cache and the knowledge base.
+More importantly, if the top-ranked entry in the knowledge base is present in our local cache for a given query, the same entry is guaranteed to be ranked at the top when retrieving from our local cache using the same retrieval metric for this query.
+For most dense retrievers, this property can be naturally satisfied as the distance metric used by the dense retrievers can be locally computed.
+For sparse retrievers like BM25~\cite{robertson2009probabilistic}, we store the corpus-related information throughout the generation process so that the score can be locally computed on the fly.
+Thus, combined with the temporal locality of the retrieved documents, leveraging a local cache for speculative retrieval can significantly boost the speculation success rate.
+
+\paragraph{Batched verification.}
+During a verification step, we verify the speculated results with a batched retrieval from the knowledge base.
+For instance, as~\Cref{fig:realmspec} shows, with a speculation stride $s=3$, the corresponding queries and cache-retrieved documents for the three consecutive speculative retrieval steps (\textcolor{YellowOrange}{\ding{192}}, \textcolor{YellowOrange}{\ding{194}}, \textcolor{YellowOrange}{\ding{196}}) are $q_0$$\rightarrow$$q_1$$\rightarrow$$q_2$ and A$\rightarrow $B$\rightarrow$A, respectively.
+During the verification process, we will retrieve from the external knowledge base with the batched query $\{q_0, q_1, q_2\}$.
+Suppose the documents retrieved from the knowledge base are \{A, B, C\} for the verification step\footnote{Note that we actually don't need to perform the last speculative retrieval step. We show it in our toy example only to demonstrate the verification process.}.
+We can then validate that the third speculative retrieval step mismatches with the ground truth results.
+In case of a mismatch, the generation process will roll back to the first mismatch position in the sequence and redo the generation with the correct value (i.e., replacing the third speculated document A with the ground truth document C and continuing generation for the request).
+In the meantime, we can populate the local cache with the documents retrieved during the verification step. 
+Aside from the {\em top-1 cache update} approach, \Sys{} also supports {\em top-k cache update} as demonstrated in~\Cref{fig:local-cache}.
+Similar to the concept of prefetching, the top-k cache update aims to fetch more relevant entries to the local cache per verification step to further boost the speculation success rate.
+\input{src/figure/scripts/LocalCache}
+
+Observe that batched retrieval is more efficient by exploiting parallelism, and the speculative retrieval latency is negligible compared to retrieving from the knowledge base.
+Consequently, in the former toy example, we complete three retrieval steps with only one batched knowledge base retrieval, while a naive implementation requires three knowledge base retrievals.
+Note that if there is an early mismatch for the speculative retrieval steps, we will incur additional speculation overhead for generating extra tokens.
+As a result, the speculation stride is a crucial parameter exploiting the trade-off between speculation overhead and retrieval saving.
+We will elaborate more on choosing an optimal speculation stride $s$ in~\Cref{sec:oss}.
+
+In addition to a single-thread implementation, \Sys{} also considers {\em asynchronous verification}. 
+Instead of stalling the speculation step during verification, we can launch an extra speculation step asynchronously while the verification of the previous step occurs.
+This {\em asynchronous verification} technique is especially beneficial when the verification latency is smaller than the language model's decoding latency as shown in~\Cref{fig:async-retrieval}.
+In fact, in this case, {\em asynchronous verification} with a speculation stride $s=1$ is the optimal strategy for speculative retrieval.
+Intuitively, since the verification results can be returned before a speculative retrieval and language model decoding step is completed, we can always hide the latency of a verification step behind a speculation step if the speculation succeeds.
+More specifically, if the verification succeeds, the model can continue the generation process, saving the verification latency.
+On the other hand, as soon as the verification fails, the model can regenerate the output based on the corrected information, which falls back to the naive implementation with no speculation overhead.
+\input{src/figure/scripts/AsyncRetrieval}
+
+
+\section{Optimal Speculation Stride Scheduler}
+
+\label{sec:oss}
+\Sys{} uses {\em speculation stride} $s$ (defined in~\Cref{sec:methodology}) as a hyperparameter to control the number of speculation steps performed before a verification step.
+It plays a crucial role in our system due to its effect on the trade-off between speculation overhead and latency saving.
+Too large a speculation stride would incur high speculation overhead if verification fails early in the stage, while too small a speculation stride does not exploit the benefits of speculation to the fullest.
+Additionally, depending on different language models, retrieval methods, and speculation accuracy, the optimal choice of the speculation stride varies across diverse setups.
+
+Instead of hand-tuning the speculation stride, we propose the Optimal Speculation Stride Scheduler (OS$^3$), which formalizes this trade-off into an objective function and solves an optimal speculation stride across different configurations adaptively.
+Given that the goal is to correctly verify a fixed number of documents with minimal latency, we formulate our objective function as the expected number of documents verified successfully per unit time.
+The goal is therefore to maximize the objective function by optimizing speculation stride $s$.
+
+More precisely, let $a$ denote the latency of a speculation step (speculative retrieval + language model decoding), $b$ denote the latency of a verification step, $d_i$ be the ground truth documents retrieved from the corpus, and $\hat{d}_i$ be the speculated documents retrieved from the local cache.
+If we define $\gamma(X)=P(d_i=\hat{d}_i \mid X), \forall i \in [s]$ as the speculation accuracy given the current context $X$, then the expected number of verified documents is given by
+$\frac{1-\gamma(X)^s}{1-\gamma(X)}$ with a speculation stride $s$. We include the derivation in~\Cref{app:proof}.
+For synchronous verification, the latency is calculated as $sa+b$.
+For asynchronous verification, if all speculated documents match with the ground truth documents in the verification step with a probability of $\gamma(X)^s$, we can benefit from the asynchronous verification with a latency of $(s-1)a + \max(a, b)$.
+Otherwise, with probability $1-\gamma(X)^s$ we incur a mismatch so asynchronous verification brings no gain at all with a latency of $sa+b$. 
+Therefore, the expected latency is $\left[\gamma(X)^s \left((s-1)a + \max(a, b)\right)+(1-\gamma(X)^s)(sa+b)\right]$ for asynchronous verification. 
+By defining the objective function as
+$
+\frac{1-\gamma(X)^s}{(1-\gamma(X))(sa+b)}
+$
+for synchronous verification, or
+$
+\frac{1-\gamma(X)^s}{(1-\gamma(X))\left[\gamma(X)^s \left((s-1)a + \max(a, b)\right)+(1-\gamma(X)^s)(sa+b)\right]}
+$
+for asynchronous verification, we can adaptively solve for the optimal $s$ with an estimation of $a, b, \gamma(X)$.
+\Cref{app:proof} describes how we estimate $a, b, \gamma(X)$.
+
+
+
+\section{Evaluation}
+
+\subsection{Experimental Setups}
+\label{sec:exp_setup}
+We describe our experimental setups in this section, including language models, downstream datasets, retrievers, and the implementation details of the baseline, as well as our approach.
+
+\textbf{Language Models.}
+To demonstrate the effectiveness of our framework with different language models, we select models from three standard natural language generation (NLG) model classes, namely GPT2, OPT, and LLaMA-2~\citep{radford2019language, zhang2022opt, touvron2023llama}.
+More specifically, we choose GPT2-medium, OPT-1.3B, and LLaMA-2-7B, which are commonly used as base language models in RaLM and, at the same time, span across different model sizes.
+For KNN-LM serving, we use the same language model as in~\citet{khandelwal2019generalization}, which is a 16-layer decoder-only transformer model that has 247M trainable parameters.
+
+\textbf{Datasets.}
+For the downstream workload, we mainly focus on the knowledge-intensive open-domain question-answering tasks.
+We thus include four QA datasets in our experiments: Wiki-QA, Web Questions, Natural Question, and Trivia-QA~\citep{yang-etal-2015-wikiqa, berant-etal-2013-semantic, kwiatkowski2019natural, 2017arXivtriviaqa}.
+For all tasks, we use the Wikipedia corpus as our external knowledge base~\citep{chen2017reading}.
+For the KNN-LM evaluation, we use the same WikiText-103 dataset~\citep{merity2016pointer} as in the original KNN-LM work~\citep{khandelwal2019generalization}.
+
+\textbf{Retrievers.}
+To demonstrate the consistency of our approach, we test our method against both dense retrievers (vector-based) and sparse retrievers (bag-of-words-based). 
+For dense retrievers, we further experiment with the exact and approximate methods, where the approximate method is much faster but less accurate. 
+We use the Dense Passage Retriever (DPR)~\citep{karpukhin2020dense} as the exact dense retriever (EDR), and its approximate version DPR-HNSW as the approximate dense retriever (ADR)~\citep{malkov2018efficient}. 
+For the sparse retriever (SR), we use the BM25 retriever~\citep{robertson2009probabilistic}.
+We use the implementation from Pyserini~\citep{Lin_etal_SIGIR2021_Pyserini} for all dense and sparse retrievers, where the dense retrievers are built on top of the standard FAISS library~\citep{johnson2019billion}.
+
+\textbf{Baseline.}
+For naive iterative RaLM serving, we follow directly from the implementation as in~\citet{ram2023context}, where retrieval is triggered every four tokens generated by the language model as the baseline.
+The latest retrieved document chunk is directly prepended to the prompt and replaces previous documents.
+We use \Baseline{} to denote the baseline implementation for iterative RaLM serving.
+For KNN-LM serving, we use the implementation from~\citet{khandelwal2019generalization} as the baseline, where retrieval is performed for every token generated.
+
+\textbf{Implementation Details.}
+For both \Sys{} and \Baseline{}, we set the maximum input prompt length to be 512 tokens and the maximum generation length to be 128 tokens.
+For naive iterative RaLM serving, the maximum length of the retrieved document chunk is set to 256 as in~\citet{ram2023context}.
+When OS$^3$ is disabled, \Sys{} uses a constant speculation stride $s=3$.
+Whenever OS$^3$ is enabled, \Sys{} initializes the speculation stride with $s=1$ and lets the scheduler adapt onwards.
+In all our experiments, we set the window size $w=5$  and $\gamma_{\textrm{max}}=0.6$ for estimating $\gamma$.
+For prefetching, we use a prefetch size of 20.
+We also test with a prefetch size of 256 for the ablation study.
+Due to the existence of Global Interpreter Lock (GIL) in Python, the potential of asynchronous verification cannot be fully realized.
+Thus, for asynchronous verification only, we use a simulated latency by calculating the ideal running time without additional overhead\footnote{Enabling an asynchronous verification only requires two parallel threads (one thread for model generation and one thread for retrieval), thus the overhead should be minimal.}. 
+Except for asynchronous verification, all latencies are measured in wall-clock time.
+We want to note that asynchronous verification is not a significant factor contributing to the speed-up; details are provided in the ablation study in~\Cref{sec:iterative-ralm-result}.
+For simplicity, we don't enable asynchronous verification in \Sys{} for KNN-LM serving and leave it as future work.
+All implementations are written in Python and tested on the VM.GPU.A10 instance on the Oracle cloud, which contains one A10 GPU and 15 CPUs.
+
+\subsection{Naive Iterative RaLM Serving}
+\label{sec:iterative-ralm-result}
+\input{src/figure/scripts/Exp-2}
+In this section, we empirically verify our approach against diverse language models, retrievers, and downstream datasets. 
+We demonstrate our main results in~\Cref{fig:main_exp}.
+\Sys{}+P denotes \Sys{} with prefetching enabled, \Sys{}+S denotes \Sys{} with the optimal speculation stride scheduler (OS$^3$) enabled, and \Sys{}+A denotes \Sys{} with asynchronous verification enabled.
+\Sys{}+PSA indicates \Sys{} with all three components enabled.
+For each dataset, we randomly select 100 questions to test the latency results with \Baseline{} and \Sys{}.
+To show the confidence interval, we further plot the mean and standard deviation over five independent runs for each setup.
+With the exact dense retriever (EDR), \Sys{}+PSA can reduce the latency by $2.39\times$ for GPT2, $2.33\times$ for OPT, and $1.75\times$ for LLaMA-2 compared with \Baseline{}.
+With the approximate dense retriever (ADR), \Sys{}+PSA can reduce the latency by $1.05\times$ for GPT2, $1.39\times$ for OPT, and $1.04\times$ for LLaMA-2 compared with \Baseline{}.
+With the sparse retriever (SR), \Sys{}+PSA can reduce the latency by $1.53\times$ for GPT2, $1.77\times$ for OPT, and $1.31\times$ for LLaMA-2 compared with \Baseline{}. 
+We include the full results in~\Cref{app:exp}.
+
+\paragraph{Analysis.} As shown in~\Cref{fig:main_exp}, \Sys{}+PSA achieves the best performance consistently across all scenarios. 
+However, the most significant speed-up ratio is achieved when the retriever is the exact dense retriever.
+This is because our approach can only optimize for the retrieval latency (R), not the language model generation latency (G). 
+Thus, our speed-up is intrinsically bottlenecked by the ratio of the retrieval latency over the end-to-end latency.
+When we use the approximate dense or sparse retriever, the naive implementation of \Sys{} performs worse than the baseline for some cases.
+This relates to a constant speculation stride being used, and consequently, the trade-off between the speculation overhead and gain might not be optimal.
+More specifically, as the language model decoding step latency outweighs the retrieval latency, being too optimistic in the speculation stride can result in excessive speculation overhead due to an early mismatch in the verification step.
+On the other hand, if we enable the optimal speculation stride scheduler (OS$^3$), we can resolve this issue as the speculation stride can then be optimally adapted.
+Combined with prefetching and asynchronous verification, \Sys{}+PSA achieves the best speed-up ratio performance consistently and automatically across all scenarios. 
+
+\input{src/table/ablation_all}
+\paragraph{Ablation study.} We further present the contribution of each component (prefetching, OS$^3$, and asynchronous verification) in~\Cref{tab:ablation-all} on GPT2, OPT, and LLaMA-2 with the exact dense retriever (EDR), approximate dense retriever (ADR), and sparse retriever (SR).
+The speed-up ratio is compared against the baseline (\Baseline{}) and averaged over the four datasets. 
+In most cases, enabling OS$^3$ brings the most significant gain among the three components, while combining all three elements achieves the best performance consistently.
+This reflects that controlling the trade-off between speculation overhead and latency reduction with the speculation stride is critical for achieving the optimal speed-up under various scenarios. 
+The results demonstrate that OS$^3$ can find a better stride scheduling solution than the naive hand-tuned constant speculation stride in most cases.
+Prefetching can also improve performance by caching more entries in the local cache to obtain a higher speculation accuracy.
+However, increasing a prefetching size can introduce higher retrieval overhead.
+As shown in~\Cref{tab:ablation-p}, when we increase the prefetching size from 20 to 256, the performance decreases in most cases due to the diminished prefetching gain and increased retrieval overhead.
+Asynchronous verification improves the performance by introducing an extra speculation step when doing verification.
+However, if the verification fails at an earlier stage, the benefit of doing asynchronous verification cannot be realized.
+As prefetching, OS$^3$, and asynchronous verification compensate one another, combining all of them fully realizes our approach's potential.
+
+\input{src/table/ablation_p}
+
+\subsection{KNN-LM Serving}
+\label{sec:knn-lm-results}
+\input{src/figure/scripts/kNN-Plots-Wikipedia}
+We further evaluate our approach against a retrieval-intensive workload KNN-LM~\citep{khandelwal2019generalization}.
+For KNN-LM, the knowledge base is constructed for each training token, with the key being the embedding of its leftward context and the value being the token itself.
+Instead of relying on a single language model to generate the next token sampling distribution, KNN-LM retrieves $k$ closest entries in a knowledge base along with their target tokens using an embedding of the current context. 
+A distribution over these $k$ target tokens is then computed based on their distance with respect to the current context embedding. 
+The distribution is then interpolated with the original language model distribution to get the next token sampling distribution.
+\citet{khandelwal2019generalization} indicates KNN-LM can improve the perplexity of the base language model to state-of-the-art without extra training.
+While effective, the inference overhead of KNN-LM models is prohibitive as retrieval will be performed for every token generation step.
+To this end, we are interested in testing our system against the KNN-LM models.
+Different from the original speculation cache design, we cannot populate the cache by adding the same documents, as it will likely not be retrieved again in future decoding steps.
+However, for speculation, we can populate the cache with the next $n$ entries directly after the currently retrieved item (due to observed spatial locality).
+In our experiments, we use an $n=10$.
+In addition, instead of defining a successful speculation step to be retrieving the same set of items that should have been retrieved, we identify that equivalency can be preserved as long as the speculated next token matches with the ground truth next token.
+This relaxation is critical when $k$ is large, e.g., $k=1024$. 
+Matching all 1024 entries with the ground truth one is exponentially hard, but matching the ground truth decoded token can be easier.
+By modifying the cache update rule and verification protocol as above, we can achieve significant speed-up ratios compared with the naive implementation as shown in~\Cref{fig:kNN-plot}.
+We have verified our approach against different $k$ values ranging from 1 to 1024. 
+When the retriever is an exact dense retriever, \Sys{} can achieve up to $7.59\times$ acceleration rate with the optimal speculation stride scheduler (OS$^3$) and even $3.88\times$ acceleration rate when $k=1024$.
+When the retriever is an approximate dense retriever, \Sys{} can achieve up to $2.45\times$ acceleration rate with the optimal speculation stride scheduler (OS$^3$) and even $2.37\times$ acceleration rate when $k=1024$.
+We have further experimented with different speculation stride sizes to have some ablation studies on the importance of the stride.
+The results show that a larger stride is better for the exact dense retriever consistently, but not for all choices of $k$ when we use the approximate dense retriever. 
+However, enabling the optimal speculation stride scheduler can achieve the best performance consistently across all scenarios.
+
+\subsection{LLaMA-2-13B Serving Evaluation}
+\input{src/table/llama-13b}
+To demonstrate the effectiveness of \Sys{}, we evaluate \Sys{}+PSA with the LLaMA-2-13B model over the Wiki QA, Web Questions, Natural Questions, and Trivia-QA and present the results in~\Cref{tab:llama-2-13b}.
+We can still observe \Sys{}+PSA can achieve up to $1.85\times$ speed-up ratio compared against \Baseline{} when the retriever is the exact dense retriever. 
+We observe marginal improvement for the approximate dense retriever because language model generation latency has far outweighed the retrieval latency. Thus, the retrieval latency saving is amortized within the end-to-end latency saving.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this work, we introduce \Sys{}, a speculation-inspired framework that accelerates the serving of generic retrieval augmented generation approaches that suffer from frequent retrieval-generation interactions. 
+By leveraging the temporal and spatial locality of retrieved documents, we enable a request-level local cache for speculative retrieval and a batched verification step to guarantee correctness.
+In addition, we introduce cache prefetching, an optimal speculation stride scheduler, and asynchronous verification to boost the speculation performance further.
+The effectiveness of \Sys{} has been verified empirically against different tasks, language models, retrievers, and downstream datasets.
+The results demonstrate that \Sys{} can indeed have substantial speed-ups consistently in all scenarios compared with the baseline.
+
+
+
+
+

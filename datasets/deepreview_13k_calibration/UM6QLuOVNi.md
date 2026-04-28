@@ -1,0 +1,149 @@
+# EVEREST: Efficient Masked Video Autoencoder by Removing Redundant Spatiotemporal Tokens
+
+- Decision: Reject
+- Avg Score: 5.33
+- Scores: 3, 8, 5
+
+## Abstract
+Masked Video Autoencoder (MVA) approaches have demonstrated their potential by significantly outperforming previous video representation learning methods. However, they waste an excessive amount of computations and memory in predicting uninformative tokens/frames due to random masking strategies. (e.g., over 16 nodes with 128 NVIDIA A100 GPUs~\citep{feichtenhofer2022masked}). To resolve this issue, we exploit the unequal information density among the patches in videos and propose \textit{\textbf{EVEREST}}, a \textit{surprisingly efficient} MVA approach for video representation learning that finds tokens containing rich motion features and discards uninformative ones during both pre-training and fine-tuning. We further present an information-intensive frame selection strategy that allows the model to focus on informative and causal frames with minimal redundancy. Our method significantly reduces the computation and memory requirements of MVA, enabling the pre-training and fine-tuning on \textbf{a single machine with 8 GPUs} while achieving comparable performance to computation- and {memory-heavy baselines} on multiple benchmarks and the uncurated Ego4D dataset. We hope that our work contributes to reducing the barrier to further research on video understanding.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper mainly focuses on improving VideoMAE's training efficiency in both pre-training and fine-tuning stages. Specically, they propose a new token selection method based on similarity between tokens to reduce token reducney. Futhermore,  a fram-seletion method is proposed to enhance representation qualizaty. Experiments are conducted on several video benchmarks. The main baseline used for comparison in this paper are VideoMAE. The computation can be saved by up tp 50% and memory can be saved futher.
+
+### Strengths
+This paper practically demonstrates redandancy can be further reduced in VideoMAE in which a high mask is applied. The proposed method is simple and straightforward, which should not be considered a big innovation (see weakness) but the simplicity should be appreciated.  Such practical observation is somewhat useful the significance is determined by the effectiveness of the proposed method. I can't say the significance is huge through the current results (see weakness). The evaluation is extensive and I  think the visualization of this paper is pretty good.  Regarding clarity, I would say there is still space to improve since results can be organized better and this paper lacks in-depth analysis of the proposed method.
+
+### Weaknesses
+1. The novelty of the proposed method is limited. First, I would say the similarity-based token selection method has been studied before.  An important baseline is K-centered Patch Sampling in [1]. The core idea is close, and the method both highly rely on the rank of the similarity matrix.  Second, the conclusion or observation of this paper is somewhat novel but has also been showed in previous work. In particular, the VideoMAE-V2 [2] has already been shown in VideoMAE pretraining and fine-tuning. There is plenty of redundancy, so they introduce dual-masking. The conclusion both show us that the efficiency of training video models can be further improved. Since the high-mask ratio reconstruction (90%~95% in the video) has told us the key of VideoMAE pre-training, which has been discussed very well, the further improvement in efficiency can be viewed as incremental, and such improvement has been shown in [2]. So, I would say the observation is not that novel as well.
+
+2. The significance is limited. Since this is an experimental-based paper. The significance mainly relied on the results or improvement over current state-of-the-art or strong baselines.  First, the performance is compared under a very short pre-training period in Table 1. I am concerned about this since, in the original paper, at least an 800-epoch training should be conducted for a fair comparison. Second, When measuring the wall-clock time memory consumption to show efficiency, different devices are used.  To make an accurate claim, I believe they should be benchmarked on the same device.  Finally,  the proposed method only achieved comparable performance under limited budgets, so "state-of-the-art" performance should be carefully used in the abstract.
+
+
+3. The presentation can be improved. The ablation study is disorganized since the author uses different datasets and different models, even different devices. I would see a clear ablation for the proposed method is needed for better presentation.  In Table 1, I can not understand the comparison of the computations saving since it only happened when compared with VideoMAE.   I cannot understand Table 3-5 as well since there is insufficient consistency in the author's experiments.
+
+### Questions
+In addition, I have some questions after reading this paper:
+1. How do you choose the hyper-parameters for the proposed token selection method?
+2. What is the effectiveness of the proposed frame-sampling method?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper presents EVEREST, a masked video autoencoder, which proposes token selection and frame selection strategies aimed to focus on motion information and discard redundant spatiotemporal information from the input. This method demonstrates comparable or superior performance to existing baselines such as VideoMAE on several benchmarks while maintaining lower computational and memory costs, both during pre-training and fine-tuning.
+
+### Strengths
+- EVEREST uses a measure of relative importance to select the most informative token embeddings from each video and learn to only use them during pre-training and fine-tuning, discarding the redundant ones. This can substantially reduce computational costs.
+
+- Instead of employing uniform frame sampling, EVEREST proposes a strategy to sample frames with distinct spatiotemporal features based on the amount of informative token embeddings each of them contains.
+
+- Both of the above strategies lead to relatively more computationally and memory-efficient pre-training and fine-tuning while producing comparable or better downstream performance at different scales of the ViT backbone.
+
+- Ablation studies in the Appendix strengthen the argument in favor of the proposed strategies.
+
+- To the best of my knowledge, the proposed method is novel and would be of interest to the ICLR community.
+
+- The paper is written and organized clearly.
+
+### Weaknesses
+The paper could benefit from confidence intervals for the reported accuracies in Tables 1 and 2.
+
+### Questions
+- To confirm my understanding of the sensitivity of EVEREST to the choice of $\rho_{pre}$ in Table 16 in the appendix,  is $\rho_{pre}\cdot \rho_{post}$ always set to 0.1 for a given value of $\rho_{pre}$?
+
+- Is it possible to provide confidence intervals for the results in Tables 1 and 2?
+
+- In equation (3), following the notation in section 4.1., should not $\tilde{k}^n$ be $(\tilde{k}')^n$ since $m^n$ is a mask over $\tau \times [J \cdot \rho_{pre}]$? Also, $\tilde{v}$ is not defined (I assume it’s parts of the video that contain $(\tilde{k}')^n$). 
+
+Are authors planning to release the implementation of their method? 
+
+Suggestions: 
+- It would be interesting to see the full curves for VideoMAE (75% and 90%) in Figure 5, not just at 3200 pre-training epochs. 
+
+- A comparison to VideoMAE2 could also be interesting.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The authors propose a new masking strategy for masked autoencoders for video representation learning. Instead of using random and tube masking which may select tokens from uninformative regions, the authors exploit the unequal information density among the patches by computing the Euclidean distance between the same location across adjacent frames. Moreover, they propose information-intensive frame selection which selects informative frames while discarding the not-so useful ones to learn diverse and robust representations. The new masking strategy is computationally less expensive than the recent masking strategies and it can also be plugged in during the fine-tuning. Experiments on various video datasets show the effectiveness of the masking strategy.
+
+### Strengths
+- The motivation behind the new masking strategy is well written and clear.
+- The paper presents a simple yet effective masking strategy that computes the distance between a patch embedding in one frame with the embedding of the same patch location in the next frame, to determine if there is high information or redundancy there.
+- It only reconstructs the high information tokens by sampling a few tokens based on $ρ_{pos}$ ratio.
+- Allows the pre-training to be computationally and memory wise less expensive. For example, For a ViT-L backbone with a batch size of 256, method achieves about 4× less memory consumption than VideoMAE. Evaluation was performed using PT and FT GFlops, and memory usage in terms of GB.
+- Masking can be used during fine-tuning stage makes it better and faster than VideoMAE.
+- Extensive experiments on UCF101, HMDB-51, SSv2, K400, Ego4D.
+
+### Weaknesses
+ - How would the approach work if there is camera motion? I guess it perform adequately for a fixed camera.
+- The results on SSv2 and K400 was compared only for 200 epochs. Results on K400 and SSv2 with more epochs?
+- Looks like the results of VideoMAE and EVEREST of ViT-L at 200 epochs are about the same.
+- On smaller dataset and smaller ViT, the method performs well, but its marginally about the same as VideoMAE on SSv2 with much larger models.
+- The paper mostly compare with VideoMAE, but there have been multiple developments in MAE for videos. I would encourage the authors to compare the approach with more baselines e,g, AdaMAE [1], MME [2], MVD [3], ST-MAE [4] for videos (using random masking), Omnimae [5].
+- It would be great to add a comparison of the masking strategy against multiple masking strategies. 
+- Although the approach seems to be computationally less expensive, the results are about the same as VideoMAE, sometimes even degrades the performance of pre-trained masked autoencoder methods for videos (c.f, Table 5).
+
+### Questions
+Please see my questions in the weakness section.
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good

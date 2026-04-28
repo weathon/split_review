@@ -1,0 +1,193 @@
+# Counterfactual Image Generation for adversarially robust and interpretable Classifiers
+
+- Decision: Reject
+- Avg Score: 2.50
+- Scores: 3, 1, 3, 3
+
+## Abstract
+Neural Image Classifiers are effective but inherently hard to interpret and susceptible to adversarial attacks. Solutions to both problems exist, among others, in the form of counterfactual examples generation to enhance explainability or adversarially augment training datasets for improved robustness. However, existing methods exclusively address only one of the issues. We propose a unified framework leveraging image-to-image translation Generative Adversarial Networks (GANs) to produce counterfactual samples that highlight salient regions for interpretability and act as adversarial samples to augment the dataset for more robustness. This is achieved by combining the classifier and discriminator into a single model that attributes real images to their respective classes and flags generated images as "fake". We assess the method's effectiveness by evaluating (i) the produced explainability masks on a semantic segmentation task for concrete cracks and (ii) the model's resilience against the Projected Gradient Descent (PGD) attack on a fruit defects detection problem. Our produced saliency maps are highly descriptive, achieving competitive IoU values compared to classical segmentation models despite being trained exclusively on classification labels. Furthermore, the model exhibits improved robustness to adversarial attacks, and we show how the discriminator's "fakeness" value serves as an uncertainty measure of the predictions.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The paper proposed a framework for binary image classification while to address two associated problems simultaneously: (i) making the resulting classifier adversarially robust, and (ii) get attribution maps so as to learn which regions are important for classification. To do this, the authors use a generative adversarial learning framework, where the generator maps an input image of one class into an image another by introducing minimal changes.  The discriminator is convert to behave like a classifier (damaged vs undamaged class) as well as a real/fake classifier. Upon training, the authors show that at test time, the learnt generator can be used get attribution map for an image, and that the resulting discriminator is a robust classifier. Results are shown on two binary classification tasks.
+
+### Strengths
+1. The authors make an interesting use case of the image to image translation framework where the convert an image from one class to another. Because of the nature of the dataset, where one class has some artifacts (damage) which the other class does not, the resulting generator appears to be *only* introducing the artifact when input is from undamaged class, and vice versa, *only* removing the artifact when the input is from the damaged class. Because of this, they can get very accurate attribution maps (in Fig. 2 and 4), which can almost be used to do a decent job at semantic segmentation (Fig. 5).
+
+2. The authors have given a discussion for how their framework might be extended to multi-class classification setup.
+
+### Weaknesses
+1. It is not clear why the authors want to solve the two tasks simultaneously: trying to make a classifier adversarially robust is almost orthogonal to one wanting better attribution maps for that classifier. (these attribution maps should not even be called that technically, as I will explain later). There is not much motivation explaining this particular combination of problem. For example, some questions that the authors might want to consider and talk about is: is a classifier which has those abilities learnt simultaneously better than a classifier which has learnt them sequentially? Or is the robustness of the classifier presented in this work would have been better than a network which was *solely* trained to be adversarially robust? Right now the paper reads as if the authors randomly wanted to have a framework to solve two (seemingly) random problems. 
+
+2. The framework is not that easy to understand. In particular, it is not clear why the classification head is needed in the U-net of the generator. Overall, there seems to be many kinds of classifications happening at different stages. There is one happening in the generator, and then also in the discriminator. While the reader *can* follow along, the overall framework lacks a bit of intuition. This is also because the authors have claimed certain things in the text for which there is not much justification. For example, at the end of Section 3.2.2, the authors claim that the objective “bolsters both the training stability and the expressive capability of the generator”. It is not clear what expressivity exactly means, and how exactly are the authors measuring the stability of the generator training. 
+
+3. There is some confusion in the way results are presented. In Table 2, what is the difference between the top and bottom sections of the table? What do non-adversarially trained equivalents mean; i.e. how exactly were those generators and discriminators trained? Furthermore, the nomenclature used in the paper to refer to different models is a bit confusing across the paper. For example, in Section 4.5, the authors the phrase “D is more robust compared to its non-adversarial counterpart”. But the figure that they are referring to, Fig. 3, does not have any “D” in it. There is a “Hybrid D” and “D_fake”. I would strongly recommend the authors to be consistent with the naming scheme.
+
+4. About the attribution maps: If I understand correctly, in Fig. 4, the way the authors are computing the saliency maps under the “Segmentation” column, which is their primary method, is through a difference between an input image ‘x’ and its transformed image G(x). However, the region highlighted by this difference does not mean it is the same region used by the discriminator to classify them as damaged or undamaged. In other words, just because we can see the difference between two kinds of images does not mean that the neural network is looking at the same kind of difference as well. Therefore, there is not much point of comparison to the methods in “Attribution methods”. 
+
+5. Since attribution maps will be anything that results in the image of one class to become like the image of the other class, the nature of the attribution map will depend on the *types* of classes in the dataset. The framework can learn the segmentation mask because the other class does not have that property. If the two classes were, for example, dogs and cars, then the attribution maps (the way the authors are obtaining them) will look very different, and will likely not be used for segmentation task. Therefore, the strongest point about the paper, which is the emergence of these saliency maps, is an outcome of this particular setting, and not a general phenomena.
+
+### Questions
+Comments:
+
+1. The word damaged - in real-damaged vs real-undamaged is confusing. Maybe replace with a different word because damage might also mean adversarial example.
+2. Eq. 1 loss formulation seems incorrect. Use the standard form of cross entropy.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+1
+
+### Rating Number
+1
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+Even though both adversarial attack and interpretability are important in classification, existing methods exclusively address either one of them. The authors propose a framework for training a classifier that is interpretable and robust against adversarial attack. The framework is designed to be end-to-end, and its performance is shown in both quantitative and qualitative experiments.
+
+### Strengths
+Interesting idea merging adversarial attack and interpretability — proposing a classifier robust against adversarial attack and interpretable.
+
+### Weaknesses
+1. Writing is unclear.
+    1. (page 2) “we introduce a unified framework that merges the generation of adversarial samples for enhanced robustness with counterfactual sample generation for improved interpretability.“ => “we introduce a unified framework that merges the generation of adversarial samples for enhanced robustness and improved interpretability with counterfactual sample generation.“
+    2. (page 2) “to minimally alter the images such that they are classified into the opposing class” => What is the opposing class?
+    3. (page 1) “We argue that by fixing the classifier’s parameters, current attribution methods using GANs forfeit the opportunity to train a more robust classifier simultaneously, even though it has been previously observed that adversarial attacks could also be employed as tools for interpreting the model’s decision-making process“ => What is the “even though" sentence for?
+    4. (page 2, page 4) “This methodology has the benefits of (i) creating adversarial examples that augment the dataset, making the classification more robust against subtle perturbations“ => augmenting dataset can be done after training Generative Models and making the classifier more robust can be done during the training (under the method in this paper).
+    5. (Figure 1, page 4) “Conversely, G must deceive D by producing realistic samples attributed to the opposite class by D.” => What does this mean?
+    6. (page 4) “${\hat{x}=G(x)}$ that is misclassified by D: not only should D be unable to detect that the counterfactual was generated by G, it should also attribute it to the wrong class.“ => This is not understandable and seemingly incorrect.
+    7. (page 4) in Section 3.1.1, the authors mention that ${\hat{x}=G(x)}$  and in Section 3.2, ${G(x)=(\hat{x},\hat{y})}$.
+
+2. The terminology “Counterfactual” is used in an unreasonable way; how is damage/no-damage related to factual/counterfactual?
+3. Novelty is limited;
+    1. it seems like the proposed method is a simple variant of ACGAN [1,2].
+    2. only binary classification is discussed.
+
+### Questions
+No questions.
+
+I would recommend 
+1. make sure that the authors understand the proposed method.
+2. define the task clearly (ideally with the task used in the experiment).
+3. writing straightforward rather than beating around the bush.
+
+### Soundness
+1 poor
+
+### Presentation
+1 poor
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes an explanation framework using image-to-image GAN, whose discriminator obtains adversarial robustness during training. The generator in the framework learns the visual transformation between binary labels (e.g., the healthy apple and the damaged apple). Authors claim that the absolute pixel difference from the transformation reflects model explainability and the discrimination process helps the target model obtain adversarial robustness.
+
+### Strengths
+1. The paper is well-presented with a storyline that demonstrates the proposed framework.
+2. The paper evaluates multiple types of model structures, including CNN and Transformer. The coverage of experiments on target model structure is comprehensive.
+3. The topic of trustworthiness analysis with generative models is increasingly important.
+
+### Weaknesses
+1. In Section 4.5, the authors mention "...adding perturbations to the input images by plotting the strength of the attack (**step size** for PGD over 10 iterations..." This setup is questionable. For a regular PGD attack, the **perturbation bound** is a more direct reflection of the attack strength. However, in this section, the authors plot the F1 score w.r.t. the attack step size (Figure 3a), which is less informative for showing attack strength. Also, the authors should state clearly in the PGD experiment setup what value the perturbation bound takes. The lack of clarity regarding the perturbation bound makes it difficult to assess the true robustness of the model. It is crucial to specify the L-infinity norm bound used for the PGD attack, as this directly controls the magnitude of the allowed pixel changes and is a standard measure of attack strength. Without this information, the results are difficult to interpret and compare with other adversarial robustness studies. Furthermore, plotting the F1 score against the step size, rather than the perturbation magnitude, obscures the relationship between attack strength and model performance. A more informative plot would show the F1 score as a function of the actual perturbation magnitude achieved during the attack, which is determined by the perturbation bound and the number of iterations. 
+
+2. The framework is a modification (changing the discriminator objective) derived from the training process of an image-to-image GAN. The claim of simply using absolute pixel differences of image translation as counterfactual explainability is not grounded. It only visualizes the changing semantics and is not always sufficient as a counterfactual explanation to the target classifier. Recent years have witnessed more effective and solid approaches to generating semantic counterfactuals/adversaries [1,2,3,4,5,6]. The user can perform adversarial training with these methods to fine-tune and improve the target classifier. The paper should compare with more baselines from this line of research. The core issue is that pixel-wise differences, while visually intuitive, do not necessarily correspond to the semantic changes that drive the classifier's decision. A true counterfactual explanation should identify the minimal semantic change required to alter the classification outcome. The proposed method, by simply highlighting pixel differences, may capture irrelevant or spurious changes that do not directly influence the classifier. Therefore, the authors need to provide a more rigorous justification for using pixel differences as a proxy for counterfactual explanations and compare against methods that explicitly optimize for semantic changes. 
+
+3. There are other generative paradigms like diffusion models and VAEs, which have shown the capability to perform image-to-image translation. It can also be feasible that we jointly train an image-to-image diffusion model with the target classifier. The paper should show sufficient validity in adopting the GAN paradigms (e.g., convergence, efficiency) in the experiments. The choice of GANs over other generative models like diffusion models or VAEs needs more justification. While GANs have shown success in image-to-image translation, diffusion models and VAEs offer alternative approaches with potentially different strengths and weaknesses. For instance, diffusion models often produce higher quality samples and have more stable training dynamics compared to GANs. The authors should provide a more detailed discussion on why GANs are the most suitable choice for this particular task, considering factors such as training stability, sample quality, and computational efficiency. A comparative analysis or at least a discussion of the trade-offs between GANs and other generative models would strengthen the paper's argument.
+
+### Questions
+1. What is the possible performance of using other GAN paradigms (e.g., StyleGAN variants) compared to the proposed approach (CycleGAN variants) on this task?
+2. Please address my concerns stated in the weakness section. I would revise the rating based on further responses/rebuttals from the authors.
+
+### Soundness
+1 poor
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper presents a unified framework for learning interpretable and adversarially robust binary classifiers. The proposed approach combines the training of a GAN with counterfactual images. The paper then presents results of binary classification performance using either the Generator or Discriminator, and binary segmentation mask using the Generator. The Generator and Discriminator have similar classification performance than unmodified baselines, but are more robust to adversarial examples. Finally, binary masks obtained from the difference between counterfactual and original images are sharper than GradCAM.
+
+### Strengths
+- **Noteworthy Contribution**: The paper introduces a novel framework that has the potential to address the challenges of achieving robust and interpretable classifiers. This contribution is particularly relevant in the context of existing classifiers that often struggle with the trade-off between robustness and interpretability.
+
+- **Varied Evaluation**: The paper's assesses the proposed method using different model architectures, including convolutional networks and transformer models. This varied evaluation demonstrates the adaptability of the approach across different scenarios and model types, highlighting its potential for broader applicability.
+
+### Weaknesses
+ - **Limited to Binary Tasks**: A major limitation of the paper is that it only addresses binary classification tasks. It would be interesting to expand its applicability to multiclass problems to demonstrate broader utility, as mentioned in the discussion section. While the authors suggest the framework could be adapted to multi-class problems by framing them as multiple binary tasks, this approach needs empirical validation. The complexity of multi-class problems often involves nuanced relationships between classes that might not be adequately captured by a series of independent binary classifiers. The current evaluation does not address these complexities.
+
+- **Single Seed Experiments**: The experiments in the paper are limited to training on a single seed, making it difficult to assess the significance of performance differences and the true impact of the proposed cycle consistency loss on convergence. Multiple seed experiments are crucial for demonstrating the robustness of the method and for providing statistically significant results, especially when dealing with GANs, which can be sensitive to initialization and training procedures. The lack of this makes it hard to evaluate the claims about the cycle consistency loss.
+
+- **Experiment Clarity**: The presentation of experiments can be confusing and should be more detailed. For instance, the "Hybrid D" model is never introduced in the paper. The explanation of the computation of performance when using D is also presented *after* showing results. The description of Table 2 is also unclear, making it challenging for readers to understand the methodology and the comparison. The lack of a clear, step-by-step description of the experimental setup, including the specific hyperparameters used, makes it difficult to reproduce the results and hinders a thorough evaluation.
+
+- **Misleading Introduction**: The paper introduces the approach as "combining classifier and discriminator in a single model" (in the abstract), which is incorrect since the generator and discriminator are fundamentally different. While both the generator and discriminator are used for classification, their roles and training objectives are distinct. This wording is misleading and does not accurately reflect the architecture of the proposed approach.
+
+- **Lack of Comparative Analysis**: The paper lacks a comparison with other counterfactual approaches, which could provide insights into the quality of the counterfactuals produced and help position the proposed method within the broader context of counterfactual research. Without a comparison to other established methods, it is hard to assess the novelty and effectiveness of the proposed approach. The absence of such a comparison makes it difficult to evaluate the significance of the reported results.
+
+### Questions
+- It could be interesting to have a rule of thumb in which model to use, G or D ? Both seems to be strong for classification, but do they have their own advantages ?
+- Can we do more than 1 cycle in the "cycle consistency loss" ? The loss is described with $c \geq 1$, but experiments only show $c=1$ or $c=0$.
+- I'm not sure about the conclusion of section 4.5 on the robustness of the classifiers. From Figure 3, we can see that the models trained with the proposed approaches both have *lower* F1 scores than the baselines when increasing the perturbation size. I assumed that the labels of the approaches are inverted in the plot. Can the authors clarify this ? Otherwise, the conclusion on robustness would be completely different.
+
+### Soundness
+1 poor
+
+### Presentation
+2 fair
+
+### Contribution
+3 good

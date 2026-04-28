@@ -1,0 +1,185 @@
+# Masked Autoencoders with Multi-Window Local-Global Attention Are Better Audio Learners
+
+- Decision: Accept
+- Avg Score: 5.25
+- Scores: 3, 6, 6, 6
+
+## Abstract
+In this work, we propose a Multi-Window Masked Autoencoder (MW-MAE) fitted with a novel Multi-Window Multi-Head Attention (MW-MHA) module that facilitates the modelling of local-global interactions in every decoder transformer block through attention heads of several distinct local and global windows.
+  Empirical results on ten downstream audio tasks show that MW-MAEs consistently outperform standard MAEs in overall performance and learn better general-purpose audio representations, along with demonstrating considerably better scaling characteristics. Investigating attention distances and entropies reveals that MW-MAE encoders learn heads with broader local and global attention. Analyzing attention head feature representations through Projection Weighted Canonical Correlation Analysis (PWCCA) shows that attention heads with the same window sizes across the decoder layers of the MW-MAE learn correlated feature representations which enables each block to independently capture local and global information, leading to a decoupled decoder feature hierarchy. 
+  Code for feature extraction and downstream experiments along with pre-trained models will be released publically.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The authors propose the multi-window multi-head attention module to model the local-global interactions in deocder transformer for masked autoencoders.
+
+### Strengths
+The multi-window local-global attention is novel for masked autoencoder learning.
+
+### Weaknesses
+1.The conceptualization of this article is relatively straightforward. Building upon the previous global-local attention mechanism, previous studies did not incorporate a hierarchical design for the local window perspective. Hence, the author implemented a mechanism with varying window sizes for each attention head within the multi-head attention mechanism. This initial approach is commendable. I am intrigued to know if the author is the originator of this multi-window local-global attention concept for the first time. No pertinent references were found at the end of the introduction, maybe leaving open the possibility of existing similar ideas in the fields of computer vision or natural language processing.
+
+2.In terms of the experimental aspect, "the default configuration employed by the authors yields np = 250, resulting in window sizes of [2, 5, 10, 25, 50, 125, 250, 250] for each MW-MHA module in all decoder blocks, encompassing a total of eight attention heads." Although the author clarifies that this hyperparameter design covers several possible local context levels and adopts a simplistic set of designs, further ablation experiments pertaining to this aspect would be valuable. Specifically, the rationale behind the specific selection of window sizes and their distribution across attention heads is not thoroughly justified. A more detailed exploration of the impact of different window size configurations on model performance is needed.
+
+3.Corresponding to the points highlighted by the author in Appendix G, the experiments conducted solely focused on the (AS-5k) dataset. However, as a self-supervised model, it is expected that the author would train on larger datasets, given the significance of datasets such as librilight, which have already amassed 60k hours of data. Furthermore, exploring the model's performance on larger datasets would provide insights into its upper limits. The choice of dataset limits the generalizability of the findings, especially given the potential for self-supervised models to benefit from larger and more diverse datasets.
+
+4.A meticulous examination of the author's ablation experiments on the parameters of MAE in the appendix reveals that, under different parameter configurations and tasks, MW-MAE does not exhibit significant improvements compared to MAE. For instance, [BO, Patch Size=(4×8), n=500, h=12, MAE 96.7±0.2, MW-MAE 95.6±0.7], [Mris-s all], [Mri-T all]. Similar observations can be made in the main experiments presented in Table 1. In certain tasks, a comprehensive enhancement is not evident. Consequently, I eagerly anticipate the author's elucidation regarding this aspect. The lack of consistent improvement across all tasks raises concerns about the robustness and general applicability of the proposed method.
+
+### Questions
+The overall engineering effort invested in this paper appears to be relatively limited, and there are certain limitations in the analysis of the multi-window multi-head attention. Could more diverse designs and comparisons be explored, specifically regarding local attention windows? For instance, is it possible to make these window sizes trainable? Alternatively, more engaging designs and comparisons could be conducted by examining the relationship between the number of attention heads, network hierarchies, and window sizes.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposed a novel Multi-Window Multi-Head Attention module and replaced the Multi-Head Attention module by it within Masked AutoEncoder. The authors proved this new model Multi-Window Mased AutoEncoder (MW-MAE) as a better audio learner than MAE by empirical results on 10 downstream audio tasks. The authors attributed the improvement on that MW-MAE encoder learn heads with broader local and global attention, and then utilized attention entropies and distances analysis to support this argument. The authors utilized CCA to demonstrate that Multi-Window Multi-Head Attention in the decoder can independently capture local and global information.
+
+### Strengths
+1. The paper proposed a novel module MW-MHA that combines local and global attentions on attention heads level. It also utilized all non-unary factors to decide the number of heads, which is interesting.
+2. The paper is well structured and includes detailed ablation study results and inplementation settings.
+3. The paper adopted the proper analysis to support MW-MAE's strengths and adopted proper plot to elaborate analysis results.
+
+### Weaknesses
+1. Typos such as "we use fixed sinusuidal positional embeddings"
+2. lack of parameter explanations in 3.1
+3. Another work [1] proposed very similar ideas that introducing local attentions in the decoder can help improve the MAE learner. They tried local attentions only and hybrid attentions in which they applied global attentions on top layers. Although This paper compared MW-MAE with audioMAE and MW-MAE outperformed audioMAE by a lot, it is still unclear to me why MW-MAE is much better with such a similar design. I attached my questions in below.
+4. Introduction section and Related Works section overlaped by a lot.
+5. There should be another line "enc only" in table 2.
+
+### Questions
+1. I'm wondering whether the results of audioMAE and MW-MAE are comparable, what is the patch size and spectrogram size of audioMAE you are using? Have you tried re-training audioMAE with your current settings?
+2. According to paper [1], their number of audioMAE(local) on ESC-50 was 94.1 and your number of audioMAE on ESC-50 is 60.6, what is the difference?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper introduces a Multi-Window Masked Autoencoder (MW-MAE) tailored to effectively capture both local and global time-frequency details in audio. The approach applies self-attention over non-overlapping windows of different sizes for each head within the multi-head attention of transformer blocks. The authors show that the proposed method outperforms the standard Masked Autoencoders (MAEs) in ten subsequent audio downstream tasks and exhibit improved scaling traits with an increasing number of patches or model parameters.
+
+### Strengths
+* The paper is well-structured and easy to follow. 
+* The authors have made their implementation publicly available, which not only validates their results but also contributes to the research field.
+* The proposed approach to enhancing multi-head attention is straightforward, yet it demonstrates a performance boost.
+* The authors provide both quantitative and qualitative evidence to show that their proposed method effectively models both global and local information of data.
+
+### Weaknesses
+Limited applicability and contribution. The proposed method involves applying self-attention over non-overlapping windows of varying sizes for each head in the multi-head attention. However, experimentally, the method is only applied within the confines of a self-supervised approach in the audio domain, using the masked autoencoder structure, and specifically for the decoder. Compared to the previous work, Audio-MAE, which addressed challenges in initially applying MAE to the audio domain, this study merely demonstrates the effects of improving a specific part of the structure.
+
+
+
+### Questions
+* I have concerns regarding the limited applicability and contribution of this research, as mentioned in the above weaknesses.
+* Typo: (6p, Sec. 4.3.) ... with the largest "MW-MAE-L-16x4-8l" -> ...... with the largest "MW-MAE-L-4x16-8l"
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper extends the masked auto-encoders by processing the input audio features with multiple windows of different sizes. The model is pre-trained  to reconstruct  the input features using MSE loss. Once the models are trained, the embeddings are passed through an MLP classifier to perform 10 different utterance-level speech tasks. As compared to the vanilla masked auto encoders, the proposed multi-window masked AE (MW-MAE) performs slightly better on those 10 tasks based on the overall score. If we look at each task separately, on some tasks the vanilla MAE performs better and in others the proposed MW-MAE performs better although the differences are usually small.
+
+### Strengths
+The main strengths are 
+1. Extensive experiments 
+2. Experimental details are provided in the Appendix (reproducibility)
+
+
+- Originality and Significance:
+This paper is an extension of the vanilla masked AE, and the proposal uses multi window approach to extract intermediate features at various scale (local to global). Multiscale approaches are not particularly new but this might be the first application of it to audio representation learning with masked AE. 
+
+- Quality:
+Even though the proposed method is sound and extensive evaluations have been conducted for it, the performance gains due to using this model is limited as compared to the vanilla masked AE. Given other concerns about the run-time 
+
+- Clarity:
+The paper is mostly easy to follow. However, it could be better to mention the tasks used in evaluation in the main text rather than leaving it for the Appendix.
+
+### Weaknesses
+1. Marginal gains with the proposed approach: Overall MW-MAE is slightly better than the original MAE. At individual task levels, sometimes MAE is better and sometimes MW-MAE is better by a small margin.   
+
+2. The local vs. global feature aspect of the model is not well-supported. From the multi-window approach, we can see that there are multiple scales but since there is no frame-level task in the evaluation setup, we cannot judge whether the local features/embeddings are also useful in downstream tasks. All the tasks evaluated here are based on global features at utterance level.
+
+3. It could have been better to provide a quantitative run-time comparison of MAE and MW-MAE, rather than mentioning this shortcoming in the Appendix. 
+
+4. [Minor comment] It could have been better if the 10 tasks were mentioned in the main text before Table 1 rather than leaving the list to the Appendix.
+
+### Questions
+1) Which ten tasks have been used? (We cannot understand this without looking at the Appendix). Please explicitly mention these in the main text. 
+
+2) Evaluations are on utterance level tasks, so how can we make sure that the local information is also well-preserved at the frame level?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+3 good

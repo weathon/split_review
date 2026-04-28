@@ -1,0 +1,184 @@
+# Masked Completion via Structured Diffusion with White-Box Transformers
+
+- Decision: Accept
+- Avg Score: 6.75
+- Scores: 8, 5, 6, 8
+
+## Abstract
+Modern learning frameworks often train deep neural networks with massive amounts of unlabeled data to learn representations by solving simple pretext tasks, then use the representations as foundations for downstream tasks. These networks are empirically designed; as such, they are usually not interpretable, their representations are not structured, and their designs are potentially redundant. White-box deep networks, in which each layer explicitly identifies and transforms structures in the data, present a promising alternative. However, existing white-box architectures have only been shown to work at scale in supervised settings with labeled data, such as classification. In this work, we provide the first instantiation of the white-box design paradigm that can be applied to large-scale unsupervised representation learning. We do this by exploiting a fundamental connection between diffusion, compression, and (masked) completion, deriving a deep transformer-like masked autoencoder architecture, called \ours{}, in which the role of each layer is mathematically fully interpretable: they transform the data distribution to and from a structured representation. Extensive empirical evaluations confirm our analytical insights. \ours{} demonstrates highly promising performance on large-scale imagery datasets while using only \(\sim\)30\% of the parameters compared to the standard masked autoencoder with the same model configuration. The representations learned by \ours{} have explicit structure and also contain semantic meaning.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper generalizes the white-box design of transformer, i.e., CRATE, to the unsupervised representation learning context. The author finds out that the gradient on the rate distortions term $R^c(Z | U_[K])$ plays a similar role as the gradient for the score function with the noised input $\tilde Z$, which points towards the closest point to $\tilde Z$ on the data distribution support. Thus they construct a masked auto-encoder using CRATE backbone and achieves fine results on the representation learning tasks.
+
+===============
+The author address most of my concerns and I will increase my score
+
+### Strengths
+1. This work generalizes the white-box transformer model to the unsupervised representation learning task, which is a novel attempt to both the theory and empirical community.
+2. The visualization results are quite impressive and show that CRATE-MAE can reconstruct the original data well, and Fig. 4 roughly shows that the compression measure and sparsity measure match the theory setting.
+
+### Weaknesses
+1. I think the comparisons between CRATE-MAE-Base amd MAE-Base are not fair. I understand that the empirical evaluations are not optimally engineered and actually the visualization results are every good. However, I still think that the author should compare CRATE-MAE and MAE with (almost) the same amount of parameters and different performance, or alternatively, (almost) the same performance and different amount of parameters, and then to compare these two models. Specifically, the current comparison does not isolate the architectural differences well, as the parameter count is a confounding variable. A more controlled comparison would involve either matching parameter counts and showing performance differences, or matching performance levels and showing parameter count differences. This would more clearly demonstrate the advantages of the proposed CRATE-MAE architecture.
+2. What's the choice of LASSO coefficient hyperparameter $\lambda$, and the step size of discretization $\kappa, \eta$? Are they chose carefully and is the model sensitive to them? The paper does not provide sufficient detail on how these crucial hyperparameters were selected. Without a clear explanation of the selection process, it is difficult to assess the robustness and generalizability of the results. A sensitivity analysis, or at least a discussion of the potential impact of these parameters, is needed to ensure the validity of the findings. The lack of such analysis raises concerns about the reliability of the empirical results.
+
+### Questions
+1. Which dataset does Fig.4 belongs to? Does the model have the similar patterns as Fig.4 on other datasets evaluated in this paper?
+2. Empirically, people think that the attention map $Q/K$ plays a different role as the mapping matrix $V$ and they'd better not be set to be the same. However, in this papers' theoretical framework, they can be set to the same parameter $U$. If change the mapping matrix from $U$ to $V\neq U$, will the performance of CRATE-MAE change a lot? If no, what's the main reason why CRATE-MAE has such property?
+3. Will the layer normalization influence the rate deduction process, or it's just for making the training process more stable or other reasons?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+4 excellent
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper extends the white-box models from supervised learning to unsupervised (or self-supervised) representation learning. And in particular, it trains a Masked Autoencoder (MAE) to learn transferrable representations to downstream classification tasks. Besides, it shows interesting visualizations to demonstrate learned representations are of emerging semantic properties.
+
+### Strengths
++ Learning unsupervised representations for white-box models is a natural topic to study after white-box on supervised models, and could be of interest to members of the community.
++ The paper did a good job in presentation, making both the approach and the experiments easy to follow.
++ I like the visualizations in the end, which is a more intuitive addition to the numerical comparisons in the table.
+
+### Weaknesses
+ - I see a lot of similarities to the main white-box paper (White-Box Transformers via Sparse Rate Reduction) which is already out there for supervised learning. I want more justifications for the meaningfulness of the current work apart from doing unsupervised learning.
+- I am not convinced what's the advantage of models being white-box here, especially whether it has synergies with unsupervised learning. The paper explains a lot about what's done, but I don't see a strong motivation of why it is done (especially since the introduction is less of a story but more of a break-down of context and contributions).
+- While the explorations are interesting, I don't think the claims are backed up well by experiments. This is my biggest concern and would like to raise them by asking questions. So please see below.
+
+* The paper lacks a fair comparison with MAE, especially on downstream tasks. Table 1 lists that MAE-base has more parameters and it could partially explain why Crate-MAE has a higher reconstruction loss. So what would a fair comparison (in terms of model parameters) look like? I think it is very easy to train MAE with a smaller encoder/decoder pair given the open-sourced code.
+* How are the evaluations done in Table 2? Are they using the encoder only? Are they with fully-visible inputs?
+* Table 4 again lacks a comparison of a similarly-sized MAE (how it performs on the same dataset as the mask ratio changes). It is not clear a conclusion from ImageNet classification can be transferred to CIFAR.
+* Figure 4: how does it compare with a supervised encoder/decoder trained on ImageNet? I want to know the compression and sparsity behavior is a result of unsupervised learning, or a result of the architecture design. The same applies to Figure 6 and 7.
+
+### Questions
+* The paper lacks a fair comparison with MAE, especially on downstream tasks. Table 1 lists that MAE-base has more parameters and it could partially explain why Crate-MAE has a higher reconstruction loss. So what would a fair comparison (in terms of model parameters) look like? I think it is very easy to train MAE with a smaller encoder/decoder pair given the open-sourced code.
+* How are the evaluations done in Table 2? Are they using the encoder only? Are they with fully-visible inputs?
+* Table 4 again lacks a comparison of a similarly-sized MAE (how it performs on the same dataset as the mask ratio changes). It is not clear a conclusion from ImageNet classification can be transferred to CIFAR.
+* Figure 4: how does it compare with a supervised encoder/decoder trained on ImageNet? I want to know the compression and sparsity behavior is a result of unsupervised learning, or a result of the architecture design. The same applies to Figure 6 and 7.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a white-box diffusion model and unifies it with data compression under a single framework. Based on this, the method proposed by the author has achieved results comparable to the state-of-the-art, which validates their proposed theory.
+
+### Strengths
+Novelty in Approach: This paper is the first attempt to turn the diffusion model into a white-box network, and it has achieved good results. 
+
+Versatility: Its methodology and conclusions can be used as good reference for subsequent research on white-box neural networks.
+
+### Weaknesses
+1. In Sec 2.2, the authors intend to learn representations Z, and hope that the results learned are low-dimensional, sparse, bijective, etc.
+If the method proposed by the authors is a white box, then these properties of Z should be verifiable through experiments. 
+Therefore, the authors should provide experimental results of representations Z to support their theory. Specifically, beyond showing the rate distortion curves, the authors should provide a more direct analysis of the learned representations, such as visualizing the distribution of the learned codes, or quantifying the sparsity using metrics like the percentage of zero activations, or the Gini coefficient. These would provide more concrete evidence for the claims about the properties of Z.
+
+2. I checked the provided Pytorch code and find that MSSA and ISTA are composed of Linear layer, which implies large GPU Memory consumption.
+So I'm wondering whether this method can be extended to large images, just like stable diffusion. The use of linear layers, especially in the context of iterative algorithms like ISTA, can indeed lead to significant memory overhead when dealing with high-resolution images. The authors should discuss the computational scalability of their approach, and provide some analysis on the memory footprint and runtime complexity as image size increases. In addition, can the authors provide results from larger datasets? The images from CIFAR and ImageNet-1k are too small.
+
+3. How effective is this network at unconstrained image generation?
+In other words, if the learning target is pure noise, which may not be viewed as an image compression task, would this method still work? The authors should clarify the limitations of their approach when the target is not an image compression task, and discuss the potential for extending their framework to more general generative tasks. It is unclear how the proposed method would behave if the target is not a structured signal like an image, but rather random noise.
+
+### Questions
+Please refer to my comments in the weakness part.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper introduces CRATE-MAE, a novel white-box deep network architecture designed for large-scale unsupervised representation learning. Unlike traditional networks, CRATE-MAE is rooted in the mathematical connection between diffusion, compression, and masked completion. Each layer of this architecture has a clear, interpretable role, transforming data into structured representations and vice versa. The study's key contribution is adapting the white-box design for unsupervised learning, a notable departure from its typical supervised applications. Empirically, CRATE-MAE outperforms traditional models on large imagery datasets with 30% fewer parameters, while offering structured and semantically meaningful representations.
+
+### Strengths
+1. **Theoretical Depth and Scientific Rigor**: The research stands out for its robust theoretical foundation, seamlessly intertwining denoising-diffusion models and information theory with white-box models. The model's design is intricately tied to its theoretical underpinnings, exemplifying the paper's scientific precision and thoroughness.
+
+2. **Problem Significance**: By addressing representation learning in high-dimensional data and delving into the untapped potential of white-box models in unsupervised settings, the paper carves a significant niche in the contemporary machine learning domain. Indeed, it paves the way for new avenues of exploration for the broader ML community.
+
+### Weaknesses
+Firstly, I'd like to clarify that my emphasis is not solely on state-of-the-art results. My questions regarding the experiments stem from the belief that robust ideas and arguments deserve to be bolstered by thorough experiments.
+
+1.  **Evaluation Concerns**: The introduction of the CRATE-MAE architecture in the paper falls short in offering a comprehensive quantitative analysis when compared to established benchmarks like MAE or contrastive methods. The results presented in Table 2 seem somewhat restrictive, making it challenging for readers to gauge the model's efficacy in relation to others. Specifically, the paper lacks a detailed ablation study on the impact of different masking ratios and network depths on the final performance. This makes it difficult to understand the sensitivity of the model to these hyperparameters and how it compares to MAE under similar conditions. Furthermore, the evaluation should include a broader range of metrics beyond classification accuracy, such as reconstruction quality or feature similarity, to provide a more holistic view of the learned representations.
+
+2.  **Local Self-Supervised Learning Comparison**: From a broader perspective on self-supervised learning (SSL), this paper could be classified under local SSL, emphasizing layer-specific objectives and training. Although this area might be less traversed, incorporating findings from related works, such as [A], would enhance the paper's credibility. The paper does not adequately discuss how the proposed approach compares to other local SSL methods in terms of training efficiency, convergence speed, and the quality of learned representations. A more detailed comparison with existing methods, including a discussion of the trade-offs, is needed to contextualize the contribution of the proposed method.
+[A] Siddiqui, Shoaib Ahmed, et al. "Blockwise self-supervised learning at scale." arXiv preprint arXiv:2302.01647 (2023).
+
+3.  **Absence of Linear Probing Results**: Omitting linear probing results restricts the paper from showcasing the practicality and caliber of the representations derived using CRATE-MAE. Linear probing is a standard evaluation protocol for assessing the quality of learned features in self-supervised learning. The absence of these results makes it difficult to assess the transferability of the learned representations to downstream tasks. The paper should include linear probing results on various datasets to demonstrate the generalizability of the learned features.
+
+4.  **Dataset Limitations**: The study's dependence on a confined dataset for classification raises concerns about the breadth of its applicability and potential generalization to diverse scenarios. While the paper mentions using ImageNet for pre-training, the fine-tuning experiments appear to be limited to a small set of classification datasets. This raises concerns about the robustness of the model and its ability to generalize to other tasks and data distributions. The paper should include experiments on a wider range of datasets, including those with different modalities or complexities, to demonstrate the versatility of the proposed approach.
+
+### Questions
+I have no questions about the methodology part. Just please add more quantitative results to paper.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+3 good

@@ -1,0 +1,255 @@
+\title{Cost-Sensitive Multi-Fidelity Bayesian Optimization}
+
+\begin{abstract}
+In this paper, we address the problem of cost-sensitive multi-fidelity Bayesian Optimization (BO) for efficient hyperparameter optimization (HPO). Specifically, we assume a scenario where users want to early-stop the BO when performance increase is not satisfactory with respect to the required computational cost. Motivated by this scenario, we introduce \emph{utility function}, which is predefined by each user and describes the trade-off between the required BO steps and the cumulative best performance during the BO. This utility function, combined with our novel acquisition function and the stopping criteria, allows us to dynamically choose for each BO step the best configuration that we expect to achieve the maximum utility in future, and also automatically stop the BO around the maximum utility. Further, we improve the sample efficiency of existing learning curve (LC) extrapolation methods (e.g., Prior Fitted Networks) with transfer learning, while successfully capturing the correlations between different configurations to develop a sensible surrogate function for multi-fidelity BO. We validate our algorithm on various LC datasets and found it outperform all the previous multi-fidelity BO baselines, achieving significantly better trade-off between cost and performance of multi-fidelity BO.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Hyperparameter optimization (HPO) (Bergstra & Bengio, 2012; Bergstra et al., 2011; Hutter et al., 2011; Snoek et al., 2012; Cowen-Rivers et al., 2022; Li et al., 2018; Franceschi et al., 2017) stands as a crucial challenge in the domain of deep learning, given its importance of achieving optimal empirical performance. Unfortunately, the field of HPO for deep learning remains relatively underexplored, with many practitioners resorting to simple trial-and-error methods (Bergstra & Bengio, 2012; Li et al., 2018). Moreover, traditional black-box Bayesian optimization (BO) approaches for HPO (Bergstra et al., 2011; Snoek et al., 2012; Cowen-Rivers et al., 2022) have limitations when applied to deep neural networks due to the impracticality of evaluating a vast number of hyperparameter configurations until convergence, each of which may take several days.  
+
+Recently, multi-fidelity (or gray-box) BO (Li et al., 2018; Falkner et al., 2018; Awad et al., 2021; Swersky et al., 2014; Wistuba et al., 2022; Arango et al., 2023; Kadra et al., 2023; Rakotoarison et al., 2024) has gained increasing attention to improve the sample efficiency of traditional black-box BO. Multi-fidelity BO makes use of lower fidelity information (e.g., validation accuracies at fewer training epoches) to predict and optimize the performances at higher or full fidelity (e.g., validation accuracies at the last training epoch). Unlike black-box BO, multi-fidelity BO dynamically selects hyperparameter configurations even before finishing a single training run, demonstrating its ability of finding better configurations in a more sample efficient manner than black-box BO.  
+
+However, one critical limitation of the conventional multi-fidelity BO frameworks is that they are not aware of the trade-off between the cost and performance of BO. For instance, given a limited amount of total credits, customers of cloud computing services (e.g., GCP, AWS, or Azure) may choose to heavily penalize the cost of BO relative to its performance, in order to conserve credits for other tasks. A similar scenario applies to users of task managers such as Slurm, who aim to optimize their allocated time within a computing instance. In those cases, users may want the BO process to focus on exploiting the current belief on good hyperparameter configurations than trying to explore new configurations, in order to efficiently consuming their limited resources. Yet, the existing multi-fidelity BO methods tend to over-explore because they usually assume a sufficiently large budget (e.g., total credits, or allocated time) for the BO and aim to obtain the best asymptotic performance on a validation set, hence are not able to properly penalize the cost (Swersky et al., 2014; Kadra et al., 2023). We could lower the total BO budget and maximize the performance at that maximum budget, but in practice it is hard to specify the target budget in advance as it is difficult to accurately predict the trajectory of the future BO performances.  
+
+Therefore, in this paper we introduce a more sophisticated notion of cost-sensitivity for multifidelity BO. Specifically, we assume that it is easier to specify the trade-off between cost and performance of multi-fidelity BO, than to know the proper target budget in advance. We call this trade-off utility. This utility function describes users’ own preferences about the trade-off and can be estimated from the user’s preference data. It has higher values as cost decreases and performance increases, and vice versa (Fig. 1a). Some users may want to strongly penalize the amount of BO budgets spent, while others  
+
+![](images/621a3be9bd69261a6f0d172cd3ef67af1e41e2a0eb9c8ca0a80b409a618853ef.jpg)  
+Figure 1: (a) A utility function shown in the dotted black lines. The red curve shows a BO trajectory from which we determine the maximum utility $(\approx0.7)$ and when to stop $(\boldsymbol{b}^{*})$ . (b) An illustration of selecting the best configuration at each BO step. Notice, the ${\mathrm{y}}.$ -axis is utility. Starting from the current BO step $^b$ , we extrapolate the LCs with the three configurations $x_{1},x_{2},x_{3}$ (shown in the solid curves with colors and the shaded area), and then select $x_{3}$ which achieves at $b_{3}$ the maximum expected improvement (EI) of utility over the previous utility $U_{\mathrm{prev}}$ .  
+
+may weakly penalize or not penalize at all as with the conventional multi-fidelity BO. We explicitly maximize this utility by dynamically selecting hyperparameter configurations expected to achieve the greatest improvement in the future (Fig. 1b), and also automatically terminating the BO around the maximum utility (Fig. 1a), instead of terminating at an arbitrary target budget.  
+
+Solving this problem requires our multi-fidelity BO method to have the following capabilities. Firstly, it should support freeze-thaw BO (Swersky et al., 2014; Rakotoarison et al., 2024), an advanced form of multi-fidelity BO in which we can dynamically pause (freeze) and resume (thaw) hyperparameter configurations based on future performances extrapolated from a set of partially observed learning curves (LCs) with various configurations. Such efficient and sensible allocation of computational resources suits well for our purpose of finding the best trade-off between cost and performance of multi-fidelity BO. Secondly, freeze-thaw BO requires its surrogate function to be equipped with a good LC extrapolation mechanism (Adriaensen et al., 2023; Rakotoarison et al., 2024; Kadra et al., 2023). In our case, it is crucial for making a good probabilistic inference on future utilities with which we dynamically select the best configuration and accurately early-stop the BO. Lastly, since we assume that users want to stop the BO as early as possible, LC extrapolation should be accurate even at the very early stages of BO. Therefore, we should make use of transfer learning to maximally improve the sample efficiency of BO (Arango et al., 2023) and to prevent inaccurate early-stopping when there are only few or even no observations in the BO.  
+
+Based on those criteria, we introduce our novel Cost-sensitive Multi-fidelity BO (CMBO) that can effectively maximize the utility based on the three components mentioned above. We first introduce the detailed notion of utility function and how to estimate it from the user’s own preference data1 (§3.1) . We then describe the acquisition function and stopping criterion specifically developed for our framework, and explain how to achieve a good trade-off between cost and performance of multi-fidelity BO with them (§3.2). Building on the recently introduced Prior-Fitted Networks (PFNs) (M¨uller et al., 2021; Adriaensen et al., 2023) for in-context Bayesian inference, we explain how to train a PFN with the existing LC datasets to develop a sample efficient in-context surrogate function for freeze-thaw BO that can also effectively capture the correlations between different hyperparameter configurations (§3.3). Lastly, we empirically demonstrate the superiority of CMBO on a set of diverse utility functions, three multi-fidelity HPO benchmarks, and one real-world object-detection LC dataset we collected, showing that it significantly outperforms all the previous multi-fidelity BO and the transfer-BO baselines we consider (§4).  
+
+We summarize our contributions and findings as follows:   
+• We introduce the concept of utility, which describes the trade-off between cost and performance of multi-fidelity BO, along with the method to quantify it with user preference data.   
+• We propose a new problem formulation, cost-sensitive multi-fidelity HPO, where we aim to maximize utility instead of maximizing the asymptotic validation performances.   
+• We introduce our novel acquisition function and stopping criterion specifically designed for our problem formulation, along with the transfer learning of in-context LC extrapolation.   
+• We extensively validate the superiority of CMBO on various cost-sensitive multi-fidelity HPO settings, with three popular benchmarks and one real-world object detection LC dataset we collected. 2 RELATED WORK   
+We briefly discuss the related work in this section. See $\S\mathrm{A}$ for the other related work on multi-fidelity HPO, transfer BO, cost-sensitive HPO, and BO with user preference.   
+Freeze-thaw BO. Freeze-thaw BO (Swersky et al., 2014) dynamically pauses (freezes) and resumes (thaws) configurations based on the last epoch performances extrapolated from a set of partially observed LCs obtained from other configurations, leading to an efficient and sensible allocation of computational resources. DyHPO (Wistuba et al., 2022) and its transfer version (Arango et al., 2023) improve the computational efficiency of freeze-thaw BO with deep kernel GP (Wilson et al., 2016), but their acquisition extrapolates the LCs only a one-step forward, producing a greedy strategy. Other recent variants of freeze-thaw BO include DPL (Kadra et al., 2023) and ifBO (Rakotoarison et al., 2024) which are not greedy, and their acquisitions maximize the performance either at the last BO step or random future steps. On the other hand, we maximize the utility specified by each user. Learning curve extrapolation. Freeze-thaw BO requires the ability of dynamically updating predictions on future performances from partially observed LCs, thus heavily relies on LC extrapolation (Baker et al., 2017; Gargiani et al., 2019; Wistuba & Pedapati, 2020). DyHPO (Wistuba et al., 2022) and Quick-Tune (Arango et al., 2023) propose to extrapolate LCs for only a single step forward. Freeze-thaw BO (Swersky et al., 2014) and DPL (Kadra et al., 2023) use non-greedy extrapolations but limit the shape of the LCs. Domhan et al. (2015) consider a broader set of basis functions, but requires computationally expensive MCMC, and also do not consider correlations between different configurations. Klein et al. (2017b) models interactions between configurations with a Bayesian neural network (BNN), but suffers from the same computational inefficiency of MCMC and online retraining. LC-PFNs (Adriaensen et al., 2023) are an in-context Bayesian LC extrapolation method without retraining, but they do not consider interactions between configurations. Recently, ifBO (Rakotoarison et al., 2024) further combine LC-PFNs with PFNs4BO (M¨uller et al., 2023) to develop an in-context surrogate function for freeze-thaw BO, but they train PFNs only with a prior distribution. On the other hand, we use transfer learning, i.e., train PFNs with the existing LC datasets, to improve the sample efficiency of freeze-thaw BO while successfully encoding the correlations between configurations at the same time.   
+3 APPROACH   
+In this section, we introduce CMBO, a novel method for cost-sensitive multi-fidelity HPO. We first introduce notation, backgrounds on freeze-thaw BO, and utility function in $\S3.1$ . We then introduce the overall method and algorithm in $\S3.2$ , and the transfer learning of surrogate functions in $\S3.3$ . 3.1 BACKGROUNDS AND UTILITY FUNCTION   
+Notation. Following the convention, we assume that we are given a finite pool of hyperparameter configurations $\mathcal{X}=\{\bar{x}_{1},\ldots,x_{N}\}$ , with $N$ the number of configurations. Let $t\in[T]:=\{\bar{1},\dots,T\}$ denote the training epochs, $T$ the last epoch, and $y_{n,1},\ldots,y_{n,T}$ the validation performances (e.g., validation accuracies) obtained with the configuration $x_{n}$ . We further introduce notations for multifidelity BO. Let $b\,=\,1,\ldots,B$ denote the BO steps, $B$ the last BO step, and $\tilde{y}_{1},\dotsc,\tilde{y}_{B}$ the BO performances, i.e., each $\tilde{y}_{b}$ is the best validation performance $(y)$ obtained until the BO step $b$ . Freeze-thaw BO. The goal of multi-fidelity BO is to find the optimal intermediate performance over the hyperparameter configurations, i.e., $\mathrm{max}_{n\in[N],t\in[T]}\;y_{n,t}$ . Freeze-thaw BO (Swersky et al., 2014)  
+
+is an advanced form of multi-fidelity BO. At each BO step, it allows us to dynamically select and evaluate the best hyperparameter configuration $x_{n}*$ with $n^{*}\in[N]$ denoting the corresponding index, while pausing the evaluation on the previous best configuration. Specifically, given $\bar{\mathcal{C}}=\{(\bar{x},t,y)\}$ that represents a set of partial LCs collected up to a specific BO step, we predict for all $x\in\mathscr{X}$ the remaining part of the LCs up to the last training epoch $T$ with a (pretrained) LC extrapolator, compute the acquisition such as the expected improvement (Mockus et al., 1978) of validation performance at epoch $T$ , and select and evaluate the best configuration $x_{n}*$ that maximizes the acquisition. Note that at any BO step, the partial LCs in $\mathcal{C}$ can have different length across the configurations. Suppose that at BO step $b$ the next training epoch for $x_{n}*$ is $t_{n^{*}}$ . We then evaluate $x_{n}*$ a single epoch from the corresponding checkpoint to obtain the validation performance $y_{n^{*},t_{n^{*}}}$ at the next epoch $t_{n^{*}}$ , which we use to update the corresponding partial LC in $\mathcal{C}$ and compute the BO performance $\tilde{y}_{b}$ . We repeat this process $B$ times until convergence. See Alg. 1 for the pseudocode (except the red parts).  
+
+Utility function. A utility function $U$ describes the trade-off between the BO step $b$ and the BO performance $\tilde{y}_{b}$ . Its values $U(b,\tilde{y}_{b})$ negatively correlate with $b$ and positively with $\tilde{y}_{b}$ . For instance, we may simply define $U(b,\tilde{y}_{b})\,=\,\tilde{y}_{b}\,-\,\alpha b$ for some $\alpha>0$ , such that the utility gives linear incentives and penalties to the performance and number of BO steps, respectively. Or, we could use a weighted linear combination of linear, quadratic, and square root function, as appropriate (used to draw Fig. 2).  
+
+We assume that users have their own utility functions. However, it is often difficult for them to quantify the function. We thus propose to use Bradley-Terry model (Bradley & Terry, 1952):  
+
+![](images/32bf662c4c6ecb95c35a9f3812badc3426177a249e85bb54440a8ec71b069363.jpg)  
+Figure 2: An example of utility function estimation. True and estimated utility are denoted as black solid and blue dotted lines, respectively.  
+
+$$
+p(u_{1}>u_{2})=\frac{\mathsf{e x p}(u_{1}/\tau)}{\mathsf{e x p}(u_{1}/\tau)+\mathsf{e x p}(u_{2}/\tau)}.
+$$  
+
+Eq. (1) is the probability that the user prefers $u_{1}$ to $u_{2}$ , where $u_{1}$ and $u_{2}$ are the utility values of two different points in the space consisting of BO step $b$ and BO performance $\tilde{y}$ , and $\tau$ is a temperature. Specifically, we first collect the user preference data by asking users to decide which points to prefer given a set of pair of points (Bai et al., 2022). We then optimize the parameters in the utility function (e.g., $\alpha,$ ) by minimizing the binary cross entropy loss $-\bar{m}\log p(u_{1}\bar{>}u_{2})-(1-m)\log(1-p(u_{1}>$ $u_{2})$ ) with gradient descent, where $m\in\{0,1\}$ is the binary label of user preference.  
+
+Fig. 2 shows that the proposed method can recover the true utility function very accurately with 1,000 datapoints. See $\S B$ for the detailed experimental setups and other examples with fewer datapoints. In this way, for the rest of this paper, we assume that we can estimate the utility function with the user preference data, or users already know the exact form of their utility functions.  
+
+3.2 COST-SENSITIVE MULTI-FIDELITY BO  
+
+We next introduce our main method based on freeze-thaw BO and the notion of utility (§3.1).  
+
+Acquisition function. Let $t_{n}$ be the next training epoch for the configuration $x_{n}$ at a BO step $b$ . Further, suppose we have a LC extrapolator $f(\cdot|x_{n},\mathcal{C})$ that can probabilistically estimate $x_{n}$ ’s remaining part of LC, $y_{n,t_{n}:T}$ , conditioned on $\mathcal{C}$ a set of partial LCs collected up to the step $b$ . Then, based on the expected improvement (EI) (Mockus et al., 1978), we define the acquisition function $A$ :  
+
+$$
+A(n)=\operatorname*{max}_{\Delta t\in\{0,\ldots,T-t_{n}\}}\mathbb{E}_{y_{n,t_{n}:T}\sim f(\cdot|x_{n},\mathcal{C})}\left[\operatorname*{max}\left(0,U(b+\Delta t,\tilde{y}_{b+\Delta t})-U_{\mathrm{prev}}\right)\right].
+$$  
+
+In Eq. (2), we first extrapolate $y_{n,t_{n}:T}$ , the remaining part of the LC associated with $x_{n}$ , and compute the corresponding predictive BO performances $\{\tilde{y}_{b+\Delta t}\mid\Delta t=0,\ldots,T-t_{n}\}$ . Note that according to the definition in $\S3.1$ , $\tilde{y}_{b+\Delta t}$ is computed by taking the maximum among the last step BO performance $\tilde{y}_{b-1}$ as well as the newly extrapolated validation performances $y_{n,t_{n}},\ldots,y_{n,t_{n}+\Delta t}$ . Then, based on the increased BO step $b+\Delta t$ and the updated BO performance $\tilde{y}_{b+\Delta t}$ , we compute the corresponding utility, and its expected improvement over the previous utility $U_{\mathrm{prev}}$ over the distribution of LC extrapolation with the Monte-Carlo (MC) estimation. The acquisition $A(n)$ for each configuration index $n$ is defined by picking the best increment $\Delta t\in\{0,\ldots,T-t_{n}\}$ that maximizes the expected improvement, and we eventually choose the best configuration index $n$ that maximizes $A$ (see Fig. 1b).  
+
+The main differences of our acquisition function in Eq. (2) from the EI-based acquisitions used in the previous works are twofold. First, instead of maximizing the expected improvement of validation performance $y$ , we maximize the expected improvement of utility. Second, rather than setting the target epoch at which we evaluate the acquisition to the last epoch $T$ , we dynamically choose the optimal target epoch that is expected to maximally improve the utility.  
+
+Those aspects allow our BO framework to more carefully select configurations for each BO step, seeking the best trade-off between cost and performance of BO. Specif  
+
+
+
+\section{3.3 TRANSFER LEARNING OF LC EXTRAPOLATION  }
+
+
+Since users may want to early-stop the BO, we should have a sample efficient LC extrapolation for preventing inaccurate early-stopping at the early stage of BO. We thus propose to use transfer learning to maximally improve the sample efficiency of our LC extrapolator.  
+
+Transfer learning with LC mixup. Among many plausible options, in this paper we propose to use Prior Fitted Networks (PFNs) (Mu¨ller et al., 2021) for LC extrapolation. PFNs are an in-context Bayesian inference method based on Transformer architectures (Vaswani et al., 2017), and show good performances on LC extrapolation (Adriaensen et al., 2023; Rakotoarison et al., 2024) without the computationally expensive online retraining (Kadra et al., 2023). A major difficulty of using PFNs for our purpose is that their training examples are generated only from a prior distribution, and to our knowledge, there are no existing ways to train PFNs with the given datasets. Also, PFNs require relatively a large Transformer architecture as well as huge amounts of training examples for good generalization performance (Adriaensen et al., 2023), which makes it risky to train PFNs with a finite set of examples.  
+
+Here we explain our novel transfer learning method for PFNs that can circumvent those difficulties with the mixup strategy (Zhang et al., 2018). Suppose we have $M$ different datasets and the corresponding $M$ sets of LCs collected from $N$ hyperparameter configurations. Define $l_{m,n}\,=$ $(y_{n,1}^{m},...,y_{n,T}^{m})$ , the $T$ -dimensional row vector of validation performances $(y^{\prime}\mathrm{s})$ collected from the $m$ -th dataset and the $n$ -th configuration, forming a complete LC of length . Further define the matrix $\begin{array}{r}{L_{m}=[l_{m,1}^{\top};\ldots;l_{\underline{{m}},N}^{\top}]^{\top}}\end{array}$ , the row-wise stack of those LCs. In order to augment training examples, we propose to perform the following two consecutive mixups (Zhang et al., 2018):  
+
+1. Across datasets: $L^{\prime}=\lambda_{1}L_{m}+(1-\lambda_{1})L_{m^{\prime}}$ , with $\lambda_{1}\sim\operatorname{Unif}(0,1),\quad{\mathrm{for~all~}}m,m^{\prime}\in[M].$   
+2. Across configurations: $(x^{\prime\prime},l^{\prime\prime})=\lambda_{2}(x_{n},l_{n}^{\prime})+(1-\lambda_{2})(x_{n^{\prime}},l_{n^{\prime}}^{\prime})$  
+
+In this way, we can sample infinitely many training examples $\{(x^{\prime\prime},l^{\prime\prime})\}$ by interpolating between the LCs, leading to a robust LC extrapolator with less overfitting. Note that in the first step, we do not individually perform the mixup over the configurations but apply the same $\lambda_{1}$ to all the configurations, in order to preserve the correlations between the configurations encoded in the given datasets.  
+
+As for the network architecture and the training objective, we mostly follow Rakotoarison et al. (Rakotoarison et al., 2024). We use a similar Transformer architecture that takes a set of partial LCs and the corresponding configurations as an input and extrapolates the remaining part of the LCs. The training objective then maximizes the likelihood of those predictions conditioned on the partial LCs. We defer more details on the training to $\S\mathrm{E}$ . Also, see $\S\mathrm{G}$ for more discussion about the connection of our transfer learning method with ifBO (Rakotoarison et al., 2024) TNPs (Nguyen & Grover, 2022).  
+
+4 EXPERIMENTS  
+
+We next validate the efficacy of our method on various multi-fidelity HPO settings. We will publicly release our code upon acceptance.  
+
+Datasets. We use the following benchmark datasets for multi-fidelity HPO. LCBench (Zimmer et al., 2021): A LC dataset that evaluates the performance of 7 different hyperparameters on 35 different tabular datasets. The LCs are collected by training MLPs with 2,000 hyperparameter configurations, each for 51 epochs. We train our LC prediction model on 20 datasets and evaluate on the remaining 15 datasets. TaskSet (Metz et al., 2020): A LC dataset that consists of a diverse set of 1,000 optimization tasks drawn from various domains. We select 30 natural language processing (text classification and language modeling) tasks, train our LC extrapolator on 21 tasks, and evaluate on the remaining 9 tasks. Each task include 8 different hyperparameters and 1,000 their configurations. Each LC is collected by training models for 50 epochs. PD1 (Wang et al., 2021): A LC benchmark that includes the performance of modern neural architectures (including Transformers) run on large vision datasets such as CIFAR-10, CIFAR-100 (Krizhevsky et al., 2009), ImageNet (Russakovsky et al., 2015), as well as statistical modeling corpora and protein sequence datasets from bioinformatics. We use 23 tasks with 4 different hyperparameters from SyneTune (Salinas et al., 2022) package, train our LC extrapolator on 16 tasks, and evaluate on the remaining 7 tasks. To facilitate transfer learning, we preprocess the data by excluding hyperparameter configurations with their training diverging (e.g., LCs with NaN), and linearly interpolate the LCs to match their length across different tasks. We then obtain the LCs of 50 epochs over the 240 configurations. See $\S D$ for more details.  
+
+![](images/c8272183929aaf44485192f1c9e5109764db965b3e403a014129e013c33307a2.jpg)  
+Figure 4: The results on the conventional multi-fidelity HPO setup $(\alpha=0)$ ). For each benchmark, we report the normalized regret of utility aggregated over all the test datasets.  
+
+Baselines. We compare our method against Random Search (Bergstra & Bengio, 2012) that randomly selects hyperparameter configurations sequentially. We next compare against several variants of Hyperband (Li et al., 2018) such as BOHB (Falkner et al., 2018) which replaces its random sampling of configurations with BO, and DEHB (Awad et al., 2021) which promotes internal knowledge transfer with evolution strategy. We also compare against more recent multi-fidelity BO methods such as DyHPO (Wistuba et al., 2022) which uses deep kernel GP (Wilson et al., 2016) and a greedy acquisition function with a short-horizon LC extrapolation, and DPL (Kadra et al., 2023) which extrapolates LCs with power law functions and model ensemble. ifBO (Rakotoarison et al., 2024) is an extension of PFNs (M¨uller et al., 2021) for freeze-thaw BO, whose acquisition is based on the PI at randomly chosen future training epochs. Quick-Tune†, is a modified version of QuickTune (Arango et al., 2023) which is originally developed for dynamically selecting both pretrained models and hyperparmater configurations, with the additional cost term penalizing the non-uniform evaluation wall-time associated with each joint configuration. Since our experimental setup does not consider selecting pretrained models nor non-uniform evaluation wall-time, we only leave the transfer learning part of the model, which corresponds to a transfer learning version of DyHPO, i.e., we train its surrogate function with the same LC datasets used for training our LC extrapolator. Lastly, we compare against FSBO (Wistuba & Grabocka, 2020), a black-box transfer-BO that uses the same LC datasets to train a deep kernel GP surrogate. The difference of FSBO from Quick-Tune† is that its surrogate models the validation performances at the last epoch, whereas that of Quick-Tune† predicts the performances at the next epoch for multi-fidelity HPO. See $\S\mathrm{F}$ for more details.  
+
+Utility function. While it is possible to collect user preference data manually and estimate the corresponding utility function $(\S3.1)$ , in our experiments we use either linear function (i.e., $U(b,\tilde{y})=$ $\tilde{y}-\alpha b)$ , quadratic, square root, or stair-case function for simplicity. Note that for linear function, we let $\alpha\in\{0,4e{-}05,2e{-}04\}$ , where $\alpha=0$ does not penalize the number of BO steps at all – the BO does not terminate until the last BO step $B$ as with the conventional multi-fidelity BO setup.  
+
+Stopping criterion. As mentioned in the footnote in page 6, for the baselines we simply set the threshold $\delta_{b}=0.2$ in Eq. (3). For our model, we also use $\gamma=\log_{2}5$ for fair comparison, but use $\beta=e^{-1}$ for all the experiments in this paper, except the ablation study in Fig. 7d.  
+
+Evaluation metric. In order to report the average performances over the tasks, we use the normalized regret of utility $(U_{\mathrm{max}}-U_{b^{*}})/(U_{\mathrm{max}}-U_{\mathrm{min}})\,\,\mathrm{\bar{\in}}\,[0,1]$ , similarly to Eq. (3). $U_{b^{*}}$ is the utility  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+![](images/6d367329e6a46c5d673148f60cc86581c5b954adf5ec1f519b2a8900fdecfcfb.jpg)  
+Figure 5: Visualization of the normalized regrets over BO steps. The first and second row correspond to $\alpha=4e{-05}$ and $2e{-04}$ , respectively. Each column corresponds to the cherry-picked examples from each benchmark. The asterisks indicate the stopping points, and the dotted lines represent the normalized regrets achievable by running each method without stopping. See $\S\mathrm{H}$ for the results on all the other tasks.  
+
+obtained right after the BO terminates at step $b^{*}$ , and $U_{\mathrm{max}}$ is the maximum achievable by running a single optimal configuration up to its maximum utility. Computing the exact $U_{\mathrm{min}}$ is a difficult combinatorial optimization problem, thus we simply approximate it with $U(B,y_{1}^{\mathrm{worst}})$ , where $y_{1}^{\mathrm{worst}}$ is the worst 1-epoch validation performance across the configurations – we simply let $y_{1}^{\mathrm{worst}}$ decay over the maximum BO steps $B$ , corresponding to a lower bound of the exact $U_{\mathrm{min}}$ . We then average the normalized regrets across all the tasks in each benchmark, and report the mean and standard deviation over 5 runs, or even 30 runs for the baselines with relatively large variances such as Random, BOHB, DEHB. Lastly, we also report the rank of each method averaged over the tasks.  
+
+4.1 ANALYSIS  
+
+Effectiveness of our transfer learning. We first demonstrate the effectiveness of our transfer learning method. Fig. 4 shows the results on the conventional multi-fidelity HPO setting where we do not penalize the cost of BO at all $(\alpha=0)$ ). First of all, note that FSBO, a black-box transferBO method which switches its configuration only after a single complete training (e.g., 50 epochs), even outperforms all the other multifidelity methods that can change the configurations every epoch. The results clearly show the importance of transfer learning for improving the sample efficiency of HPO. Quick-Tune†, a  
+
+![](images/32225762701c1aa646f4c98f613ec32df2d7cafe7f96dd2d55262e5afc6e1a1d.jpg)  
+Figure 6: Ablation study on the mixup training. We use $\alpha=0$ and PD1 benchmark for the experiments.  
+
+transfer version of DyHPO, performs similarly to the other baselines despite the use of the transfer learning, except on TaskSet. We attribute it to its greedy acquisition function, and more importantly  
+
+![](images/a026424bb3207012c72e7696076a05622334d44c6496cebe906a157bbcb7b223.jpg)  
+
+Figure 7: (a, b, c) Additional analysis on the effectiveness of our acquisition function. We use PD1 for the visualization. In (c), the values of $\alpha$ are shown in the parenthesis. (d) Ablation study on $\beta$ , with the minimum regret shown with the asterisks.   
+its lack of data augmentation. On the other hand, our method is non-greedy (when $\alpha\,=\,0$ ) and can effectively augment the data with our mixup strategy, thereby showing significantly better performances than all the other multi-fidelity methods. Fig. 6 shows the ablation study on our mixup training. Fig. 6a shows that we can effectively reduce the risk of overfitting by adding the mixup strategy. As a result, the performance of BO improves significantly (Fig. 6b). Lastly, our method outperforms FSBO on TaskSet and PD1, while achieving comparative results on LCBench. Effectiveness of our acquisition function. Next, Table 1 shows the performance of each method on the cost-sensitive multi-fidelity HPO setup $(\alpha>0)$ . We see that our method largely outperforms all the methods on all the settings, including the multi-fidelity HPO and the transfer-BO methods, in terms of both normalized regret and average rank. Notice, our method achieves better average rank as the penalty becomes stronger $\alpha=2e{-04})$ ). Fig. 5 visualizes the normalized regret over the course of BO, where our method achieves significantly lower regret upon termination. Our method tends to achieve the minimum regret earlier than the baselines, demonstrating its sample efficiency in searching good hyperparameter configurations by explicitly considering the utility during the BO. In order to clearly understand the source of improvements, we next analyze the configurations chosen by each method. Specifically, for each BO step $b$ , we run the configuration currently selected at step $b$ up to its last epoch $T$ , and compute its minimum ground-truth regret achievable at some future step $b+\Delta t$ (Fig. 7a), as well as the corresponding optimal increment $\Delta t$ (Fig. 7b). In Fig. 7a, our method shows much lower minimum regret than the baselines. It means that our acquisition function in Eq. (2) works as intended, trying to select at each BO step the best configuration which is expected to maximally improve the utility in future. Fig. 7b shows that the configurations chosen by our method initially correspond to greater $\Delta t$ (i.e., non-greedy), but gradually to the smaller $\Delta t$ (i.e., greedy). It is because as the BO proceeds, the performance improvements of BO saturate, so the cost of BO quickly dominates the trade-off, leading to smaller $\Delta t$ even close to 0. Fig. 7c shows the distribution of the top-10 most frequently selected configurations during the BO. As expected, our method tends to focus only on a few configurations during the BO to maximize the short-term performances, especially when the penalty is stronger with greater $\alpha$ . On the other hand, the baselines tend to overly explore the configurations even when the penalty is the strongest $\alpha=2e{-04})$ ). Effectiveness of our stopping criterion. We analyze the effectiveness of our stopping criterion in Eq. (3), (4), and (5). Fig. 7d shows the normalized regret over the different values of $\beta$ , a mixing coefficient between the two extreme stopping criteria, as discussed in $\S3.2$ . $\beta\to0$ corresponds to the criterion used by the baselines which is only based on the estimated normalized regret, whereas $\beta\to+\infty$ corresponds to the hard thresholding only based on the PI. We can see that the optimal criterion is achieved by smoothly mixing between the two $\langle\beta=e^{-1}$ ), demonstrating the superiority of our stopping criterion to the one used by the baselines ( $\beta\to0$ ).   
+Experimental results on various utility functions. In real-world scenarios, any functional forms of utility can be defined by various users. To investigate the effectiveness of CMBO on various utility functions, we perform additional experiments on PD1 benchmark using three additional utility functions as follows: 1) Staircase: $\begin{array}{r}{U(b,\tilde{y}_{b})\,=\,\tilde{y}_{b}\,-\,\sum_{i}\hat{\alpha}_{i}\mathbb{1}(b\,\in\,\mathcal{Z}_{i})}\end{array}$ where $\mathbb{1}(\cdot)$ is an indicator function and $\mathcal{T}_{i}$ is the $i$ -th interval, 2) Quadratic: $U(b,\tilde{y}_{b})\,=\,\tilde{y}_{b}\,-\,\hat{\alpha}b^{2}$ , and 3) Square Root: $U(b,\tilde{y}_{b})=\tilde{y}_{b}-\hat{\alpha}b^{1/2}$ . Here, $\hat{\alpha}$ is the scaled $\alpha$ so that it has a similar range to the $\alpha$ used in the linear utility function (e.g., for the Quadratic utility function, we let $\begin{array}{r}{\hat{\alpha}:=\alpha\frac{B}{B^{2}})}\end{array}$ . We randomly sample $\alpha$ ’s from the uniform distribution $\alpha\sim\mathcal{U}(1e{-}05,5e{-}03)$ to verify that the choice of $\alpha$ does not affect the overall results. Furthermore, We estimate a utility function using ifBO by assuming that the user  
+
+Table 2: Results on the cost-sensitive multi-fidelity HPO setups with various utility functions $(\alpha\,\sim$ $\mathcal{U}(1e{-}05,5e{-}03)$ with staircase, quadratic, and square root function). We estimate a utility function using ifBO by assuming that user wants better tradeoff than ifBO, denoted as “Estimated”. See $\S C$ for more details.  
+
+![](images/0f05ee947f6d4b46c8b0be4b97b18849f17f642a698823da3c694ce50a0dd329.jpg)  
+
+486   
+487   
+488   
+489   
+490   
+491   
+492   
+493   
+494   
+495   
+496   
+497   
+498   
+499   
+500   
+501   
+502   
+503   
+504   
+505   
+506   
+507   
+508   
+509   
+510   
+511   
+512   
+513   
+514   
+515   
+516   
+517   
+518   
+519   
+520   
+521   
+522   
+523   
+524   
+525   
+526   
+527   
+528   
+529   
+530   
+531   
+532   
+533   
+534   
+535   
+536   
+537   
+538   
+539  
+
+meta-training / meta-test, respectively. In Table 4, we can clearly see that our method consistently and significantly outperforms all the baselines on this real-world dataset as well, on both the estimated utility function and the linear utility functions with various $\alpha$ .  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this paper, we discussed cost-sensitive multi-fidelity BO, a novel framework for dramatically improving the efficiency of HPO. Based on the assumption that users want to early-stop the BO when the utility saturates, we explained how to achieve the maximum utility with our novel acquisition function and the stopping criterion specifically tailored to this problem setup, as well as the novel transfer learning method for training a sample efficient in-context LC extraploator. We empirically demonstrated the effectiveness of our method over the previous multi-fidelity HPO and the transferBO methods, with numerous empirical evidence strongly supporting our claim.  
+
+Reproducibility statement. All the implementation details are described throughout $\S D$ , E, and F.   
+We provide anonymized code in supplemental materials, and will publish the code upon acceptance.  
+
+Ethics statement. Our work presents a cost-sensitive multi-fidelity Bayesian Optimization method designed to make HPO more accessible to users with limited computational resources. By allowing users to define a utility function that balances performance improvements with computational cost, our method enables more efficient optimization and early stopping when costs outweigh benefits. This approach helps under-resourced individuals or organizations achieve competitive results without excessive financial or computational burden, promoting inclusivity and reducing inequality in machine learning research and practice.  
+
+
+

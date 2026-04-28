@@ -1,0 +1,197 @@
+# Alleviating Label Shift Through Self-trained Intermediate Distribution: Theory and Algorithms
+
+- Decision: Reject
+- Scores: 3, 3, 6, 6
+
+## Abstract
+As an obstacle towards real-world problems with the changing environment, label shift, which assumes the source and target label marginal distributions differ, loosens the homogeneous distribution assumption in classical learning scenarios. To correct the label shift, importance weighting is one of the most popular strategies with rigorous theoretical guarantees. However, the importance weight estimation of most existing methods results in high variance under large label shift or few source samples. In this paper, we introduce an ideal intermediate distribution instead of the source distribution to reduce the variation to the target label distribution. Our approach learns a self-trained intermediate distribution constructed from the labeled source and unlabeled target samples to approximate the ideal intermediate distribution. It balances the bias from pseudo target labels and the variance from importance weighting. Besides, we prove the sample complexity and generalization guarantees for our approach, which has a tighter generalization bound than the existing label shift methods under mild conditions. Extensive experimental results validate the effectiveness of our approach over existing state-of-the-arts methods.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper introduces an ideal intermediate distribution instead of the source distribution to reduce the variation in the target label distribution. The authors propose an algorithm to learn a self-trained intermediate distribution constructed from the labeled source and unlabeled target samples. Besides, the authors show the sample complexity and generalization guarantees for the proposed approach. The paper also includes extensive experimental results to support the main results.
+
+### Strengths
+1. Label shift is an interesting and valuable topic in the learning community. 
+
+2. The literature part is clear.
+
+3. There is extensive experiment analysis on the algorithm accuracy performance.
+
+### Weaknesses
+Major
+1. The paper needs to be more reader-friendly. A lot of notations are used without/before definition. This situation makes it very hard to understand the idea and review the solidness of the main results. For example, in only half of a page, more than10 notations are not clear:
+
+1.1 P3, 3rd paragraph, 3rd line : \hat{q}_h is not shown how to get it.
+
+1.2 P3, 3rd paragraph, 5th line: \gamma is not defined
+
+1.3 P3, 3rd paragraph, 5th line: \theta is not defined
+
+1.4 P3, 3rd paragraph, 5th line: \Delta_C is not defined
+
+1.5 P3, Collaray 1, 2nd line: delta has no domain
+
+1.6 P3,  Collaray 1, (3): q||p is not defined
+
+1.7 P3, Collaray 1, (3) : \gamma is not defined and has no domain
+
+1.8 P3, Collaray 1, (4): q||t is not defined
+
+1.9 P3, Collaray 1, (4):  \R is not defined
+
+1.10 P3, Collaray 1, (4):  \G is not defined
+
+1.11 P3, Collaray 1, (4):  \H is not defined
+
+1.12 P3, Collaray 1, (5):  \O is not defined
+
+1.13 P3, Collaray 1, (5):  \sigma_{min} is not defined
+
+
+2.The experimental section doesn't include the time performance.
+
+### Questions
+1. What's the meaning of those undefined notations?
+
+### Soundness
+1 poor
+
+### Presentation
+1 poor
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The authors propose the ALS method for alleviating label shift. ALS works in conjunction with label shift methods BBSE or RLLS to find an "ideal intermediate distribution" between the source and target distributions to construct a modified train set used to retrain the classifier. Theoretically, the authors demonstrate the approach's sample complexity and generalization guarantees. Then, BBSE and RLLS with ALS are compared favorably in experiments to BBSE and RLLS without ALS, another approach CBST, and a model without any label shift technique applied.
+
+### Strengths
+- Method is easy to combine on top of BBSE or RLLS
+- Proposed method performs well under the various examined data shift levels in the experiment, particularly in settings where data shift is very bad
+- Approach is very theoretically grounded
+
+### Weaknesses
+- Proposed method is designed to be used in conjunction with methods that are several years old. Empirical evaluation also does not compare against more recent methods like the mentioned MLLS or other cited related works from last 2-3 years
+- More space should be dedicated to theoretical results in the main body of the paper itself, especially since important choices (like using BBSE/RLLS) were made for the sake of getting good theoretical results
+- Writing style could use a little revision to improve structure and clarity
+   - Naming choices: By proposition 1, "ideal" intermediate distribution is non-unique, why not just call it an "intermediate distribution"? Acronym ALS is never explained (unless I just didn't see it)
+   - Text should be checked by a proofreader or grammar software; eg "alleviates" in Definition 1 should take a grammatical object, unclear what's meant by "k-th class of label y" in beginning of 3.1 until reading the sentence after equation (8)
+
+### Questions
+- Because MLLS doesn't have good theoretical guarantees, I understand why you didn't want to do the theoretical analysis of ALS applied to MLLS and used BBSE/RLLS instead. However, can ALS still empirically be applied with MLLS or other more recent and well-performing methods? I could see selling ALS as a method-agnostic, additional trick for improving performance on top of most label shift techniques
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+In order to efficiently deal with label shift, this paper propose to learn a self-trained intermediate distribution constructed from the labeled source and unlabeled target samples to approximate the ideal intermediate distribution, the sample complexity and generalization guarantees for the proposed approach is given. The introduction and theoretical analysis of the proposed method is clear.
+
+### Strengths
+The label shift is a widely existed problem and attract much attention. The intermediate distribution is used in this paper to address the label shift problem, which is interesting. From ideal intermediate distribution to self-trained distribution, the deeply analyze the issues of intermediate distribution, for example the pseudo-label, selection bias, and give the concrete solutions and the theorecital analysis. The organization is well and the presentation is clear.
+
+### Weaknesses
+The intermediate distribution is adopted in label shift problem, which may cause the expensive time cost.  The BBSE or RLLS is still used in the proposed method to estimate the pseudo-label, so the work can be considered as the combination of BBSE or RLLS and intermediate distribution.
+
+### Questions
+(1)	Since selection bias, the label conditional distribution may change, then the sample weight is adopted to address this issue. This is one of the key point in the proposed method. However, how to calculate the sample weight is not clear: the different notions are mixed-use, i.e., \pai\^ k and \pai\_k, and the same sample weight is assigned to samples in the same class? In Eqn. (10) the sample weight \pai\_i^k is used, however, in the context, only \pai\^k is discussed.
+(2)	There exists some minor error, such as the “i” in Eqn.(7) is confusion with different range, and in Appendix, the No. of equation is wrongly used, for example, “Combining Eq.(17) and Eq. (20), we have”,” Combining Eq. (22), Eq. (24), Eq. (25) and Eq. (26), we have”. The method BBSE is wrongly written as BBLS in "which outperforms both BBSL and RLLS across diverse datasets and.......". In Table 1. the combination of BBSE or RLLS and ALS is wrongly written as BBSE-LSC or RLLS-LSC.
+(3)	In Appendix, the “t(Y = y)” is used in Eqn.(7), this maybe a mistake.
+(4) In the Introduction, MLLS is mentioned, which is one of the latest method for label shift. So it is better to show the experimental results about MLLS or combination of MLLS and ALS.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes an algorithm called ALS which uses intermediate distribution approximating the ideal distribution to alleviate label shift. It also gives the generalization guarantee of ALS under label distribution differences and pseudo-target labels.
+
+### Strengths
+1. The theory is sufficiently comprehensive, providing a solid guarantee for the rationality of algorithm design.
+
+2. The method proposed is reasonable and performs well on three benchmark datasets.
+
+3. The paper is well-written with clear logic.
+
+### Weaknesses
+In fact, I would like to give a score of 7 (weak accept) which is closer to the level of this paper, but there is no such option. The reason the score did not achieve 8 is that there is still room for improvement in experiments and analysis. 
+
+1. The three datasets, MNIST, CIFAR10, and CIFAR100, used to construct the experimental scenarios, are somewhat simplistic. Moreover, certain experiments and metrics are only disclosed for one or two of these datasets.
+2. The disclosure of experimental hyperparameters appears to be incomplete. Algorithm hyperparameters, network hyperparameters, hyperparameters for comparison methods, random seeds, and other relevant details should be fully presented. Experimental results should include the mean and variance of metrics from multiple trials.
+3. The two types of distribution changes in the experimental setup are not intuitive, lacking visualization, making it difficult for readers to perceive the extent of label distribution shift in the experimental setup. It is also challenging to determine what the most extreme scenarios included in the experimental setup are like.
+4. The applicability of the algorithm should be thoroughly discussed. Considerations such as when the algorithm might fail, its compatibility with other algorithms and models, and its performance in extreme conditions (such as extreme imbalance or unseen categories) should be discussed.
+
+The above points are just requirements for an 8-score paper. Of course, even if these issues are not addressed, I acknowledge that this paper is above the acceptance threshold.
+
+### Questions
+What type of F-score do you use for multi-class classification?
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good

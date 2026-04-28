@@ -1,0 +1,158 @@
+# Towards Faithful Explanations: Boosting Rationalization with Shortcuts Discovery
+
+- Decision: Accept
+- Avg Score: 5.67
+- Scores: 6, 5, 6
+
+## Abstract
+The remarkable success in neural networks provokes the selective rationalization. It explains the prediction results by identifying a small subset of the inputs sufficient to support them.
+   Since existing methods still suffer from adopting the shortcuts in data to compose rationales and limited large-scale annotated rationales by human, in this paper, we propose a Shortcuts-fused Selective Rationalization (SSR) method, which boosts the rationalization by discovering and exploiting potential shortcuts.
+   Specifically, SSR first designs a shortcuts discovery approach to detect several potential shortcuts.
+   Then, by introducing the identified shortcuts, we propose two strategies to mitigate the problem of utilizing shortcuts to compose rationales.
+   Finally, we develop two data augmentations methods to close the gap in the number of annotated rationales.
+   Extensive experimental results on real-world datasets clearly validate the effectiveness of our proposed method.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper solves selective rationalization, an NLP problem where the aim is to find a piece of text from the input called "rationale" that directly justifies the label (selector problem), then use the rationale as input to do classification (predictor problem). Unlike "rationales", there are are pieces of text called "shortcuts" that can result in correct prediction but are not proper justifications of the label. The exact difference between rationales and shortcuts is not clearly defined in the paper, so it seems that the distinction is problem-specific and ultimately something that is left to the practitioner. Previous selective rationalization methods can be categorized into supervised, where the rationales are provided during training, and unsupervised, where they have to be inferred during training process. The paper proposes a semi-supervised approach (an extension of a couple of recent papers) where a selector model trained in the unsupervised way is applied to smaller supervised data to identify the shortcuts and retrain the selector model. In addition, two data augmentation methods were proposed to enrich the shortcut discovery. The proposed approach is evaluated in 4 datasets. The model outperforms previous SOTA unsupervised and semi-supervised methods on both rationale prediction and label prediction tasks. The performance is also
+comparable to the supervised baselines
+
+### Strengths
++ The paper introduces innovative techniques to prevent the model from erroneously considering shortcuts as rationales during predictions. Since the objective is to answer the question “Which text span leads to the final conclusion”, this approach can be beneficial when there are misleading shortcuts in the text. Such predictions can help us analyze the reasoning ability of large language models (LLM).
+- The authors conducted comprehensive experiments on more than 10 variants of the proposed approach. Informative discussions are also presented. Tests are performed on four datasets from diverse domains and results are compared with SOTA baselines from all 3 groups of previous methods. Such rich experiments clearly show how each add-on piece affects the overall model performance. The limitations and potential reasons for certain outcomes are also deeply analyzed and discussed.
+- The data augmentation opens up a new approach to enriching labeled data in this area. Instead of using LLMs to augment new instances, which can be inefficient in both computing source and cost, the authors propose to use random/similar tokens to replace shortcuts. Such simple approaches, especially the random one, surprisingly yield promising results.
+
+### Weaknesses
+ - The task of finding shortcuts remains ambiguous. It's unclear whether shortcuts always exist in the text. If they aren’t, what would the model predict? The usage of this system seems limited.
+- There's a need for a more robust analysis of prior methodologies, particularly the unsupervised ones. The author asserts that unsupervised methods frequently identify shortcuts as inefficient rationales and provides examples. Yet, the reader would be curious about how often that happens, and if the model already yields good results, why do we have to give up shortcuts? I suggest a stronger argument for why finding a good rationale is significant, such as it can be helpful for other reasoning tasks.
+- The manuscript's writing style can be perplexing in several sections, notably in Methodology (Section 3). Mathematical expressions should be consistent, straightforward, and clear, and should only be included when indispensable. For example, instead of writing an algorithm for the semantic data augmentation, the reader might be more interested in seeing how specifically you
+do the semanticly similar word retrieval in Appendix A.
+- It is hard to understand why sharing selector parameters in both supervised/unsupervised phases is not the default setting. Since the claim is that this is a specific setting in the proposed approach, it would be important to learn why the previous methods are not doing so.
+
+### Questions
+* Elaborating on data augmentation might be beneficial. For instance, details about the number of augmented instances introduced and the ideal quantity would be insightful.
+* The term datastore can be confusing when discussing random data augmentation since this word is also used when describing the semantic key-value pair in semantic data augmentation.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper "Boosting selective rationalization with shortcuts discovery" proposes an extension to selective text rationalisation methods by using so-called shortcuts in analysis and prediction for text. Here, rationalisation is an attempt to find fragments that influence the final classification The authors note that frequently, in unsupervised approaches, algorithms search for so-called shortcuts, which, while they may be strongly, but spuriously, correlated with the final classification, do not in any way explain the real reasons for a given classification. They therefore suggest a combination of supervised algorithms, where the true rationales (input elements influencing the classifications) are predefined by experts, and unsupervised methods, where the rationales are searched for. The proposal is thus to exclude those unsupervised rationalizations found that are not defined by experts. By excluding these unnecessary shortcuts, the proposed SSR algorithm achieves results that are similar to SOTA approaches, beating many other approaches.
+
+The use of ChatGPT in appendix C.2 where it, essentially, selects the proposed approach over other methods, is nice and might be entertaining, but it does not introduce anything to the problem at hand. I would remove it, if I were you. But you, naturally, may do as you please.
+
+The work on this subject is clearly very much needed these days. On the other hand, I think that this paper does not introduce new ideas. The use, or rather the exclusion of the “shortcuts” in a model, does not introduce enough new knowledge to push the model prediction understanding much.
+
+### Strengths
+The authors consider an important problem of rationalisation, understood as the selection of the parts of the classified input that have the greatest impact on the classification of the problem. The issue considered is of the natural language processing tasks. The solution is described in great detail in the form of a mathematical derivation, which is a strength, but in too much detail makes the article hard to read sometimes. It has the advantage of attempting to combine supervised and unsupervised approaches in order to exclude as found rationalisations those fragments that only have spurious correlations with the output, but do not explain anything.
+
+### Weaknesses
+1. The concept of a shortcut itself is very vague, and the definition and proposed selection algorithm (as described above by discarding the undefined) is too simplistic. The authors use one example of such a spurious correlation that does not describe much of the decision much, throughout all the article.
+2 The entire article is written in a way that is difficult to understand. Lots of equations, with several variables with stacked indices, reduces the readability and the clearness of what the authors want to achieve. 
+3. There is no clearly stated hypothesis at the beginning of the text. The approach may be obvious to the author, but readers will not understand and will abandon reading before the end.
+4. The authors introduce a number of loss functions which can be used in different configurations, with no clear intuition which should be used and why.
+5. The authors introduce “data augmentation” DA approaches into their model. However, they seem to have forgotten the MixedDA solution, which is in the tables but not in the description (section 3.3). The models with and without augmentation are compared, and in some cases of algorithms or data one type of augmentation gives better results, but these results are not consecutive (see table 1). It seems to me that the augmentation ideas not really matter. The differences are small, in any case.
+6. The text introduces a great deal of patterning, both when describing existing methods and the author's own proposal. This does not make it easy to read, as many of them do not explain the next steps in any way, such as the definition of Gumbel-softmax on page 3.
+
+### Questions
+1. The definition and suggested algorithm for selection (as described above by rejecting the undefined) is too simplistic. The authors use only one example ('received a lukewarm approach' in the film review) throughout the article. Doesn't such a solution reduce the proposal to a supervised approach? Please use another example of a shortcut.
+2 The entire article is written in a way that is difficult to understand. There is no clearly stated hypothesis at the beginning of the text. The approach may be obvious to the author, but readers will not understand and will abandon reading before the end. Could you clearly state your hypothesis in the introduction?
+3. Is the whole of section 2 your proposition, or the definition of possible solutions used now? It is not clear.
+3. A number of cost functions are given that are to be utilized in different configurations.  Since the background models are quite complex (Transformer, both as encoder and encoder/predictor, as well as other generative models) these loss functions tend to be complex too. Some might be removed with more intuition on the more important in exchange.
+4. What actually is the “shortcut imitator” (pages 5 and 6 and later), what is it used for?
+5. Please explain what is the MixedDA augmentation in subsection 3.3.
+6. In the results tables, these with the best value are bold-faced as the best. But the mean differences may be as low as 0.1%, which statistically are not, in any way, significant. The authors should perform some statistical analysis and group the algorithms into groups of statistical equivalence (see e.g. Demsar, Statistical comparisons of classifiers over multiple data sets, JMLR 7, 2006; open software for that approach is available).
+
+Less essential:
+1. Difficulty in reading may come from poor English. I suggest the involvement of a native speaker.
+2. Instead of very many formulas, drawing diagrams of the methods should be shown, which would explain much more. Also, nothing is contributed by the detailed descriptions of all cost functions in the description of the general methods as well as the own proposal.
+3. in table 3 the result 90.7 for SSR_unif with DA is chosen as best, even though that of WSEE with DA of 91.0 mean seems better. That is perhaps a typing error, or is it?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper studies selective rationalization. Existing methods suffer at some extent from spurious correlation (i.e., shortcuts). The authors propose shortcuts-fused selective rationalization (SSR) to mitigate spurious correlation. More specifically, they employ semi-supervised rationalization: given an annotated datasets of rationals and labels, they train SSR on it. Then, they train an unsupervised rationalization method on the same data and use the previous model to identify spurious tokens. This new knowledge is then transferred to the unsupervised setup. Since the main method relies on annotated data, the authors propose two data augmentation techniques to mitigate the low-amount of available data.
+
+The method where one exploits a supervised rationalization model to identify spurious rational tokens from an unsupervised model is interesting, but relies on a "large" amount of available rationales. Overall, a supervised rationalization model has to be trained to improve an unsupervised one, which greatly limits the applicability of the method, even though a data augmentation approach is proposed. I would be curious whether transferring the knowledge from one task to another could be possible to some extent (not necessary from movie-dataset-1 to movie-dataset-2).
+
+The experiment section is lacking unsupervised baselines and standard datasets used in selective rationalization [1-6, to cite a few but more are missing] (should also be included in the related work section). In terms of dataset: beers, hotels, amazon, and the other tasks of ERASER. Moreover, I would highly encourage the authors to conduct a human evaluation regarding the produces rationales. The relationship between the number of augmented data vs task/rational performance is currently unclear. I would appreciate having a graph showing how the performance evolve according the number of added data.
+
+1 Bao et al. 2018, Deriving machine attention from human rationales (EMNLP) 2 Chan et al. 2022, UNIREX: A Unified Learning Framework for Language Model Rationale Extraction (ICML) 3 Antognini et al. 2021, Multi-Dimensional Explanation of Target Variables from Documents (AAAI) 4 Chang et al. 2019, A Game Theoretic Approach to Class-wise Selective Rationalization (NeurIPS) 5 Antognini and Faltings 2021, Rationalization through Concepts (ACL) 6 Yu et al. 2019, Rethinking Cooperative Rationalization: Introspective Extraction and Complement Control (EMNLP)
+
+POST-REBUTTAL:
+Thank you for your additional detailed experiments. I am satisfied with your answer and will increase my score.
+
+### Strengths
+- Interesting framework to leverage supervised and unsupervised rationalization models
+- The performance (although not the same configuration each time) is closed to supervised baselines
+
+### Weaknesses
+ This paper studies selective rationalization. Existing methods suffer at some extent from spurious correlation (i.e., shortcuts). The authors propose shortcuts-fused selective rationalization (SSR) to mitigate spurious correlation. More specifically, they employ semi-supervised rationalization: given an annotated datasets of rationals and labels, they train SSR on it. Then, they train an unsupervised rationalization method on the same data and use the previous model to identify spurious tokens. This new knowledge is then transferred to the unsupervised setup. Since the main method relies on annotated data, the authors propose two data augmentation techniques to mitigate the low-amount of available data.
+
+The method where one exploits a supervised rationalization model to identify spurious rational tokens from an unsupervised model is interesting, but relies on a "large" amount of available rationales. Overall, a supervised rationalization model has to be trained to improve an unsupervised one, which greatly limits the applicability of the method, even though a data augmentation approach is proposed. I would be curious whether transferring the knowledge from one task to another could be possible to some extent (not necessary from movie-dataset-1 to movie-dataset-2).
+
+The experiment section is lacking unsupervised baselines and standard datasets used in selective rationalization [1-6, to cite a few but more are missing] (should also be included in the related work section). In terms of dataset: beers, hotels, amazon, and the other tasks of ERASER. Moreover, I would highly encourage the authors to conduct a human evaluation regarding the produces rationales. The relationship between the number of augmented data vs task/rational performance is currently unclear. I would appreciate having a graph showing how the performance evolve according the number of added data.
+
+### Questions
+- How would perform sup-rat with data augmentation?
+- Could you also report metrics regarding comprehensiveness and sufficiency to assess the improvement of the proposed approach to decrease spurious correlation?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+3 good

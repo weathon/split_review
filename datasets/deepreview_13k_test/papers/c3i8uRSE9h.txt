@@ -1,0 +1,242 @@
+\title{Fast constrained sampling in pre-trained diffusion models}
+
+\begin{abstract}
+Diffusion models have dominated the field of large, generative image models, with the prime examples of Stable Diffusion and DALL-E 3 being widely adopted. These models have been trained to perform text-conditioned generation on vast numbers of image-caption pairs and as a byproduct, have acquired general knowledge about natural image statistics. However, when confronted with the task of constrained sampling, e.g. generating the right half of an image conditioned on the known left half, applying these models is a delicate and slow process, with previously proposed algorithms relying on expensive iterative operations that are usually orders of magnitude slower than text-based inference. This is counter-intuitive, as image-conditioned generation should rely less on the difficult-to-learn semantic knowledge that links captions and imagery, and should instead be achievable by lower-level correlations among image pixels. In practice, inverse models are trained or tuned separately for each inverse problem, e.g. by providing parts of images during training as an additional condition, to allow their application in realistic settings. However, we argue that this is not necessary and propose an algorithm for fast-constrained sampling in large pre-trained diffusion models (Stable Diffusion) that requires no expensive backpropagation operations through the model and produces results comparable even to the state-of-the-art \emph{tuned} models. Our method is based on a novel optimization perspective to sampling under constraints and employs a numerical approximation to the expensive gradients, previously computed using backpropagation, incurring significant speed-ups.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+The recent state-of-the-art in image generation has been dominated by diffusion-based, text-to-image models \citep{rombach2022high}, which excel in translating input text prompts into images. However, by training on millions of text-image pairs, these models have acquired some general knowledge about the natural image space. Thus, besides from text-to-image generation, these models should also be useful in other image-based inference tasks, such as inpainting, super-resolution etc., given that their knowledge about image statistics can be induced.
+
+Such efforts on utilizing text-to-image models on image-based inference tasks have focused on devising ways to adapt pre-trained, text-guided models to the target task. The simplest approach is to fine-tune the text-based model on the new image-based task \citep{xie2023smartbrush, wang2024exploiting}, with the downside of fine-tuning being unnecessarily expensive in smaller-scale scenarios. Alternatively, a different set of algorithms has been developed that utilize only the pre-trained text-to-image diffusion model, and modify the sampling process to infer the missing information \citep{chung2023diffusion,rout2023solving,chung2023prompt}. These sampling-based approaches however come with a significant increase in the computations needed. 
+
+As a practical example, in Figure~\ref{fig:cat_example} we select an image from the web and pose the task of inferring the right half given the pixels in the left half. Based on the Stable Diffusion 1.5 model, we first utilize a fine-tuned variant, trained to be conditioned on images and inpainting masks. Although the inference is fast (4s) and relatively accurate with textures being correctly replicated on the right side and no visible seams, this model required 440k steps of additional inpainting training, on top of the initial SD 1.5 weights. 
+
+Secondly, we demonstrate the inpainting results of a recent sampling-based method, PSLD \citep{rout2023solving}. This algorithm requires backpropagating through the denoiser network multiple times during inference, which increases the inference time to 5 minutes. Apart from speed, the method fails to generate a realistic right half, with the generated image achieving an overall correct shape but failing to use the right textures on the fur.
+
+With the shortcomings of existing approaches in mind, we propose a new method for sampling from pre-trained diffusion models under constraints which aims to provide both fast inference speeds and high-quality results. We approach inference under a diffusion prior and a constraint from an optimization perspective and find that (a) there is an alternative gradient update to the diffusion latents during sampling that does not coincide with the gradient updates of previous approaches (b) there is a fast numerical approximation that speeds up this optimization significantly. Our work aims to make inference under constraints practical both by improving the synthesized images and reducing the inference times to a reasonable range.
+
+\begin{figure}[t]
+    \centering
+    \setlength{\tabcolsep}{1pt}
+    \begin{tabular}{ccccc}
+        \includegraphics[width=0.19\linewidth]{figures/gt_cat.png} & 
+        \includegraphics[width=0.19\linewidth]{figures/constraint_cat.png} & 
+        \includegraphics[width=0.19\linewidth]{figures/inpaint_sample.png} &
+        \includegraphics[width=0.19\linewidth]{figures/psld_inpainting.png} &
+        \includegraphics[width=0.19\linewidth]{figures/sample_cat.png} \\
+        Image & Constraint & Inpainting model  & \citet{rout2023solving} & Ours \\ 
+              &            & (4s)              & (5min)                    & (17s)
+    \end{tabular}
+    \caption{Half-image inpainting. Our method allows for fast and accurate inference of the missing part of the image using the original pre-trained Stable Diffusion 1.5 model, which was not tuned for this purpose. In contrast, previous inverse problem solvers are slow and fail to understand the long-range correlations between the image pixels, or rely on models trained/tuned for each given problem. The inpainting model used is the Stable Diffusion 1.5-inpainting fine-tuned model.}
+    \label{fig:cat_example}
+\end{figure}
+
+
+
+\section{Background}
+
+\subsection{Denoising Diffusion}
+Denoising diffusion models were proposed for image generation in \citet{ho2020denoising}, where their ability to generate diverse and high-quality samples was first showcased in the image space. The original formulation views the training and inference process as a hierarchical latent variable model $\vx_T \rightarrow \vx_{T-1} \rightarrow \dots \rightarrow \vx_1 \rightarrow \vx_0$, where the final latent is distributed normally $\vx_T ~ \sim N(\mathbf{0}, \mI)$ and $p(\vx_0)$ represents the data distribution. After choosing a noise schedule $a_t$ that defines the \textit{forward} transitions $\vx_{t} \rightarrow \vx_{t+1}$, usually Gaussian centered at $\sqrt{\frac{a_{t+1}}{a_t}}\vx_t$ and with variance $(1- \frac{a_{t+1}}{a_t})$, the model is trained to reverse each individual step in the diffusion process.  
+
+Further iterations of denoising diffusion introduced class conditioning \citep{nichol2021improved} and classifier-free guidance \citep{ho2022classifier}, which culminated in the development of Latent Diffusion Models \citep{rombach2022high}. Latent diffusion proposed the large-scale training of text-to-image diffusion models in the latent space of an image autoencoder, $\vx_0 = \mathcal{D}(\mathcal{E}(\vx_0))$. We note that although we use latent diffusion models for all our experiments, we do not require additional steps during inference to ensure consistency between the pixel and latent spaces, as is performed in previous works \citep{rout2023solving, chung2023prompt}.
+\subsection{Gradient descent steps through backpropagation}
+A number of recent approaches to solving inverse problems in denoising diffusion models have been investigated in hope that pre-trained large models, which required significant investment, can be used for inference directly, without additional tuning for each different inverse problem \citep{chung2023diffusion, rout2023solving, chung2023prompt}. The most typical problem formulation is the denoising generation of the sequence $\vx_T, \vx_{T-1},..., \vx_1, \vx_0$ under the constraint on the final signal in the form $\mA \vx_0=\vy$, or using a relaxed version that requires minimization of $||\mA \vx_0 - \vy||_2^2$, possibly as part of the likelihood function $p(\vy|\vx_0)={\cal N}(\vy; \mA \vx_0, \sigma^2 \mI)$. By Tweedie's formula \citep{efron2011tweedie}, denoising diffusion models approximating $\nabla_{\vx_t} \log p_t(\vx_t)$ can be used to express the expected value of $\vx_0$, denoted as $\hat{\vx}_0$, but the addition of the constraint as if an additional observed variable $\vy$ was generated requires the addition of the term $\nabla_{\vx_t} \log p(\vy|\vx_0)$.
+
+At any rate, the regular denoising diffusion steps are altered so that at each $t$, the generated latent $\vx_t$ is moved in the direction reducing the cost
+\begin{equation}
+\label{eq:cost}
+    C(\vx_t)=(\mA\hat{\vx}_0(\vx_t)-\vy)^T(\mA\hat{\vx}_0(\vx_t)-\vy).
+\end{equation}
+For example, in the case of inpainting applications, matrix $\mA$ extracts a subsection of the pixels in image $\vx_0$ to be compared with a given target $\vy$. The estimated expected value of $\vx_0$ at the end of the chain is provided by the diffusion model as a nonlinear function  $\hat{\vx}_0(\vx_t)$. Typically, these moves are gradient descent moves, i.e. moves of $\vx_t$ in the direction 
+\begin{equation}
+\label{eq:gd}
+    \vh = -\nabla_{\vx_t} C(\vx_t) = -\mJ^T \mA^T(\mA\hat{\vx}_0-\vy)=-\mJ^T\ve, \quad
+    \mJ=\nabla_{\vx_t} \hat{\vx}_0(\vx_t),\ \ve=\mA^T(\mA\hat{\vx}_0-\vy)
+\end{equation}
+Computation of the Jacobian $\mJ$ would be expensive both in memory and computation, so the gradient is computed using backpropagation through $C(\vx_t)$, and we show its mathematical form here for comparison with a different update we use in this paper. In \citet{chung2023diffusion} and \citet{chung2023prompt} for example, (several) gradient steps of this form are applied to $\vx_t$ at each step $t$ of generation before moving on to the next stage. As optimization of $\vx_t$ might reduce the total noise in the image below what the denoising at $t-1$ was trained for, the gradient steps moving $\vx_t$ towards optimizing $C(\vx_t)$ are combined with adding additional noise, which could also be seen as a form of stochastic averaging. %(should we have a generic algorithm using direction simply denoted by h?)
+
+
+
+\section{Our approach: Newton steps based on the inverse function}
+
+Suppose that at the current point in denoising, ($\vx_t, \hat{\vx}_0$), the function $\hat{\vx}_0(\vx_t)$ is locally invertible, i.e. there is a unique, although unknown, inverse function $\vx_t(\hat{\vx}_0+\vg)$, in the neighborhood of $\hat{\vx}_0$ (for small $|| \vg ||$), in which case $\nabla_{\hat{\vx_0}} \vx_t=(\nabla_{\vx_t} \vx_0)^{-1}=\mJ^{-1}$. This assumption may seem obviously wrong considering that denoising diffusion models are trained assuming that $\vx_t$ is distributed as a Gaussian variable centered at $\vx_0$, i.e. for a given $\vx_0$ from the data distribution, many different $\vx_t$ samples are feasible. However, $\hat{\vx}_0$ is a deterministic function represented by a neural network, through which backpropagation can compute the update in (\ref{eq:gd}). I.e., at least for the directions we are interested in, unless the cost is already optimized, the perturbations in $\hat{\vx}_0$ will yield nonzero perturbations in $\vx_t$.
+
+Using the first-order Taylor series we can approximate
+\begin{equation}
+    \vx_t(\hat{\vx}_0 + \vg) \approx \vx_t(\hat{\vx}_0)+(\nabla_{\hat{\vx}_0} \vx_t) \vg = \vx_t + \mJ^{-1}\vg
+\end{equation}
+for some small perturbation vector $\vg$.
+
+Now suppose that, as in the Gauss-Newton method, $\vx_t$ should move as close as possible to some target $\vx_t'$, i.e. we need to minimize 
+\begin{equation}
+    C(\hat{\vx_0}+\vg) =(\vx_t(\hat{\vx}_0+\vg)-\vx_t')^T(\vx_t(\hat{\vx}_0+\vg)-\vx_t') 
+    \approx (\vx_t + \mJ^{-1}\vg -\vx_t')^T (\vx_t + \mJ^{-1}\vg -\vx_t')
+\end{equation}
+w.r.t. to the movement $\vg$ of $\hat{\vx}_0$. Setting $\nabla_\vg C(\hat{\vx}_0+\vg) = \mathbf{0} $ yields the system
+
+\begin{gather}
+\label{eq:our_move}
+    (\mJ^{-1})^T(\vx_t'-\vx_t)=(\mJ^{-1})^T(\mJ^{-1})\vg \\
+    \vx_t'-\vx_t = \vh = \mJ\vg
+\end{gather}
+Thus, locally, within the validity of the first order approximation, $\vg$ and $\vh$ represent a pair of corresponding movements in $\hat{\vx}_0$ and $\vx_t$ respectively, but here they are linked differently than in (\ref{eq:gd}). The semantics of the relationship here is that $\vg$ is the best direction in $\hat{\vx}_0$ to approximate the target move $\vh$ in $\vx_t$ in the least squares sense. If we assume that $\vg=-\epsilon \ve$, where $\ve$ is the error vector on $\hat{\vx}_0$ as before in (\ref{eq:gd}) and $\epsilon$ is a small constant used to make the first order approximation valid, we get
+\begin{equation}
+    \vh=-\epsilon \mJ \ve,
+\end{equation}
+and so moving $\vx_t$ in this direction would mean moving it to the target $\vx_t'$ that would \emph{require} movement of $\hat{\vx}_0$ in the direction opposite of the error vector $\ve$. For example, in the case of image inpainting, the error vector (per pixel) $\ve=\mA^T(\mA\hat{\vx}_0-\vy)$ has zeros for pixels outside of the given (constraint) area. So the move $\vh$ in $\vx_t$ has to be such so that by searching for a compensatory move in $\vg$ in $\hat{\vx}_0$ the resulting move would not alter $\hat{\vx}_0$ in the areas outside of the constraint. %What does that mean?
+
+The direction of optimization we propose in (\ref{eq:our_move}) has at least two advantages over the usual gradient descent update. First, the direction $\vh$ can be computed numerically to save both on computation (2-fold) and memory (2.5-fold) compared to using backpropagation on cost (\ref{eq:cost}). To derive that update, consider the function $f(s)=\hat{\vx}_0(\vx_t-s \ve)$ where the variable $s$ is scalar. Its derivative at $s=0$ is
+\begin{equation}
+    \frac{d f}{d s} = -\mJ \ve,
+\end{equation}
+and so the direction $\vh$ can be approximated numerically using the approximate derivative of $f(s)$ at $s=0$ 
+\begin{gather}
+    f'=\frac{1}{\delta}[\hat{\vx}_0(\vx_t+\delta \ve)-\hat{\vx}_0(\vx_t)], \\
+    \vh = -\epsilon \mJ \ve \approx \frac{\epsilon}{\delta}[\hat{\vx}_0(\vx_t+\delta \ve)-\hat{\vx}_0(\vx_t)],
+\end{gather}
+requiring no backpropagation but instead, two forward passes through the network: one to compute $\hat{\vx}_0(\vx_t)$ and another to compute $\hat{\vx}_0$ for the perturbed $\vx_t$ (in the negative direction of the error vector). 
+
+The second advantage comes from the asymmetry of the Jacobian $\mJ$, as alluded to above. The updates (\ref{eq:gd}) and (\ref{eq:our_move}) optimize locally for different things unless $\mJ=\mJ^T$. As described in \ref{subsec:grad} on inpainting, (\ref{eq:our_move}) is in the direction that would represent the textures in the constrained region everywhere in the rest of the image as much as possible, whereas (\ref{eq:our_move}) only leads to copying some of the texture into some parts of the rest of the image.
+
+There is no theoretical reason for the Jacobian $\mJ$ to be asymmetric in pre-trained denoising diffusion models in general. In fact, it very well could be symmetric as these models can be seen in terms of score matching so that $\hat{\vx}_0$ approximates the true expectation $E[\vx_0|\vx_t]=\frac{1}{\sqrt{\alpha_t}}[\vx_t+\vv_t\nabla_{\vx_t} \log p_t(\vx_t)]$, and the gradient of this is indeed symmetric:
+\begin{equation}
+    \nabla_{\vx_t} E[\vx_0|\vx_t] = \frac{1}{\sqrt{\alpha_t}}[\mI+\vv_t \nabla^2 \log p_t(\vx_t) ].
+\end{equation}
+One could argue that a well-trained model $\hat{\vx}_0(\vx_t)$ should have its Jacobian equal to this. But whether the denoising diffusion models are trained with score matching in mind or using the variational method of \citet{ho2020denoising}, they do not directly optimize to match the real score $\nabla_{\vx_t} \log p_t(\vx_t)$ everywhere nor are they constrained to produce symmetric Jacobians, and as shown in \ref{subsec:jacobian} the Jacobian for Stable Diffusion 1.5 is not symmetric, which we assume is the reasons why our optimization of $\vx_t$ may be more suitable for some applications, as demonstrated in Section~\ref{sec:experiments}.
+
+\subsection{Symmetry of the Jacobian}
+\label{subsec:jacobian}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\linewidth]{figures/jacobians.pdf}
+    \caption{Sample pairs of pixels $(i,j),(k,l)$ of the denoiser Jacobian $\nabla_{\vx_t} \hat{\vx_0} = \nabla_{\vx_t} E[\vx_0|\vx_t]$ for different timesteps $t$. We use Stable Diffusion 1.5.}
+    \label{fig:jacobian}
+\end{figure}
+
+In Figure~\ref{fig:jacobian} we verify the claim that the trained diffusion model's Jacobian is not symmetric. We again employ SD 1.5 and given a random input image from ImageNet, we scale it and add noise to get an intermediate latent of the diffusion process at different timesteps. We then pass the image through the denoiser and compute the gradients $\partial \hat{\vx}_0^{k,l}/\partial \vx_t^{i,j}$ and $\partial \hat{\vx}_0^{i,j}/\partial \vx_t^{k,l}$ for randomly chosen pixels $(i,j),(k,l)$ using backpropagation. When plotting the gradients we see that the values deviate from $y=x$, which would indicate a symmetric Jacobian.
+
+\subsection{Difference between gradient directions}
+\label{subsec:grad}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.\linewidth]{figures/grad_comparison.pdf}
+    \caption{Comparison between 5 gradient updates at $t=800$ using a learning rate $\lambda = 1$.}
+    \label{fig:gradient_updates}
+\end{figure}
+
+To highlight the difference between the two gradient updates of (\ref{eq:gd}) and (\ref{eq:our_move}) we perform the experiment showcased in Figure~\ref{fig:gradient_updates}. We create a synthetic black-and-white grid image (Figure~\ref{fig:gradient_updates} (a)), which we will pass to the diffusion model. We compute the diffusion latent at $t=800$ by first blurring and scaling the original image and then adding the appropriate magnitude noise. Then we aim to find how the model intends to change the entire image when asked to add a red square in the middle. We pose this as an inpainting task and compute the two different gradients when given a measurement corresponding to the center patch of the image with an added red square (Figure~\ref{fig:gradient_updates} (b)). Starting from the initial diffusion latent, we perform 5 gradient updates using the two different gradients and visualize the final $\hat{\vx}_0$ produced by the model. 
+
+The resulting images show that the proposed direction (Figure~\ref{fig:gradient_updates} (d)) produces a more coherent image that copies the newly introduced texture to the correct locations (intersections). The direction given by backpropagation (Figure~\ref{fig:gradient_updates} (c)) 
+\begin{algorithm}[t]
+\caption{The proposed algorithm for linear inverse problem solving.}
+\label{alg:method}
+\begin{algorithmic}
+    \State \textbf{Input:}  Pre-trained diffusion model $\hat{\vx}_0(\vx_t)$, diffusion schedule parameters $\zeta_t, \kappa_t, \beta_t$, operator $\mA$, measurement $\vy$, step size $\delta$, optimization iterations $K$, learning rate $\lambda$
+    \State $\vx_T \sim N(\textbf{0}, \mI)$
+    \For{$t \in \{T, T-s,T-2s,\dots,s\}$}
+    \While{$i < K$}
+    \State $\ve = \mA^T(\mA\hat{\vx}_0(\vx_t) - \vy) $ \Comment{Depends on the task}
+    \State $\vh = [\hat{\vx}_0(\vx_t+\delta \ve)-\hat{\vx}_0(\vx_t)]/\delta$
+    \State $\vx_t = \vx_t + \lambda \vh$
+    \State $i = i+1$
+    \EndWhile
+    \State $\vz_t \sim N(\textbf{0}, \mI)$
+    \State $\vx_{t-s} = \zeta_t \vx_t + \kappa_t \hat{\vx}_0(\vx_t) + \beta_t \vz_t$ \Comment{Step using DDIM \citep{song2020denoising} \footnotemark}
+    \EndFor
+    \State \textbf{Return:} $\vx_0$
+\end{algorithmic}
+\end{algorithm}
+\footnotetext{The diffusion schedule parameters $\zeta_t, \kappa_t$ that we use in our notation can be trivially computed from the schedule variances $a_t$ as described in DDIM.}
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\subsection{Inverse Problems}
+
+We validate our approach on ImageNet \citep{deng2009imagenet} by performing inpainting and super-resolution. Following \citet{chung2023prompt}, we randomly choose 1000 images from the 10k test images of the \verb|ctest10k| split. For the diffusion model, we use SD v1.5, which is pre-trained on the LAION \citep{schuhmann2022laion} text-image dataset. All experiments were done on a single NVIDIA RTX A5000 24GB GPU.
+
+We use Stable Diffusion 1.5, a latent diffusion model, which spatially compresses the images by a factor of 8. To demonstrate the versatility of our approach, we approach linear inverse problems from two different angles. For inpainting, instead of decoding the latent into an image and comparing it to the measurement in pixel space, we opt to dilate the pixel-level masks and directly perform inpainting in the latent space. That means we 'discard' some of the information in the given image by only keeping $8\times8$ patches that do not overlap with the masked pixels. Consequently, we apply the masking and un-masking operators, $\mA$ and $\mA^T$ respectively, in the latent space and inpaint latent values instead of pixels. Even with fewer pixels, our method performs better than existing methods in inferring the missing information. We utilize the $10-20\%$ free-form masking from \citet{saharia2022palette} as the method of masking pixels.
+
+For superresolution, we cannot work in the latent space as the operation of downsampling pixels does not correspond to downsampling latents. Therefore, in order to compute the error direction $\ve$ we backpropagate the pixel-level constraint cost $(\mA \mathcal{D}(\vx_t) - \vy)^T(\mA D(\vx_t) - \vy)$ through the decoder network and utilize the resulting gradient w.r.t. the latent as the error direction. We note that by setting $\ve = -\partial C(\mathcal{D}(\vx_t) / \partial \vx_t$ we only require backpropagation through the decoder model, which is significantly less expensive than backpropagating through the denoiser network, as is done in previous works. For both degradations, we also include additive white Gaussian noise with $\sigma_\vy = 0.05$.
+
+In both experiments, we also find it useful to perform warm restarts of our algorithm. After running Algorithm~\ref{alg:method} from $t=1000$ to $t=0$, we reset the inferred $x_0$ by adding the appropriate noise to 
+When superresolving, we add an additional perturbation to the gradient to avoid local minima. We find that our approach quickly converged to blurry images, which satisfy completely the superresolution constraint, but do not contain the desired details and texture. A simple perturbation of the gradient with random noise around the current $\hat{\vx}_0$ seems to be adequate in solving this issue. For inpainting, this is not a problem, as the textures and overall fidelity of the inferred image are dictated by the given regions.
+
+In Figure~\ref{fig:comparison} we showcase the qualitative performance of our algorithm compared to similar recent works. In the case of inpainting our results show greater coherence with the rest of the image. For superresolution, our method seems to introduce more new textures in the generated image, which may not always align perfectly with the shown content (e.g. artifacts). In Table~\ref{tab:imagenet} we present quantitative results by measuring PSNR, LPIPS and FID scores. Inpainting shows a clear advantage for our approach, whereas superresolution struggles to improve significantly. It is important to consider that for our results, the inference time is around 2 minutes, including the warm restarts, whereas competing methods always require more than 4 times longer for a single image.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\linewidth]{figures/comparative_results.pdf}
+    \caption{Comparison between our method and other works. We directly use the images and results from \citep{chung2023prompt} since there is no code available to replicate their method. We run our algorithm on the same ground truth images for inpainting the given 'gray region' masks and $\times 8$ super-resolution.}
+    \label{fig:comparison}
+\end{figure}
+
+\begin{table}[t]
+    \centering
+\centering
+\small
+\begin{tabular}{l ccc c ccc c}
+    \hline \\
+     & 
+    \multicolumn{3}{c}{\textbf{Inpaint (Freeform)}} 
+     & & 
+    \multicolumn{3}{c}{\textbf{SR ($\times 8$)}}  & Time \\
+    \cline{2-4} \cline{6-8}
+    \textbf{Method} & 
+    PSNR\textuparrow & LPIPS\textdownarrow & FID\textdownarrow &
+      & 
+    PSNR\textuparrow & LPIPS\textdownarrow & FID\textdownarrow  &
+    (approx.) \\
+    \hline
+    Ours & 22.20 & 0.275 & 30.45 
+     &
+    & 22.29 & 0.428 & 73.05  & 2min \\
+    \hline
+    P2L \citep{chung2023prompt} & 21.99 & 0.229 & 32.82 
+     &
+    & 23.38 & 0.386 & 51.81 & 30min \\
+    LDPS  & 21.54 & 0.332 & 46.72
+     &
+    & 23.21 & 0.475 & 61.09  & 8min \\
+    PSLD \citep{rout2023solving}  & 20.92 & 0.251 & 40.57
+     &
+    & 23.17 & 0.471 & 60.81 & 12min \\
+    \hline
+\end{tabular}
+    \caption{Quantitative evaluation (PSNR, LPIPS, FID) of free-form inpainting and superresolution ImageNet.}
+    \label{tab:imagenet}
+\end{table}
+
+\subsection{Image layer inference}
+Our approach allows for fast inference of missing regions in a given image. With that in mind, we go beyond inpainting and propose a new inference problem for pre-trained diffusion models, \textit{layer inference}. Given an input image $\vx_0$, we aim to generate two new images $\vx_0^1$, $\vx_0^2$ and a pixel-wise mask $\vm$ that will satisfy $\vx_0 = \vm \vx_0^1 + (1-\vm) \vx_0^2$. We want the model to generate a possible 'decomposition' of the input image into two layers, e.g. foreground and background along with the blending mask.
+
+We propose a simple algorithm to perform this task. The assumption is that pixels originating from the same layer should have stronger correlations than pixels from different layers. To probe this correlation given a soft mask $\vm$, we generate multiple possible images by sampling a binary mask from the (0,1) values of $\vm$ and performing inpainting. After running multiple iterations of inpainting, we can then compute the likelihood of each pixel in the original image to belong in one of the layers. We choose to model a layer image as Gaussian with per-pixel means and variances dictated by the generated samples in that layer.
+
+Instead of performing the full sampling process, we find that we can substitute each layer image with the predicted $\hat{\vx}_0(\vx_t)$. To induce more variety to the $\vx_0$ estimates, we perturb $\vx_t$ and help generate multiple inpainting variations without running the full inference process. The mask is randomly initialized with values in (0,1) and we choose to sample $K=5$ images per layer.
+
+In Figure~\ref{fig:layers} we provide qualitative results by running the layer inference algorithm on images from the web. To guide each layer we also condition the denoiser $\hat{\vx}_0(\vx_t)$ on layer-specific text prompts that describe the image content we want to select. The results show that we can control the separation between the layers and get two images that describe different characteristics of the source image. The key is the speed of our method in inferring the missing pixels; this inference would have been computationally infeasible to perform with previous sampling-based approaches.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/layers.pdf}
+    \caption{Given an input image we sample two new images which when blended with an inferred mask, reconstruct the original input. Our approach allows us to perform decomposition of random images from the web, guided by simple text prompts.}
+    \label{fig:layers}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+In this work, we presented a new algorithm for fast inference in pre-trained diffusion models under constraints. Our novel approach exploits a different gradient update that has different qualitative results and requires no expensive backpropagation operations through the model. Our method produces results comparable to the state-of-the-art with significantly less inference time. We also introduce a new layer inference task, which is enabled by our fast and high-quality constrained sampling algorithm. We believe that a fast and accurate method to sample from large pre-trained generative image models, under any condition, can have the potential to enable countless downstream applications that rely on utilizing a strong image prior.
+
+
+
+
+

@@ -1,0 +1,169 @@
+# VBH-GNN: Variational Bayesian Heterogeneous Graph Neural Networks for Cross-subject Emotion Recognition
+
+- Decision: Accept
+- Avg Score: 7.00
+- Scores: 6, 6, 8, 8
+
+## Abstract
+The research on human emotion under electroencephalogram (EEG) is an emerging field in which cross-subject emotion recognition (ER) is a promising but challenging task. Many approaches attempt to find emotionally relevant domain-invariant features using domain adaptation (DA) to improve the accuracy of cross-subject ER. However, two problems still exist with these methods. First, only single-modal data (EEG) is utilized, ignoring the complementarity between multi-modal physiological signals. Second, these methods aim to completely match the signal features between different domains, which is difficult due to the extreme individual differences of EEG. To solve these problems, we introduce the complementarity of multi-modal physiological signals and propose a new method for cross-subject ER that does not align the distribution of signal features but rather the distribution of spatio-temporal relationships between features. We design a Variational Bayesian Heterogeneous Graph Neural Network (VBH-GNN) with Relationship Distribution Adaptation (RDA). The RDA first aligns the domains by expressing the model space as a posterior distribution of a heterogeneous graph for a given source domain. Then, the RDA transforms the heterogeneous graph into an emotion-specific graph to further align the domains for the downstream ER task. Extensive experiments on two public datasets, DEAP and Dreamer, show that our VBH-GNN outperforms state-of-the-art methods in cross-subject scenarios.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper discusses the emerging field of research on human emotion using electroencephalogram (EEG) data, with a focus on cross-subject emotion recognition (ER). The challenges in this area include the neglect of multi-modal physiological signals and the difficulty in matching signal features across different domains. To address these issues, the authors propose a novel approach called Variational Bayesian Heterogeneous Graph Neural Network (VBH-GNN) with Relationship Distribution Adaptation (RDA). This method does not align the distribution of signal features but rather focuses on the distribution of spatio-temporal relationships between features. Through extensive experiments on DEAP and Dreamer datasets, the VBH-GNN with RDA demonstrates superior performance compared to state-of-the-art methods.
+
+### Strengths
+1. This article offers an in-depth analysis of the current challenges within the emerging domain of human emotion recognition using electroencephalogram (EEG), with a specific emphasis on cross-subject emotion recognition (ER).
+2. Author introduces the novel VBH-GNN method, and conducts comprehensive experiments to showcase the model's competitive performance.
+
+### Weaknesses
+1. It is essential to provide a more detailed explanation of how each component contributes to addressing the proposed issue, e.g., clarify the necessity of graph neural network and the specific problem it aims to solve. Specifically, the roles of Bayesian Graph Inference (BGI) and Emotional Graph Transform (EGT) within the Relationship Distribution Adaptation (RDA) framework are not sufficiently elaborated. The paper should clarify how BGI captures the latent relationships between multi-modal signals and how EGT distinguishes these relationships across different emotions. A deeper explanation of the mathematical formulations and their practical implications is needed to justify the design choices.
+2. The readability and visual appeal of the process diagram for RDA in Figure 2 could be improved. The current diagram lacks clear visual separation between the different sub-modules within RDA, making it difficult to understand the information flow and the specific operations performed at each step. The use of color coding or more distinct shapes could enhance clarity.
+3. The experimental setting of dividing source and target domains is unrealistic. The leave-one-subject-out (LOSO) paradigm, where the target domain is effectively a validation set, does not accurately reflect a true domain adaptation scenario. This setup might lead to an overestimation of the model's generalization capabilities to unseen subjects. The model's performance in a more realistic domain adaptation setting, where the target domain is entirely unseen during training, should be evaluated.
+
+### Questions
+1. After constructing the emotional graph, did the author only perform a single convolution layer by multiplying an adjacency matrix with node embeddings? Did the author consider using multiple convolution layers or using the more expressive graph neural network?
+2. Due to the necessity of employing Bayesian graph inference to construct multiple graphs in the author's method, I am concerned about whether the performance benefits outweigh the increased computational burden.
+3. In Table 1, VBH-GNN achieves optimal accuracy, but the F1 scores consistently demonstrate poor performance. Does this observation imply the class imbalance issue in the predicted results of the method?
+4. The authors used leave-one-subject-out paradigm to divide the source and target domains is unrealistic. In this case, the target domain is actually a validation set, which is not the real domain adaptation setting.
+5. The heterogeneity (e.g., EEG, ECG) in this paper can be regarded as multi-variant time series data. Please clarify the difference between the heterogeneity and multi-variant time series. The experiments should also include the baseline methods for learning multi-variant time series (e.g., learning a graph structure to represent the spatio relationships in multi-variant time series).
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper designs a Variational Bayesian Heterogeneous Graph Neural Network (VBH-GNN) with Relationship Distribution Adaptation (RDA) for cross-subject emotion recognition (ER) that does not align the distribution of signal features but rather the distribution of spatio-temporal relationships between features. Extensive experiments demonstrate the superiority of the method.
+
+### Strengths
+1. This method is novel and intuitive.
+2. The experiments have clearly demonstrated the effectiveness of the proposed method.
+
+### Weaknesses
+1. The quality Figure 2 needs to be improved.
+2. Statistical results in tables will be more convincing. In addition, the optimal results in Table 1 should all be highlighted.
+
+### Questions
+1. What is the difference between Spatial-RDA and Temporal-RDA, and what roles do they play in this task?
+2. Are the weights of each loss function in Formula 5 the same? Are the weights of each loss function considered?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper addresses cross-subject emotion recognition using EEG data. It proposes a Variational Bayesian Heterogeneous Graph Neural Network (VBH-GNN) with Relationship Distribution Adaptation (RDA) to align spatio-temporal relationships between multi-modal physiological signals, instead of aligning individual features. The method outperforms existing approaches in experiments on two public datasets.
+
+### Strengths
+- The authors come up with an interesting method to combat heterogeneity across patients by using multiple modalities. 
+- The authors provide a rigorous proof and interpretability of their method.
+
+### Weaknesses
+ - In Table 1, there is a typo. I believe DEAT should read DEAP. Additionally, Mathod should be Method. Additionally, expanding Table 1 by including which modalities were used for each baseline would be more comprehensive.
+- Expanding Table 3 by seeing the effect of all modalities used would be more comprehensive.
+- The paper assumes an infinite number of edges between nodes with probabilities $p_n$​ tending to zero in section 3.2.1. The justification for this assumption is not entirely clear, particularly in the context of physiological signal analysis where the number of potential interactions might be large but not infinite. The assumption of probabilities tending to zero also needs further clarification, as it is not immediately obvious how this is implemented in practice and what the implications are for the model's learning process.
+- Could the authors clarify $\epsilon$ in equation 12 in the main paper. They mention it is a "very small hyperparameter." Does this mean that it is close to 0? It would be beneficial to specify the range or typical values for this hyperparameter and how its value affects the model's performance.
+- Did the authors confirm that for Table 1, the comparable methods are all using the same experimental conditions as the authors (e.g., cropped experiment, experiment setup, modalities used). It's crucial to ensure a fair comparison, and any differences in experimental setup could bias the results.
+
+### Questions
+- The paper assumes an infinite number of edges between nodes with probabilities $p_n​$ tending to zero in section 3.2.1. Could the authors clarify a bit more on the reasoning behind the assumption?
+- Could the authors clarify $\epsilon$ in equation 12 in the main paper. They mention it is a "very small hyperparameter." Does this mean that it is close to 0?
+- Did the authors confirm that for Table 1, the comparable methods are all using the same experimental conditions as the authors (e.g., cropped experiment, experiment setup, modalities used).
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The authors propose a Domain adaptation method for a cross-subject emotion recognition task by aligning spatial-temporal relationships of multimodal physiological signals. The method is implemented as follows: the model contains temporal and spatial Relationship Distribution Adaptation (RDA) components, each of which represents the multimodal spatio-temporal relationships as edge distributions of a heterogeneous graph and aligns them twice.
+
+### Strengths
+Exploiting the correlation of multimodal physiological signals to address individual differences in cross-subject emotion recognition is a simple but often overlooked detail in the past. Multimodal data has been shown to provide more information compared to single modalities, and making full use of multimodal data can improve model performance. In other words, it is a common approach to utilise the complementary of multimodal data for feature fusion to generate better feature representations. However, VBH-GNN adopts a different perspective, i.e., exploiting the relationship between multimodal data to solve the problem of individualised differences. This is like in NLP, different languages may be completely different in pronunciation and writing, but there must be similar correlations in semantic structure. This multimodal relationship will be better represented in the field of physiology, because various physiological signals correspond to the physiological system interactions of the human body. In the final experimental section (4.6) the authors also provide a good demonstration of the hypothesis that there is cross-subject similarity in the inter-signal relationships, despite individual differences in signals.
+
+Domain alignment via heterogeneous graph edge distributions is a novel idea in the field of BCI.DA has been used relatively rarely in EEG tasks, but most of the concerns are about finding domain invariant features. These features are often signal-level features. The authors argue that domain invariant features tend to trap the model in sub-optimal solutions due to individual differences in physiological signals. Therefore VBH-GNN looks for domain-invariant distributions (although in a sense the spatio-temporal relationship distribution is also a signal feature, I think there is a difference between the feature representation and the distribution), which has not been seen in previous EEG tasks.
+
+Bayesian graph inference (BGI) is a generalised method. It implements a distribution with infinite parameter n in a neural network by an ingenious method and backpropagation of this infinite parameter n in network by an upper bound. It provides a feasible method to implement infinite parameters in neural networks as well as to perform backpropagation.
+
+### Weaknesses
+The explanation of the (Emotional graph transform) EGT step lacks depth. Although the authors demonstrate in their experiment (4.5) the difference between EGT and BGI, which is able to transform an intermodal heterogeneous graph into a more emotion-specific graph, the motivation for this step is not clear enough to me, and it seems more like a step based on experimental attempts to determine what to do; in other words, the authors seem to know what has to be done and how it should be done, but are unable to explain why it allows HetG to be transformed in an emotionally weighted way. what has to be done and how it should be done, but are unable to explain why doing so allows HetG to undergo an emotionally relevant weighting transformation. I think it should be that EGT creates an Attention-like effect between the original input and the HetG weights, and in training this ATTENTION tends to notice the HetG edges that are more emotionally relevant. I think the authors should experimentally demonstrate what makes EGT work and provide a more direct explanation in the paper.
+
+Lack of a flowchart of the overall model. This paper contains a large number of formulas that are difficult to read, and coupled with the lack of a flowchart of the overarching model, I had a hard time imagining what the complete model would look like, how the temporal and spatial RDA components would be linked, and how the heterogeneous edges would be generated. Although the authors used formulas to explain the steps, this piling up of formulas in the presence of a large number of formulas rather made it difficult for me to understand the framework of the model, at least for me I would have liked a clearer flowchart as a guide.
+
+The choice of Baseline is rather narrow. Although several baselines are included, they are basically methods in the BCI area. There are many DA methods in other fields, such as Maximum Classifier Discrepancy proposed in CVPR and a series of methods derived from it. I think adding more diversity of DA methods to compare and analyse can make the results more convincing, as DA is a relatively uncommon method in the BCI domain. Because multimodal data in other area do not necessarily correlate across subject as well as physiological signals, so comparison with methods in other area can demonstrate the applicability of VBH-GNN in the field of physiological signals.
+
+### Questions
+Is the BCI in Figure 2 trying to represent BGI?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

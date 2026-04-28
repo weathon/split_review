@@ -1,0 +1,196 @@
+\title{SVDQuant: Absorbing Outliers by Low-Rank Component for 4-Bit Diffusion Models}
+
+\begin{abstract}
+	\looseness=-1
+    Diffusion models have been proven highly effective at generating high-quality images. However, as these models grow larger, they require significantly more memory and suffer from higher latency, posing substantial challenges for deployment. In this work, we aim to accelerate diffusion models by quantizing their weights and activations to 4 bits. At such an aggressive level, both weights and activations are highly sensitive, where conventional post-training quantization methods for large language models like smoothing become insufficient. To overcome this limitation, we propose \textit{\method}, a new 4-bit quantization paradigm. Different from smoothing which redistributes outliers between weights and activations, our approach \textit{absorbs} these outliers using a low-rank branch. We first consolidate the outliers by shifting them from activations to weights, then employ a high-precision low-rank branch to take in the weight outliers with Singular Value Decomposition (SVD). This process eases the quantization on both sides. However, \naively running the low-rank branch independently incurs significant overhead due to extra data movement of activations, negating the quantization speedup. To address this, we co-design an inference engine \textit{\engine} that fuses the kernels of the low-rank branch into those of the low-bit branch to cut off redundant memory access. It can also seamlessly support off-the-shelf low-rank adapters (LoRAs) without the need for re-quantization. Extensive experiments on SDXL, PixArt-$\Sigma$, and FLUX.1 validate the effectiveness of \method in preserving image quality. We reduce the memory usage for the 12B FLUX.1 models by 3.5×, achieving 3.0× speedup over the 4-bit weight-only quantized baseline on the 16GB laptop 4090 GPU, paving the way for more interactive applications on PCs.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\looseness=-1
+Diffusion models have shown remarkable capabilities in generating high-quality images~\citep{ho2020denoising}, with recent advances further enhancing user control over the generation process. Trained on vast data, these models can create stunning images from simple text prompts, unlocking diverse image editing and synthesis applications~\citep{meng2022sdedit,ruiz2023dreambooth,zhang2023adding}. 
+
+\input{figure_texts/trend.tex}
+
+\looseness=-1
+To pursue higher image quality and more precise text-to-image alignment, researchers are increasingly scaling up diffusion models. As shown in \fig{trend}, Stable Diffusion~(SD)~\citep{rombach2022high} 1.4 only has 800M parameters, while SDXL~\citep{podell2023sdxl} scales this up to 2.6B parameters. AuraFlow v0.1~\citep{auraflow0.1} extends this further to 6B parameters, with the latest model, FLUX.1~\citep{flux1}, pushing the boundary to 12B parameters. Compared to large language models (LLMs), diffusion models are significantly more computationally intensive. Their computational costs\footnote{Computational cost is measured by number of Multiply-Accumulate operations (MACs). 1 MAC=2 FLOPs.} increase more rapidly with model size, posing a prohibitive memory and latency barrier for real-world model deployment, particularly for interactive use cases that demand low latency.
+
+As Moore's law slows down, hardware vendors are turning to low-precision inference to sustain performance improvements. For instance, NVIDIA's Blackwell Tensor Cores introduce a new 4-bit floating point (FP4) precision, doubling the performance compared to FP8~\citep{blackwell}. Therefore, using 4-bit inference to accelerate diffusion models is appealing. In the realm of LLMs, researchers have leveraged quantization to compress model sizes and boost inference speed~\citep{dettmers2022gpt3,xiao2023smoothquant}. However, unlike LLMs--where latency is primarily constrained by loading model weights, especially with small batch sizes--diffusion models are heavily computationally bound, even with a single batch. As a result, weight-only quantization cannot accelerate diffusion models. To achieve speedup, both weights and activations must be quantized to the same bit width; otherwise, the lower-precision side will be upcast during computation, negating potential performance enhancements. 
+
+In this work, we focus on quantizing both the weights and activations of diffusion models to 4 bits. This challenging and aggressive scheme is often prone to severe quality degradation. Existing methods like smoothing~\citep{xiao2023smoothquant,lin2024awq}, which attempt to transfer the outliers between the weights and activations, are less effective since both sides are highly vulnerable to outliers. To address this issue, we propose a new general-purpose quantization paradigm, \textit{\method}. Our core idea is to introduce a low-cost branch to absorb outliers on both sides. To achieve this, as illustrated in \fig{intuition}, we first aggregate the outliers by migrating them from activation $\mX$ to weight $\mW$ via smoothing. Then we apply Singular Value Decomposition (SVD) to the updated weight, $\hat{\mW}$, decomposing it into a low-rank branch $\mL_1 \mL_2$ and a residual $\hat{\mW} - \mL_1 \mL_2$. The low-rank branch operates at 16 bits, allowing us to quantize only the residual to 4 bits, which has significantly reduced outliers and magnitude. However, naively running the low-rank branch separately incurs substantial memory access overhead, offsetting the speedup of 4-bit inference. To overcome this, we co-design a specialized inference engine \textit{\engine}, which fuses the low-rank branch computation into the 4-bit quantization and computation kernels. This design enables us to achieve measured inference speedup even with additional branches.
+
+\method can quantize various text-to-image diffusion architectures, including both UNet~\citep{ho2020denoising,ronneberger2015u} and DiT~\citep{peebles2023scalable} backbones, into 4 bits, while maintaining visual quality. It supports both INT4 and FP4 data types, and integrates seamlessly with pre-trained low-rank adapters (LoRA)~\citep{hsu2022lowrank} without requiring re-quantization. To our knowledge, we are the first to successfully apply 4-bit post-training quantization to both the weights and activations of diffusion models, and achieve measured speedup on NVIDIA GPUs. On the latest 12B FLUX.1, we largely preserve the image quality and reduce the memory footprint of the original BF16 model by 3.5× and deliver a 3.0× speedup over the NF4 weight-only quantized baseline, measured on a 16GB laptop-level RTX4090 GPU. See \fig{teaser} for visual examples.
+
+\input{figure_texts/intuition.tex}
+
+
+
+\section{Related Work}
+
+
+\looseness=-1
+\myparagraph{Diffusion models.} Diffusion models~\citep{sohl2015deep,ho2020denoising} have emerged as a powerful class of generative models, known for their ability to generate high-quality samples by modeling the data distribution through an iterative denoising process. Recent advancements in text-to-image diffusion models~\citep{balaji2022ediffi,rombach2022high,podell2023sdxl} have already revolutionized content generation. Researchers further shifted from convolution-based UNet architectures~\citep{ronneberger2015u,ho2020denoising} to transformers (\eg, DiT~\citep{peebles2023scalable} and U-ViT~\citep{bao2023all}) and scaled up the model size~\citep{esser2024scaling}. However, diffusion models suffer from extremely slow inference speed due to their long denoising sequences and intense computation. To address this, various approaches have been proposed, including few-step samplers~\citep{zhang2022fast,zhang2022gddim,lu2022dpm} or distilling fewer-step models from pre-trained ones~\citep{salimans2021progressive,meng2022distillation,song2023consistency,luo2023latent,sauer2023adversarial,yin2024one,yin2024improved,kang2024distilling}. Another line of works choose to optimize or accelerate computation via efficient architecture design~\citep{li2023snapfusion,li2020gan,cai2024condition,liu2024linfusion}, quantization~\citep{shang2023post,li2023q}, sparse inference~\citep{li2022efficient,ma2024deepcache,ma2024learning}, and distributed inference~\citep{li2024distrifusion,wang2024pipefusion,chen2024asyncdiff}. This work focuses on quantizing the diffusion models to 4 bits to reduce the computation complexity. Our method can also be applied to the few-step diffusion models to further reduce the latency (see \sect{Results}). 
+
+\myparagraph{Quantization.} Quantization has been recognized as an effective approach for LLMs to reduce the model size and accelerate inference~\citep{dettmers2022gpt3,frantar-gptq,xiao2023smoothquant,lin2024qserve,lin2024awq,kim2024squeezellm,zhao2024atom}. For diffusion models, Q-Diffusion~\citep{li2023q} and PTQ4DM~\citep{shang2023post} first achieved 8-bit quantization. Subsequent works refined these techniques with approaches like sensitivity analysis~\citep{yang2023efficient} and timestep-aware quantization~\citep{he2023ptqd,huang2024tfmq,liu2024enhanced,wang2024towards}. Some recent works extended the setting to text-to-image models~\citep{tang2023post,zhao2024mixdq}, DiT backbones~\citep{wu2024ptq4dit}, quantization-aware training~\citep{heefficientdm,zheng2024binarydm,wang2024quest,sui2024bitsfusion}, video generation~\citep{zhao2024vidit}, and different data types~\citep{liu2024hq}. Among these works, only MixDQ~\citep{zhao2024mixdq} and ViDiT-Q~\citep{zhao2024vidit} implement low-bit inference engines and report measured 8-bit speedup on GPUs. In this work, we push the boundary further by quantizing diffusion models to 4 bits, supporting both the integer or floating-point data types, compatible with the UNet backbone~\citep{ho2020denoising} and recent DiT architecture~\citep{peebles2023scalable}. Our co-designed inference engine, \engine, further ensures on-hardware speedup. Additionally, when applying LoRA to the model, existing methods require fusing the LoRA branch to the main branch and re-quantizing the model to avoid tremendous memory-access overhead in the LoRA branch. \engine cuts off this overhead via kernel fusion, allowing the low-rank branch to run efficiently as a separate branch, eliminating the need for re-quantization.
+
+\looseness=-1
+\myparagraph{Low-rank decomposition.}
+Low-rank decomposition has gained significant attention in deep learning for enhancing computational and memory efficiency~\citep{lora, zhao2024galore, jaiswal2024welore}. While directly applying this approach to model weights can reduce the compute and memory demands~\citep{hsu2022lowrank, yuan2023asvd, li2023losparse}, it often leads to performance degradation. Instead, \cite{yao2023zeroquant} combined it with quantization for model compression, employing a low-rank branch to compensate for the quantization error. Low-Rank Adaptation (LoRA)~\citep{lora} introduces another important line of research by using low-rank matrices to adjust a subset of pre-trained weights for efficient fine-tuning.
+This has sparked numerous advancements~\citep{dettmers2023qlora,guo2024lq, li2024loftq, heefficientdm, xu2024qalora}, which combines quantized models with low-rank adapters to reduce memory usage during model fine-tuning. However, our work differs in two major aspects. Firstly, our goal is different, as we aim to accelerate model inference through quantization, while previous works focus on model compression or efficient fine-tuning. Thus, they primarily consider weight-only quantization, resulting in no speedup. Secondly, as shown in our experiments (\fig{svd_fusion} and ablation study in \sect{Results}), directly applying these methods not only degrades the image quality, but also introduces significant overhead. In contrast, our method yields much better performance due to our  joint quantization of weights and activations and our inference engine \engine minimizes the overhead by fusing the low-rank branch kernels into the low-bit computation ones. 
+
+
+\section{Quantization Preliminary}
+
+Quantization is an effective approach to accelerate linear layers in networks. Given a tensor $\mX$, the quantization process is defined as:
+\begin{equation}\lbleqn{quantization_def}
+    \mQ_\mX = \text{round}\left(\frac{\mX}{s_{\mX}}\right), s_{\mX} = \frac{\max (|\mX|)}{q_{\max}}.
+\end{equation}
+Here, $\mQ_\mX$ is the low-bit representation of $\mX$, $s_{\mX}$ is the scaling factor, and $q_{\max}$ is the maximum quantized value. For signed $b$-bit integer quantization, $q_{\max} = 2^{b-1}-1$. For 4-bit floating-point quantization with 1-bit mantissa and 2-bit exponent, $q_{\max} = 6$. Thus, the dequantized tensor can be formulated as $Q(\mX) = s_{\mX} \cdot \mQ_\mX$. For a linear layer with input $\mX$ and weight $\mW$, its computation can be approximated by
+\begin{equation}
+    \mX \mW \approx Q(\mX)Q(\mW) = s_{\mX}s_{\mW} \cdot \mQ_\mX \mQ_\mW.
+\end{equation}
+The same approximation applies to convolutional layers. To speed up computation, modern arithmetic logic units require both $\mQ_\mX$ and $\mQ_\mW$ using the same bit width. Otherwise, the low-bit side needs to be upcast to match the higher bit width, negating the speed advantage. Following the notation in QServe~\citep{lin2024qserve}, we denote $x$-bit weight, $y$-bit activation as W$x$A$y$. ``INT'' and ``FP'' refer to the integer and floating-point data types, respectively.
+
+In this work, we focus on W4A4 quantization for acceleration, where outliers in both weights and activations place substantial obstacles.
+Traditional methods to suppress these outliers include quantization-aware training (QAT)~\citep{heefficientdm} and  rotation~\citep{ashkboos2024quarot,liu2024spinquant,lin2024qserve}. QAT requires massive computing resources, especially for tuning models with more than 10B parameters (\eg, FLUX.1). Rotation is inapplicable due to the usage of adaptive normalization layers~\citep{peebles2023scalable} in diffusion models. The runtime-generated normalization weights preclude the offline integration of the rotation matrix with the weights of projection layers. Consequently, online rotation of both activations and weights incurs significant runtime overhead. 
+
+
+
+\section{Method}
+
+\lblsect{Method}
+
+\looseness=-1
+
+In this section, we first formulate our problem and discuss where the quantization error comes from.
+Next, we present \method, a new W4A4 quantization paradigm for diffusion models. Our key idea is to introduce an additional low-rank branch that can absorb quantization difficulties in both weights and activations.
+Finally, we provide a co-designed inference engine \engine with kernel fusion to minimize the overhead of the low-rank branches in the 4-bit model.
+
+\input{figure_texts/distribution}
+
+\subsection{Problem Formulation}
+Consider a linear layer with input $\mX \in \sR^{b\times m}$ and weight $\mW \in \sR^{m\times n}$. The quantization error can be defined as
+\begin{equation} \lbleqn{error_def}
+    E(\mX, \mW) = \norm{\mX \mW - Q(\mX)Q(\mW)}_F,
+\end{equation}
+where $\|\cdot\|_F$ denotes Frobenius Norm.
+\begin{proposition}[Error decomposition] \lblpps{decomp}
+The quantization error can be decomposed as follows:
+\begin{align}
+    \lbleqn{err_decomp}
+    E(\mX, \mW) \le \norm{\mX}_F\norm{\mW - Q(\mW)}_F + \norm{\mX - Q(\mX)}_F(\norm{\mW}_F+\norm{\mW-Q(\mW)}_F).
+\end{align}
+\end{proposition}
+See \app{proof1} for the proof. From the proposition, we can see that the error is bounded by four elements -- the magnitude of the weight and input, $\norm{\mW}_F$ and $\norm{\mX}_F$, and their respective quantization errors, $\norm{\mW-Q(\mW)}_F$ and $\norm{\mX-Q(\mX)}_F$. To minimize the overall quantization error, we aim to optimize these four terms.
+
+\subsection{\method: Absorbing Outliers via Low-Rank Branch}
+\lblsect{SVDQuant}
+\myparagraph{Migrate outliers from activation to weight.}
+Smoothing~\citep{xiao2023smoothquant,lin2024awq} is an effective approach for reducing outliers. We can smooth outliers in activations by scaling down the input $\mX$ and adjusting the weight matrix $\mW$ correspondingly using a per-channel smoothing factor $\vlambda \in \sR^m$. As shown in \fig{distribution}(a)(c), the smoothed input $\hat{\mX} = \mX \cdot \text{diag}(\vlambda)^{-1}$ exhibits reduced magnitude and fewer outliers, resulting in lower input quantization error. However, in \fig{distribution}(b)(d), the transformed weight $\hat{\mW} = \mW \cdot \text{diag}(\vlambda)$ has a significant increase in both magnitude and the presence of outliers, which in turn raises the weight quantization error. Consequently, the overall error reduction is limited.
+
+\myparagraph{Absorb magnified weight outliers with a low-rank branch.} Our core insight is to introduce a 16-bit low-rank branch and further migrate the weight quantization difficulty to this branch. Specifically, we decompose the transformed weight as $\hat{\mW} = \mL_1 \mL_2 + \mR$, where $\mL_1 \in \sR^{m \times r}$ and $\mL_2 \in \sR^{r\times n}$ are two low-rank factors of rank $r$, and $\mR$ is the residual. Then $\mX \mW$ can be approximated as 
+\begin{equation}
+    \lbleqn{low-rank-compute}
+    \mX \mW = \hat{\mX} \hat{\mW} = \hat{\mX} \mL_1\mL_2 + \hat{\mX} \mR \approx \underbrace{\hat{\mX} \mL_1\mL_2}_{\text{16-bit low-rank branch}} + \underbrace{Q(\hat{\mX}) Q(\mR)}_{\text{4-bit residual}}.
+\end{equation}
+Compared to direct 4-bit quantization, i.e., $Q(\hat{\mX}) Q(\mW)$, our method first computes the low-rank branch $\hat{\mX} \mL_1 \mL_2$ in 16-bit precision, and then approximates the residual $\hat{\mX} \mR$ with 4-bit quantization. Empirically, $r \ll \min(m, n)$, and is typically set to 16 or 32. As a result, the additional parameters and computation for the low-rank branch are negligible, contributing only $\frac{mr + nr}{mn}$ to the overall costs. However, it still requires careful system design to eliminate redundant memory access, which we will discuss in \sect{engine}.
+
+From \eqn{low-rank-compute}, the quantization error can be expressed as
+\begin{equation}
+    \norm{\hat{\mX} \hat{\mW}-(\hat{\mX}\mL_1\mL_2+Q(\hat{\mX})Q(\mR))}_F = \norm{\hat{\mX} \mR - Q(\hat{\mX})Q(\mR)}_F = E(\hat{\mX}, \mR), 
+\end{equation}
+where $\mR = \hat{\mW}-\mL_1\mL_2$. According to \pps{decomp}, since $\hat{\mX}$ is already free from outliers, we only need to focus on optimizing the magnitude of $\mR$, $\norm{\mR}_F$ and its quantization error, $\norm{\mR - Q(\mR)}_F$.
+
+\begin{proposition}[Quantization error bound]\lblpps{quant}
+For any tensor $\mR$ and quantization method described in \eqn{quantization_def} as $Q(\mR) = s_\mR \cdot \mQ_\mR $. Assuming the element of $\mR$ follows a normal distribution, we have
+\begin{align}
+    \mathbb{E} \sbr{\norm{\mR - Q(\mR)}_F} \le \frac{\sqrt{\log \rbr{\text{size}(\mR)}\pi}}{q_{\max}}\mathbb{E}\sbr{\norm{\mR}_F},
+\end{align}
+where $\text{size}(\mR)$ denotes the number of elements in $\mR$. 
+\end{proposition}
+\input{figure_texts/singular_values.tex}
+See \app{proof2} for the proof. From this proposition, we obtain the intuition that the quantization error $\norm{\mR-Q(\mR)}_F$ is bounded by the magnitude of the residual $\norm{\mR}_F$. Thus, our goal is to find the optimal $\mL_1\mL_2$ that minimizes $\norm{\mR}_F = \norm{\hat{\mW} - \mL_1\mL_2}_F$, which can be solved by simple Singular Value Decomposition (SVD). Given the SVD of $\hat{\mW}=\mU\mSigma\mV$, the optimal solution is $\mL_1 = \mU\mSigma_{:,:r}$ and $\mL_2 = \mV_{:r,:}$. \fig{singular_values} illustrates the singular value distribution of the original weight $\mW$, transformed weight $\hat{\mW}$ and residual $\mR$. The singular values of the original weight $\mW$ are highly imbalanced. After smoothing, the singular value distribution of $\hat{\mW}$ becomes even sharper, with only the first several values being significantly larger. By removing these dominant values, Eckart–Young–Mirsky theorem\footnote{\url{https://en.wikipedia.org/wiki/Low-rank_approximation}} suggests that the magnitude of the residual 
+$\mR$ is dramatically reduced, as $\norm{\mR}_F = \sqrt{\sum_{i=r+1}^{\min(m,n)} \sigma_i^2}$, compared to the original magnitude $\norm{\hat{\mW}}_F = \sqrt{\sum_{i=1}^{\min(m,n)} \sigma_i^2}$, where $\sigma_i$ is the $i$-th singular value of $\hat{\mW}$. Furthermore, empirical observations reveal that $\mR$ exhibits fewer outliers with a substantially compressed value range compared to $\hat{\mW}$, as shown in \fig{distribution}(d)(e). In practice, we can further reduce quantization errors by iteratively updating the low-rank branch through decomposing $\mW - Q(\mR)$ and adjusting $\mR$ accordingly for several iterations, and then picking the result with the smallest error.
+
+\input{figure_texts/svd_fusion.tex}
+
+\subsection{\engine: Fusing Low-Rank and Low-Bit Branch Kernels}
+\lblsect{engine}
+Although the low-rank branch introduces theoretically negligible computation, running it as a separate branch would incur significant latency overhead—approximately 50\% of the 4-bit branch latency, as shown in \fig{svd_fusion}(a).
+This is because, for a small rank $r$, even though the computational cost is greatly reduced, the data sizes of input and output activations remain unchanged, shifting the bottleneck from computation to memory access. The situation deteriorates, especially when the activation cannot fit into the GPU L2 cache. For example, the up projection in the low-rank branch for QKV projection is much slower since its output exceeds the available L2 cache and results in the extra load and store operations to DRAM. Fortunately, we observe that the down projection $\mL_1$ in the low-rank branch shares the same input as the quantization kernel in the low-bit branch, while the up projection $\mL_2$ shares the same output as the 4-bit computation kernel, as illustrated in \fig{svd_fusion}(b). By fusing the down projection with the quantization kernel and the up projection with the 4-bit computation kernel, the low-rank branch can share the activations with the low-bit branch, eliminating the extra memory access and also halving the number of kernel calls. As a result, the low-rank branch adds only 5$\sim$10\% latency, making it nearly cost-free. 
+
+
+\section{Experiments}
+
+
+\subsection{Setups}
+\myparagraph{Models.} 
+We benchmark our methods using the following text-to-image models, including both the UNet~\citep{ronneberger2015u,ho2020denoising} and DiT~\citep{peebles2023scalable} backbones:
+\begin{itemize}[leftmargin=*]
+    \item FLUX.1~\citep{flux1} is the SoTA open-sourced DiT-based diffusion model. It consists of 19 joint attention blocks~\citep{esser2024scaling} and 38 parallel attention blocks~\citep{dehghani2023scaling}, totaling 12B parameters. We evaluate on both the 50-step guidance-distilled (FLUX.1-dev) and 4-step timestep-distilled (FLUX.1-schnell) variants.
+    \item PixArt-$\Sigma$~\citep{chen2024pixart} is another DiT-based model. Instead of using joint attention, it stacks 28 attention blocks composed of self-attention, cross-attention, and feed-forward layers, amounting to 600M parameters. We evaluate it on the default 20-step setting.
+    \item \looseness=-1 Stable Diffusion XL (SDXL) is a widely-used UNet-based model with 2.6B parameters~\citep{podell2023sdxl}. It predicts noise with three resolution scales. The highest-resolution stage is processed entirely by ResBlocks~\citep{he2016deep}, while the other two stages jointly use ResBlocks and attention layers. Like PixArt-$\Sigma$, SDXL employs cross-attention layers for text conditioning. We evaluate it in the 30-step setting, along with its 4-step distilled variant, SDXL-Turbo~\citep{sauer2023adversarial}.
+\end{itemize}
+
+\myparagraph{Datasets.} Following previous works~\citep{li2023q,zhao2024mixdq,zhao2024vidit}, we randomly sample the prompts in COCO Captions 2024~\citep{chen2015microsoft} for calibration. To assess the generalization capability of our method, we adopt two distinct prompt sets with varying styles for benchmarking: 
+\begin{itemize}[leftmargin=*]
+    \item MJHQ-30K~\citep{li2024playground} consists of 30K samples from Midjourney with 10 common categories, 3K samples each. We uniformly select 5K prompts from this dataset to evaluate model performance on artistic image generation.
+    \item Densely Captioned Images (DCI)~\citep{urbanek2024picture} is a dataset containing $\sim$8K images with detailed human-annotated captions, averaging over 1,000 words. For our experiments, we use the summarized version (sDCI), where captions are condensed to 77 tokens using large language models (LLMs) to accommodate diffusion models. Similarly, we randomly sample 5K prompts for efficient evaluation of realistic image generation.
+\end{itemize}
+
+\looseness=-1
+\myparagraph{Baselines.}
+We compare \method against the following post-training quantization (PTQ) methods:
+\begin{itemize}[leftmargin=*]
+    \item \looseness=-1 4-bit NormalFloat (NF4) is a data type for weight-only quantization~\citep{dettmers2023qlora}. It assumes that weights follow a normal distribution and is the information-theoretically optimal 4-bit representation. We use the community-quantized NF4 FLUX.1 models~\citep{Lllyasviel} as the baselines.
+    \item \looseness=-1 ViDiT-Q~\citep{zhao2024vidit} uses per-token quantization and smoothing~\citep{xiao2023smoothquant} to alleviate the outliers across different batches and tokens and achieves lossless 8-bit quantization on PixArt-$\Sigma$.
+    \item MixDQ~\citep{zhao2024mixdq} identifies the outliers in the begin-of-sentence token of text embedding and protects them with 16-bit pre-computation. This method enables up to W4A8 quantization with negligible performance degradation on SDXL-Turbo.
+    \item \href{https://developer.nvidia. It uses smoothing and only calibrates activations over a selected timestep range with a percentile scheme.
+\end{itemize}
+\myparagraph{Metrics.} Following previous work~\citep{li2022efficient,li2024distrifusion}, we mainly benchmark image quality and similarity to the results produced by the original 16-bit models. For the image quality assessment, we use \fid (FID, lower is better) to measure the distribution distance between the generated images and the ground-truth images~\citep{heusel2017gans}. Besides, we employ Image Reward (higher is better) to approximate the human rating of the generated images~\citep{xu2024imagereward}. We use LPIPS (lower is better) to measure the perceptual similarity~\citep{zhang2018perceptual} and Peak Signal Noise Ratio (PSNR, higher is better) to measure the numerical similarity of the images from the 16-bit models. Please refer to our \app{Quality Results} for more metrics (CLIP IQA~\citep{wang2022exploring}, CLIP Score~\citep{hessel2021clipscore} and SSIM\footnote{\url{https://en.wikipedia.org/wiki/Structural_similarity_index_measure}}).
+
+\input{table_texts/quality.tex} 
+
+\looseness=-1
+\myparagraph{Implementation details.}
+For the 8-bit setting, we use per-token dynamic activation quantization and per-channel weight quantization with a low-rank branch of rank 16. For the 4-bit setting, we adopt per-group symmetric quantization for both activations and weights, along with a low-rank branch of rank 32. INT4 quantization uses a group size of 64 with 16-bit scales. FP4 quantization uses a group size of 32 with FP8 scales~\citep{rouhani2023microscaling}. For FLUX.1 models, the inputs of linear layers in adaptive normalization are kept in 16 bits (\ie, W4A16). For other models, key and value projections in the cross-attention are retained at 16 bits since their latency only covers less than 5\% of total runtime. 
+
+\subsection{Results}
+\lblsect{Results}
+\myparagraph{Quality results.} 
+We report the quantitative quality results in \tbl{quality} across various models and precision levels, and show some corresponding 4-bit qualitative comparisons in \fig{visual}. Among all models, our 8-bit results can perfectly mirror the 16-bit results, achieving PSNR higher than 21, beating all other 8-bit baselines. On FLUX.1-dev, our INT8 PSNR even reaches 27 on MJHQ.
+
+\looseness=-1
+For 4-bit quantization, on FLUX.1, our \method surpasses the NF4 W4A16 baseline regarding Image Reward. On the schnell variant, our Image Reward even exceeds that of the original BF16 model, suggesting stronger human preference. On PixArt-$\Sigma$, while our INT4 Image Reward shows slight degradation, our FP4 model achieves an even higher score than the FP16 model. This is likely due to PixArt-$\Sigma$'s small model size (600M parameters), which is already highly compact and benefits from a smaller group size. Remarkably, both our INT4 and FP4 results consistently outperform ViDiT-Q's\footnote{Our FP16 PixArt-$\Sigma$ model is slightly different from ViDiT's, though both offer the same quality. For fair comparisons, ViDiT-Q's similarity results are calculated using their FP16 results.} W4A8 results by a large margin across all metrics. For UNet-based models, on SDXL-Turbo, our 4-bit models significantly outperform MixDQ's W4A8 results, and our FID scores are on par with the FP16 models, indicating no loss in performance. On SDXL, both our INT4 and FP4 results achieve comparable quality to TensorRT's W8A8 performance, which represents the 8-bit SoTA.
+
+\input{figure_texts/visual.tex}
+\input{figure_texts/efficiency.tex}
+\input{figure_texts/lora.tex}
+\input{figure_texts/ablation.tex}
+
+\myparagraph{Memory save \& speedup.}
+In \fig{efficiency}, we report measured model size, memory savings, and speedup for FLUX.1. Our INT4 quantization reduces the original transformer size from 22.2 GiB to 6.1 GiB, including a 0.3 GiB overhead due to the low-rank branch, resulting in an overall 3.6× reduction. Since both weights and activations are quantized, compared to the NF4 weight-only-quantized variant, our inference engine \engine even saves more memory footprint, and offers 3.0× speedup on both desktop- and laptop-level NVIDIA RTX 4090 GPUs. Notably, while the original BF16 model requires per-layer CPU offloading on the 16GB laptop 4090, our INT4 model fits entirely in GPU memory, resulting in a 10.1× speedup by avoiding offloading. We anticipate even greater speedups for FP4-quantized models on NVIDIA's next-generation Blackwell GPUs, as they inherently support microscaling for group quantization without the need for specialized GPU kernels.
+
+\myparagraph{Integrate with LoRA.} Previous quantization methods require fusing the LoRA branches and re-quantizing the model when integrating LoRAs. In contrast, our \engine eliminates redundant memory access, allowing adding a separate LoRA branch. In practice, we can fuse the LoRA branch into our low-rank branch by slightly increasing the rank, further enhancing efficiency. In \fig{lora}, we exhibit some visual examples of applying LoRAs of five different styles (\href{https://huggingface.co/XLabs-AI/flux-RealismLora}{Realism}, \href{https://huggingface.co/aleksa-codes/flux-ghibsky-illustration}{Ghibsky Illustration}, \href{https://huggingface.co/alvdansen/sonny-anime-fixed}{Anime}, \href{https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-Children-Simple-Sketch}{Children Sketch}, and \href{https://huggingface.co/linoyts/yarn_art_Flux_LoRA}{Yarn Art}) to our INT4 FLUX.1-dev model. Our INT4 model successfully adapts to each style while preserving the image quality of the 16-bit version. For more visual examples, see \app{LoRA Results}.
+
+\looseness=-1
+\myparagraph{Ablation study.}
+In \fig{ablation}, we present several ablation studies of \method on PixArt-$\Sigma$. First, both SVD-only and \naive quantization perform poorly in the 4-bit setting, resulting in a severe degradation of image quality. While applying smoothing to the quantization slightly improves image quality compared to \naive quantization, the overall results remain unsatisfactory. LoRC~\citep{yao2023zeroquant} introduces a low-rank branch to compensate for quantization errors, but this approach is suboptimal. Quantization errors exhibit a smooth singular value distribution. Consequently, low-rank compensation fails to effectively mitigate these errors, as discussed in \sect{SVDQuant}. In contrast, we first decompose the weights and quantize only the residual. As demonstrated in \fig{singular_values}, the first several singular values are significantly larger than the rest, allowing us to shift them to the low-rank branch, which effectively reduces weight magnitude. Finally, smoothing consolidate the outliers, further enabling the low-rank branch to absorb outliers from the activations and substantially improving image quality. \lblsect{Ablation study.}
+\myparagraph{Trade-off of increasing rank.} \fig{ablation-rank} presents the results of different rank $r$ in \method on PixArt-$\Sigma$. Increasing the rank from 16 to 64 significantly enhances image quality but increases parameter and latency overhead. In our experiments, we select a rank of 32, which offers a decent quality with minor overhead.
+
+\input{figure_texts/ablation-rank}
+
+
+
+\section{Conclusion \& Discussion}
+
+\looseness=-1
+In this work, we introduce a novel 4-bit post-training quantization paradigm, \method, for diffusion models. It adopts a low-rank branch to absorb the outliers in both the weights and activations, easing the process of quantization. Our inference engine \engine further fuses the low-rank and low-bit branch kernels, reducing memory usage and cutting off redundant data movement overhead. Extensive experiments demonstrate that \method preserves image quality. \engine further achieves a 3.5× reduction in memory usage over the original 16-bit model and 3.0× speedup over the weight-only quantization on an NVIDIA RTX-4090 laptop. This advancement enables the efficient deployment of large-scale diffusion models on edge devices, unlocking broader potential for interactive AI applications.
+
+\looseness=-1
+\myparagraph{Limitations.} In this work, we do not report the speedups for our FP4 models. This is because we have no access to Blackwell GPUs, which natively support the precision and microscaling for group quantization. On Blackwell hardware, we anticipate greater speedups compared to our INT4 results on 4090 GPUs.
+
+

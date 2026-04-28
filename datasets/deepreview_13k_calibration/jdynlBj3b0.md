@@ -1,0 +1,177 @@
+# Can Class-Priors Help Single-Positive Multi-Label Learning?
+
+- Decision: Reject
+- Avg Score: 6.25
+- Scores: 8, 8, 3, 6
+
+## Abstract
+Single-positive multi-label learning (SPMLL) is a weakly supervised multi-label learning problem, where each training example is annotated with only one positive label. Existing SPMLL methods typically assign pseudo-labels to unannotated labels with the assumption that prior probabilities of all classes are identical.
+However, the class-prior of each category may differ significantly in real-world scenarios, which makes the predictive model not perform as well as expected due to the unrealistic assumption on real-world application.
+To alleviate this issue, a novel framework named {\proposed}, i.e., Class-pRiors Induced Single-Positive multi-label learning, is proposed. Specifically, a class-priors estimator is introduced, which can estimate the class-priors that are theoretically guaranteed to converge to the ground-truth class-priors. In addition, based on the estimated class-priors, an unbiased risk estimator for classification is derived, and the corresponding risk minimizer can be guaranteed to approximately converge to the optimal risk minimizer on fully supervised data.
+Experimental results on ten MLL benchmark datasets demonstrate the effectiveness and superiority of our method over existing SPMLL approaches.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper provides a novel class-priors estimator and unbiased risk estimator for the single-positive multi-label learning task. The estimator comes with a convergence guarantee. The paper also shows that the proposed method leads to strong performance on various tasks.
+
+### Strengths
+1. Strong empirical performance
+2. The proposed method is theoretically principled with a convergence guarantee
+3. The unbiased risk estimator is simple and intuitive
+
+### Weaknesses
+1. Clarity of writing. I found the problem setting to be unclear until I finished section 4.  One suggestion would be to add more details about the setup in the preliminary setting e.g. the absolute loss function, before diving into deriving the estimators. Also, changing the order by deriving the risk estimator before the class-priors, may provide a better motivation on why we need to estimate the class-priors.
+
+### Questions
+1.  The algorithm relies on iteratively estimating the class-prior from f and then using it to update f. Is it possible if there is a failure mode ?
+2.  Would it be possible to extend this type of estimator to a different loss than the absolute loss?
+
+### Soundness
+4 excellent
+
+### Presentation
+3 good
+
+### Contribution
+4 excellent
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The target problem of this paper is called single-positive multi-label learning. This is a weakly supervised version of the multi-label classification scenario, where each instance is annotated with only one of the positive labels. The other labels do not necessarily mean negative, but can potentially be positive or negative. The paper proposes a method called CRISP: it alternatively updates the class prior estimate and the multi-label classifier. Theoretically, the paper discusses that the estimated class-prior will converge to the ground-truth class-prior with enough training samples and an estimation error bound for the proposed empirical risk estimator. Experiments show CRISP works better than other methods.
+
+### Strengths
+- Estimation error bound is provided for class prior estimation and for the empirical risk estimator.
+- Empirically, class-prior prediction is more accurate compared with others.
+- Multi-label prediction performance is often best for the proposed CRISP method.
+
+### Weaknesses
+ - The paper is motivated by the observation that previous methods have a strong assumption that class priors are assumed to be uniform. It would be interesting to see if the proposed method is still advantageous when class priors are uniform. It would enhance the paper's significance if the authors could demonstrate whether their proposed method retains its advantages even under the condition of uniform class priors.
+- It seems to me that the problem setting of SPMLL is a special case of "Multi-Label Ranking From Positive and Unlabeled Data" (CVPR 2016). I wonder if these general methods can be used as a baseline (and if not, what are the weaknesses of using these more general methods?)
+
+
+### Questions
+In addition to the points I wrote in the "Weaknesses":
+
+- It would be helpful to explicitly write out the definition of the absolute loss function and the derivation in Eq. 5.
+- I wasn't sure if we end up with an unbiased estimator (even with access to the ground truth class prior), because we have the additional absolute operator in the latter half of Eq. 7. It would be helpful if the paper can clarify.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper focuses on Single-Positive multi-label learning and proposes a framework named CRISP. CRISP estimates the class-priors, and an unbiased risk estimator is derived based on the estimated class-priors. This paper tries to guarantee the estimated class-priors converging to the ground-truth class-priors. Finally, this paper tries to show the effectiveness of CRISP by extensive experiments.
+
+### Strengths
+a. Extensive experiments. I appreciate that this paper provides extensive experiments to show the effectiveness of the proposed method.
+
+b. Nice originality. I am not sure whether this work is the first to focus on the class prior in SPMLL, but it is an interesting track.
+
+### Weaknesses
+ a. The writing of this paper needs to be improved. Specifically, more analysis and descriptions of Theorem 4.2 are necessary. The theorem presents an upper bound on the difference between the empirical risk minimizer and the true risk minimizer, but it lacks a detailed explanation of how each component of the bound contributes to the overall convergence behavior. It is unclear how the Rademacher complexity terms interact with the terms of order O(1/√n) to influence the convergence rate and the tightness of the bound. A more thorough discussion of the implications of this bound for practical applications is needed.
+
+b. I am concerned about the time cost of the proposed method. The paper does not provide a detailed analysis of the computational complexity of the proposed method, especially the threshold selection process. It is unclear how the exhaustive search for the optimal threshold scales with the size of the dataset and the number of classes. Without a clear understanding of the time complexity, it is difficult to assess the practicality of the method for large-scale datasets.
+
+### Questions
+My main concerns are the following questions:
+
+a. It is mentioned that "This unrealistic assumption will introduce severe biases into the pseudo-labels, further impacting the training of the model supervised by the inaccurate pseudo-labels". What are the biases? It is necessary to provide more discussions to enrich your motivations.
+
+b. The key of the proposed methods is the threshold. How do you get the optimal threshold in practice, i.e. how do you implement eq.2?
+
+c. What is the time cost of the proposed method? Please discuss more about the time cost of the optimal threshold  and the entire method in theory and experiments.
+
+b. Theorem 4.2 tries to present the convergence of the empirical risk minimizer, but it seems that the empirical risk minimizer does not converge to the true risk minimizer. Please provide more analysis of Theorem 4.2 and more discussions about every component in the upper bound.
+
+### Soundness
+2 fair
+
+### Presentation
+1 poor
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This study introduces an approach for single-positive multi-label learning (SPMLL). The authors present a class-priors estimation technique that aims to align the estimated class-priors with the actual class-priors as training progresses. In addition, an unbiased risk assessment tool is introduced, which is based on the estimated class-priors, and a generalization error bound is provided. Testing on ten MLL benchmark datasets has been conducted to evaluate the performance of this method in comparison to other SPMLL techniques.
+
+### Strengths
+The paper provides theoretical guarantees regarding the convergence of the estimated class priors to ground-truth class priors. Additionally, it claims that the risk minimizer corresponding to the proposed risk estimator will approximately converge to the optimal risk minimizer on fully supervised data. These theoretical insights enhance the credibility of the proposed framework.
+
+Within the group of other SPMLL techniques experimental results are quite favorable both in terms of average precision as well as predicting the class prior. Attention maps also look quite promising.
+
+### Weaknesses
+The paper seeks to develop a method for SPMLL, and it's evident that similar efforts have been made in other studies, focusing on the "single-positive" label approach. Yet, the rationale for opting for the "single-positive" label remains somewhat vague. In real-life situations, it's common to encounter missing labels, but the count of observed labels for each sample can differ, not always being restricted to one. For this study to truly make a difference, it should be benchmarked not just against other SPMLL strategies but also against traditional multi-label learning models that consider multiple positive labels for each sample during training (not just testing). The assumption that each sample contains precisely one positive label for training seems out of sync with practical scenarios.
+
+The paper should discuss the potential limitations or challenges in generalizing CRISP to different domains or types of data. Real-world scenarios can vary widely, and the effectiveness of the proposed framework in diverse contexts should be explored.
+
+### Questions
+This is not a question but please explain in the paper how this sentence is related to Section 3.1 "Note that a method is risk-consistent if the method possesses a classification risk estimator that is equivalent to R(f) given the same classifier (Mohri et al., 2012)."
+
+After rebuttal:
+---------------------------------
+Thank you for your response to my initial comments and for conducting the additional comparisons that I suggested. It is encouraging to see that your approach demonstrates superior performance when compared to the additional MLML methods. In light of these new findings, I am pleased to adjust my evaluation of your paper. I am increasing my score by one point.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+3 good

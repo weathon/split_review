@@ -1,0 +1,353 @@
+\title{FlexCap: Generating Rich, Localized, and  Flexible Captions in Images}
+
+\begin{abstract}
+We introduce a versatile {\em flexible-captioning} 
+vision-language model (VLM) capable of generating region-specific descriptions of varying lengths. The model, FlexCap, is trained to produce length-conditioned captions for input bounding boxes, and this allows control over the information density of its output, with descriptions ranging from  concise object labels to detailed captions. To achieve this we create large-scale training datasets of image region descriptions of varying length, starting from captioned images.
+
+This flexible-captioning capability has several valuable applications. First, FlexCap demonstrates superior performance in dense captioning tasks on the Visual Genome dataset. Second, a visual question answering (VQA) system can be built by employing FlexCap to generate localized descriptions as inputs to a large language model. The resulting system achieves state-of-the-art zero-shot performance on a number of VQA datasets. We also demonstrate a \textit{localize-then-describe }approach with FlexCap can be better at open-ended object detection than a \textit{describe-then-localize} approach with other VLMs. We highlight a novel characteristic of FlexCap, which is its ability to extract diverse visual information through prefix conditioning.
+ Finally, we qualitatively demonstrate FlexCap's broad applicability in tasks such as image labeling, object attribute recognition, and visual dialog. Project webpage: \href{https://flex-cap.io}{https://flex-cap.io}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The groundbreaking success of large language models (LLMs) has led to the widespread adoption of this technology in a variety of applications. The introduction of vision-language models (VLMs) has further enhanced these capabilities by enabling reasoning over visual content in the form of question answering and visual dialog. Yet, the ideal representation for utilizing LLMs to enable visual applications is still an open question.
+
+A popular and effective strategy is to directly provide visual features as input tokens to LLMs. Two successful systems, Flamingo~\cite{Alayrac2022FlamingoAV} and BLIP~\cite{li2022blip,Li2023-px}, have focused on utilizing latent representations produced by frozen visual backbones and integrating these with frozen LLMs. While Flamingo uses cross-attention to adapt visual tokens to be used by the language model, BLIP adapts visual tokens to be ingested just like text tokens by the language model. This idea has been further developed in more recent papers~\cite{driess2023palm, chen2022pali,liu2023llava,you2023ferret}. 
+In this work, we investigate if instead of representing the image by latent visual features, we can directly provide {\em textual representations} of an image by focusing on its elements: objects and regions.
+
+We explore this alternative strategy with the idea of {\em flexible captioning} -- generating controllably rich and localized captions as shown in Figure~\ref{fig:teaser}. Our model, \methodname, enables spatially controllable inquiry of any bounding box in the image, with the desired text detail controlled by the generated word count. 
+\methodname effectively combines three tasks that have been studied in isolation until now: image captioning, object detection, and dense captioning. While image captioning models can capture coarse semantic information they lack spatial understanding of the visual content. On the other hand, object detection brings spatial information in the form of bounding boxes. But object detection systems lack semantic details (attributes and relationships between objects) and are usually limited to a few classes. Recently open-vocabulary object detection methods~\cite{Minderer2022-dx,gu2021open} increase the semantic diversity but it is still limited by text queries or prompts provided manually. 
+
+Dense captioning~\cite{johnson2016densecap} is the task of localizing salient regions of the image and describing them with natural language sentences. However the capacity and richness of these models are limited with existing image captioning datasets
+(e.g.\ COCO\cite{lin2014microsoft} and Visual Genome \cite{krishna2017visual}). Moreover, these methods focus on full sentence generation rather than a mix of short and long captions at several levels of richness as people typically do. 
+\methodname combines all three tasks into one system by formulating each of them as different captioning problems -- image captioning implies using \methodname to caption the whole image as one big bounding box, dense captioning can be performed by conditioning on individual boxes, and object detection can be performed by prompting the model to produce short class names as captions.
+
+To be able to train such a model, we require a dataset of images where many boxes are labeled with short and long descriptions. We propose a method to generate  triplets of (i) image, (ii) a proposed region within the image, and (iii) its corresponding caption from image-text pair datasets, through the use of open-vocabulary object detectors. We demonstrate this at two scales: 200 million triplets using YFCC100M~\cite{thommeeyfcc100m} captioned images; and 32 billion triplets using the WebLI~\cite{chen2022pali} captioned dataset.
+Training \methodname on this dataset enables the model to generate spatially and semantically rich representations (bounding boxes and their descriptions) that focuses on  objects, their attributes, and their contextually changing descriptions. We show that this human interpretable representation, when combined with the power of LLMs, enables visual question answering and dialog. We also demonstrate that this combination can result in performance that is competitive with state-of-the-art VLM models on zero-shot image and video question answering benchmarks. 
+
+\begin{figure*}[t]
+
+\begin{center}
+  \includegraphics[width=\linewidth]{figures/teaser_with_llm}
+\end{center}
+\caption{ \textbf{\methodname} generates controllably rich localized descriptions for any region in an image as shown on the left. It has the flexibility to produce captions in a controllable manner which allows the full spectrum of valid descriptions  to be explored from short object category names to fully-detailed captions. On the right, we demonstrate that rich localized captions generated by \methodname, when coupled with large language models (LLMs), enable zero-shot visual question answering. 
+}
+\label{fig:teaser}
+\end{figure*}
+
+Our key technical contributions: (i) controllable localized visual descriptions, using word count as a proxy for complexity to modulate the output of a generative language model, and using bounding box conditioning to indicate local regions in the image (see Sec~\ref{sec:arch}) (ii) a large-scale dataset generation method for producing image-box-text triplets required to train our model. (see Sec~\ref{sec:data}) (iii) structured and human-interpretable visual representations that can be input to LLMs and achieve comparable or state-of-the-art performance in VQA tasks. (see Sec~\ref{sec:flexcapllm} and Sec~\ref{sec:vqa}). (iv) demonstrating that \methodname enables better localized captioning and open-ended object detection than baselines under comparable scenarios. (see Sec~\ref{sec:dc} and Sec~\ref{sec:det_desc}). (v) highlighting the emergent property of \methodname to extract diverse visual information using prefix conditioning. (see Sec~\ref{sec:qual})
+
+
+\section{\methodname}
+
+\label{sec:arch}
+\noindent \textbf{Architecture.} Our objective is to train a model that takes as input an image and a region of interest and outputs a description of the region spanned by the box. We present \methodname's architecture in Figure~\ref{fig:architecture}. The model takes an image, the coordinates of a bounding box and the conditioning tokens as input, and outputs a textual description of visual contents within the specified bounding box. Our model mainly consists of an image encoder (i.e.\ SOViT-400M/14~\cite{alabdulmohsin2023getting}) and a transformer-based text-decoder. We pass the image through the vision model to produce outputs of dimensions $n \times d$ (where $n$ is the number of patches and $d$ is the embedding size). We pass the bounding box coordinates (of dimensions $1\times4$) through a linear layer to produce the coordinate features (of dimension $1 \times d$). Both vision features and normalized bounding box  features are concatenated to form input of dimension $(n+1) \times d$ to a text decoder. The text decoder consists of a stack of $L$ Transformer layers. We use a decoder-only architecture in which all the vision and bounding box tokens remain unmasked but the text tokens are masked in a causal manner to enable next-word prediction training. We add all the vision tokens and bounding box coordinate tokens so that the text decoder can access all of the visual context in the image and the exact bounding box location.
+In this work, we train a text decoder composed of 12 self-attention transformer layers with a dimensionality of 768 and 12 attention heads. 
+
+In total, \methodname has 590M parameters with 428M comprised of the image encoder (SOViT) and the remaining parameters in the text decoder.
+A linear layer transforms the 1152-dimensional output from the vision encoder into a 768-dimensional input for the text decoder. We initialize the vision encoder with SigLIP~\cite{zhai2023sigmoid} weights, which is a contrastively trained image encoder using web-scale vision-text pairs from WebLI. We do not freeze the vision encoder during training.
+
+\noindent\textbf{Length conditioning.}
+For the same region in an image, there may be multiple valid captions. In the input image shown in Fig.~\ref{fig:dataset_generation}, all the following descriptions are correct: \textit{dog}, \textit{Border collie}, \textit{dog playing with a frisbee}, \textit{brown dog playing on a grass field}. 
+Clearly, the task of describing a bounding box in the image does not have only one right answer.  
+We equip the model with the capability of producing outputs of a desired length by utilizing the idea of \textit{length} conditioning. We condition the input by simply using an additional token indicating the desired length of the output caption.
+Training with length-conditioning is useful for three key reasons.
+First, the number of words used to describe is often proportional to the information content. We train the model to predict the next words in the sequence while accounting for the desired length, thereby the model learns to modulate the amount of information in the generated text.
+Second, length conditioning allows users to control the output of the model further enabling the use of a single model for many diverse tasks.
+Third, the length prefix provides a better conditioned initial state for the captioner.
+Fig.~\ref{fig:architecture} shows how the same box might have more than one ground truth captions \verb|<s> a cat <e>| or \verb|<s> grey and white cat lying on shoes <e>|. If we use the first caption as ground truth and the words \verb|<s> a cat| as the seen text, the next-word prediction loss encourages the model to increase its score for the \verb|<e>| token and decrease the score for the word \verb|playing| due to the softmax loss. This is in direct conflict with the second caption. We can alleviate such training issues by using \textit{length prefix} for text generation. 
+
+\begin{figure*}[t]
+\begin{center}
+   \includegraphics[width=\linewidth]{figures/architecture.pdf}
+\end{center}
+   \caption{\textbf{Architecture and Training Setup.} \methodname outputs a length-controlled caption of the object contained in the bounding box by taking (left) an image, (middle) coordinates of a bounding box  and (right) the length prefix and caption, as inputs. The training loss is the standard next-word prediction loss that is used to train image captioning models.}
+\label{fig:architecture}
+\end{figure*}
+
+\noindent \textbf{Loss.} We train \methodname to predict the next token of the text. The text tokens are prefixed with the desired length of the caption and appended with an end of sentence token \verb|<e>| to indicate the end of the caption. The target text tokens are obtained by shifting the padded text by 1. This is common training methodology for training generative language models like GPT~\cite{brown2020language} or SimVLM~\cite{wang2021simvlm}. The loss is a classification loss over all the words present in the vocabulary. The loss is ignored over the padded tokens that are used to keep the size of the outputs same for all the captions in the batch.
+
+Formally, we describe our loss formulation below. We represent a data sample as a triplet $ T=(X, B, W)$ consisting of image $X$, bounding box $B$ and captions $W$, where $W=\{\text{LENGTH-K}, w_1,w_2,...w_k\}$. To enable batch training, we pad the tokenized captions to a fixed size $M$. For a given data triplet, our objective is to maximize the following log-likelihood.
+$l(X, B, W) =\sum^M_{i=1} \log p(w_i| w_{<i}, X, B)$.
+ Assume that we have a dataset $\mathcal{D} = \{T_1, T_2, ..., T_N\}$. The overall loss function is:
+$$ L(D) = \sum_{j=1}^N l(X_j , B_j, W_j) =  \sum_{j=1}^N \sum^M_{i=1} \log p((w_j)_{i}| (w_j)_{<i}, X_j, B_j)$$ 
+
+
+\noindent \textbf{Implementation. We train the entire model for about $400K$ steps using the AdamW optimizer with a cosine learning rate schedule. The maximum learning rate is $1.6 \times 10^{-4}$ with 10K warm-up steps. We use a weight decay of $0.05$. We train with a batch size of $4096$ and image resolution of $224 \times 224$. We use a maximum text sequence length of $32$ tokens. For each image in the batch, we sample a maximum of 8 bounding boxes for each training step.
+\noindent \textbf{Inference.} At inference time, we provide an image, the target bounding box, and the desired length  as input.  We then decode in an auto-regressive manner till the end of caption token \verb|<e>| is encountered or the maximum number of decoding steps is reached. While we can use standard sampling techniques used in text-generation like beam search, temperature sampling, or nucleus sampling~\cite{holtzman2019curious} to generate multiple captions, we use greedy decoding in all experiments for simplicity.
+
+
+
+\section{Localized Captions Dataset}
+
+\label{sec:data}
+In order to train the \methodname model, we build a large scale dataset of image region descriptions of varying lengths. In the following section we describe how we produce such a dataset from existing image-text paired datasets. We leverage the web-based image-caption pairs datasets (like  WebLI~\cite{chen2022pali} and YFCC100M~\cite{thommeeyfcc100m}) to create localized captions dataset. 
+The dataset generation pipeline is shown in Fig.~\ref{fig:dataset_generation}. First we create \textit{text queries} using n-grams from the caption of the image: e.g. ``dog",``brown dog", ``brown dog playing with a disc". We specifically create n-grams where $n=\{1,2,\cdots, 8\}$ and then filter out incomplete captions like ``with a red", ``dog playing with". 
+Then we use the filtered n-grams as  \textit{text queries} for pre-trained region proposal models (i.e.\  OWL-ViT~\cite{minderer}) to extract boxes and select text-box pairs based on the similarity score ($>$ 0.1). Multiple n-grams may match for a box, and this results in several ways of describing a box in the image as shown in Col. 4 in Fig.~\ref{fig:dataset_generation}. 
+
+\noindent\textbf{WebLI.} This data collection technique on the WebLI dataset results in 32 billion image-box-caption triplets from 2 billion images without requiring new manual annotation. Our captions show a rich vocabulary that is close to common language used to describe objects in the context of an image. If we use MS-COCO's vocabulary then all humans in the dataset would get labeled as \textit{person}. However by building our vocabulary in a bottom-up manner we end up with captions that contain more informative words such as \textit{baby}, \textit{nurse}, \textit{policeman}, \textit{firefighter}, or \textit{baseball player} to describe the \textit{person} class.
+
+\noindent\textbf{YFCC100M.} We also create a localized captions dataset using YFCC100M images. Specifically we use the same 14M images as the CLIP paper. The dataset creation method results in $\sim11$M images with at least one valid box. On average each image has $20$ boxes, making the size of the localized captions YFCC100M dataset is $\sim0.2$B image-box-caption triplets. The number of YFCC100M triplets is ~160 times smaller than the localized captions dataset created from WebLI.
+
+As both OWL-ViT and the CLIP subset of YFCC100M are publicly available, the resulting localized captions dataset can be generated with open-source models and public datasets. Since the WebLI dataset is not publicly available yet, YFCC100M triplet-dataset can  serve as a reproducible benchmark. 
+\begin{figure}[t]
+\begin{center}
+   \includegraphics[width=1.0\linewidth]{figures/dataset_generation}
+\end{center}
+   \caption{\textbf{Dataset Generation.} We use OWL-ViT to generate a dataset of triplets of image, bounding box and captions from a web-scale dataset of noisy image-text pairs. Increasing levels of richness in captions is captured through different length descriptions for each box.}
+\label{fig:dataset_generation}
+\end{figure}
+
+
+
+\section{\methodname with LLMs}
+
+\label{sec:flexcapllm}
+
+Recent work on improving the recognition and reasoning capability of vision models, so that they can perform tasks such as question answering and visual dialog, has focused on connecting features from vision models like ViT to Large Language Models (LLMs). Existing works like Flamingo~\cite{Alayrac2022-fm}, LlaVA~\cite{liu2023llava}, PALI~\cite{chen2022pali}, PALM-E~\cite{driess2023palm}, Ferret~\cite{you2023ferret}, LaVIT~\cite{jin2024unified}, have focused on using patch features from images as words or tokens. Here, we propose an alternate approach.  
+
+Instead of adapting LLMs to understand vision features, we explore connecting images with LLMs using rich text in the form of \textit{localized descriptions}. As \methodname solves the rich visual perception problem by generating dense localized information, it enables LLMs to perform high-level spatial and textual reasoning by linking spatially enriched visual concepts with the world knowledge. When combined with their well-trained common-sense reasoning, LLMs can reason about attributes by looking at singular object detections, scene-level understanding by utilizing larger window descriptions, counts by checking number of bounding boxes with similar content, and relative spatial relationships by comparing location of the boxes. 
+While using captions as input for LLMs is not novel in itself \cite{rotstein2024fusecap, wang2023filling}, ensuring the captions are diverse, descriptive, and exhaustively describe the full image is challenging.
+Now we will discuss how to connect FlexCap with LLMs.
+
+\noindent\textbf{FlexCap-LLM.} In Figure~\ref{fig:flexcap_with_llm}, we show how we use FlexCap with an LLM to solve visual questions. First, we convert an image to a sequence of localized descriptions that describe the image in terms of the objects and regions present in the image. To do so, we need region proposals. We use OWL-ViTv2~\cite{minderer2023scaling} to localize important objects and regions in an image. We keep the top 128 bounding boxes by their \textit{objectness} scores. We then use \methodname to describe each box in the image in the context of the entire image. In order to produce holistic descriptions, we use multiple prefixes for each region. These prefixes are a combination of length conditioning token and some initial text. We add the boxes and their descriptions to a \textit{text preamble} (see Fig.~\ref{fig:flexcap_with_llm}) that defines the setup where we are using an LLM to answer questions about an image. In all the experiments, we use PALM2-S model~\cite{anil2023palm} as the LLM of choice. We refer to this end-to-end system that takes an image and a question to output the answer as \textit{FlexCap-LLM}.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/flexcap_with_llm.pdf}
+    \caption{\textbf{\methodname for VQA with bounding box proposals and an LLM}. \methodname generates captions for different regions in a given image. To answer any open-ended questions, we prompt an  LLM~\cite{palm2} with \methodname's detections (box-caption pairs).}
+    \label{fig:flexcap_with_llm}
+\end{figure}
+
+To adapt the base \methodname to have improved detection skills, output longer sentences, and identify OCR, we co-train \methodname for 25k more steps on detection (COCO, VOC, OpenImages, LVIS), captioning (COCO Captions, Visual Genome) and OCR datasets (WebLI). For image captioning datasets, we use the bounding box that covers the whole image. We find this co-training step useful for downstream tasks using the LLM. 
+
+
+\section{Experiments}
+
+We evaluate our model across different tasks that require different levels of detail. In Section~\ref{sec:vqa}, we test \methodname-LLM on visual question answering tasks. In Section~\ref{sec:dc}, we evaluate how \methodname can be used for localized captioning. In Section~\ref{sec:det_desc}, we compare the effectiveness of using \methodname and other VLMs for the task of open-ended object detection. In Section~\ref{sec:qual}, we present qualitative results and applications of \methodname. In Section~\ref{sec:fidelity}, we provide ablations and analysis of the generated captions. 
+
+\subsection{Visual Question Answering}
+\label{sec:vqa}
+
+Visual question answering (VQA) often requires visually grounded rich semantic understanding of the content at multiple levels of granularity depending on the question. These properties make VQA a great test-bed for our method which can generate dense spatially grounded information on visual content with desired semantic complexity.
+
+Hence we evaluate the effectiveness of FlexCap-LLM on several image VQA benchmarks such as OKVQA~\cite{Marino2019OKVQAAV}, %VQAv2~\cite{Goyal2016MakingTV}, 
+GQA~\cite{Hudson2019GQAAN}, and VizWiz~\cite{Gurari2018VizWizGC}, and video question answering benchmarks such as MSRVTT~\cite{xu2016msr} and MSVD~\cite{xu2017video}. Diverse characterictics of these datasets helps gaining better insight on \methodname's capabilities. We report the commonly used accuracy metric for each dataset. 
+\begin{table}[t]
+\scriptsize
+\input{tables/gqa}
+\input{tables/okvqa}
+\input{tables/vizwiz}
+
+\caption{{\bf Zero-shot image question answering results}. FlexCap-LLM  is compared against recent baselines. Grayed out methods are trained on question answering datasets.}
+
+\label{tab:image_vqa}
+\end{table}
+
+\begin{table*}[t]
+\scriptsize
+
+\input{tables/video}
+\caption{\textbf{Zero-shot video question answering results} reported on MSRVTT-QA and MSVD-QA on test set. FlexCap-LLM is better than other zero-shot baselines for video VQA benchmarks.}
+\label{tab:video_vqa}
+\end{table*}
+
+\subsubsection{Image Question Answering.} 
+
+First we evaluate \methodname-LLM on GQA, OKVQA and VizWiz image VQA benchmarks in a zero-shot setting, meaning that our approach is not trained with the task or the corresponding dataset. The results on these benchmarks are presented in Table~\ref{tab:image_vqa}.
+\noindent\textbf{\textit{Compositional VQA}}. The GQA dataset is for evaluating the performance on complex compositional questions. As \methodname produces information for multiple visual elements in the scene with their corresponding locations, it is quite well-suited for questions on compositional understanding of the image. On this benchmark, as shown in Table~\ref{tab:gqa}, FlexCap-LLM outperforms all the recent baselines.
+\noindent\textbf{\textit{VQA with External Knowledge}}. OKVQA dataset is particularly designed for evaluating the ability to answer questions about images that require external knowledge which is not readily available on the image. Hence it requires multiple levels of understanding of the content, and reasoning with that information, which is  well-suited for applying \methodname.
+In Table~\ref{tab:okvqa} we show our performance on OKVQA is superior to strong baselines such as Flamingo and ViperGPT which highlights the effectiveness of the mix of generic and specific descriptions generated by FlexCap. Unlike other baselines which use the question, \methodname generates the captions without having access to the question.
+
+\noindent\textbf{\textit{VQA with atypical images}}. We also evaluate on VizWiz, which contains visual questions asked by people who are visually impaired. Unlike web content, in these images the objects and the scene are not always well-centered, hence this dataset contains many out-of-distribution samples compared to typical web-crawled datasets. We report the results of this experiment in Table~\ref{tab:vizwiz}. Nevertheless, our approach significantly 
+outperforms  Flamingo~\cite{Alayrac2022FlamingoAV} which also reports zero-shot performance on this dataset.
+
+\subsubsection{Video Question Answering.}
+We also evaluate FlexCap-LLM on zero-shot video question answering datasets MSRVTT-QA and MSVD-QA~\cite{xu2017video}. The results on these benchmarks are presented in Table~\ref{tab:video_vqa}.
+For processing the video, we sample 8 frames uniformly from the video. We pass each of these frames through FlexCap to produce captions of objects and regions. We then combine all the object captions from the different frames into one prompt for the LLM. 
+
+We observe FlexCap-LLM significantly exceeds the performance of the Flamingo model in the zero-shot setting. These results highlight the zero-shot effectiveness of our method, which can solve tasks in the video domain even though both \methodname and the LLM were not trained for those tasks.
+
+\subsection{Dense Captioning}
+\label{sec:dc}
+\textbf{Dataset and Evaluation Metrics.} The dense captioning task is defined as producing both the regions and the corresponding descriptions for each region. For this experiment, we use the Visual Genome~\cite{krishna2017visual} dataset. In this dataset, each image is annotated with multiple bounding boxes and each box has a corresponding caption. We use the train-test splits and evaluation metric as proposed in~\cite{johnson2016densecap}. The paper proposes to use a mean of Average Precisions (mAP) over pairwise thresholds of both IOU thresholds (0.3, 0.4, 0.5, 0.6, 0.7) and Meteor score thresholds (0.0, 0.05, 0.1, 0.15, 0.2, 0.25). We use the same preprocessing of text and boxes as mentioned in~\cite{wu2022grit}. 
+
+\noindent\textbf{Fine-tuning \methodname.} We fine-tune the pre-trained \methodname model on the Visual Genome train split for 60k steps with a lower learning rate of $1e-6$ at a resolution of $448 \times 448$.
+\noindent\textbf{Captioning GT boxes}. 
+Following the evaluation procedure from~\cite{johnson2016densecap}, we evaluate captioning of the ground-truth boxes in Visual Genome. Since this setting removes the localization task, we have a cleaner evaluation of only the region captioning problem. The results of this experiment are provided in Table~\ref{tab:densecaptioning_gt} in which we show that \methodname achieves better performance compared to other approaches evaluated in this setting.
+\noindent\textbf{Captioning GRIT boxes}. 
+In this experiment, we want to compare against other approaches that perform both localization and captioning. We are measuring how well \methodname performs when provided with box proposals.  Table~\ref{tab:densecaptioning}  shows \methodname obtains better performance compared to other approaches evaluated in this setting. Since, in our work we do not propose any localization module we use GRIT's~\cite{wu2022grit} region proposals as the input boxes for our model. This also allows us to directly compare our captioning capabilities against GRIT. We find that our approach outperforms GRIT at this task even though we test at a lower resolution of $448 \times 448$.
+
+\begin{table}[t]
+\scriptsize
+\begin{subtable}[c]{0.5\textwidth}
+
+\centering
+\begin{tabular}{l|c}
+         Method & mAP $\uparrow$\\
+         \midrule
+         FCLN~\cite{johnson2016densecap} & 27.11 \\
+         CAG-Net~\cite{yin2019context} & 36.29 \\
+         \methodname  &  \textbf{46.9} 
+    \end{tabular}
+    \subcaption{Captioning GT Boxes}
+    \label{tab:densecaptioning_gt}
+\end{subtable}
+\begin{subtable}[c]{0.5\textwidth}
+
+\centering
+\begin{tabular}{l|c}
+         Method & mAP$\uparrow$\\
+         \midrule
+         FCLN~\cite{johnson2016densecap}  & 5.39\\
+         JIVC~\cite{yang2017dense} &9.31\\
+
+         COCG~\cite{li2019learning}  &9.82\\
+         CAG-Net~\cite{yin2019context}&10.51\\
+         TDC+ROCSU
+         ~\cite{shao2022region}&11.49\\
+         GRiT~\cite{wu2022grit}  & 15.52\\
+         \midrule
+         \methodname + GRiT Boxes  & \textbf{16.2}
+    \end{tabular}
+     \subcaption{Dense Captioning}
+    \label{tab:densecaptioning}
+\end{subtable}
+\caption{\textbf{Captioning boxes in Visual Genome dataset.} \methodname exceeds performance of other methods. All methods have been fine-tuned on Visual Genome captions.}
+\end{table}
+\subsection{Open-Ended Object Detection}
+\label{sec:det_desc}
+Open-ended object detection, that is identifying all the objects in the image with rich descriptions, can be achieved in two ways: (a) localize-then-describe or (b) describe-then-localize. With FlexCap, we employ a \emph{localize-then-describe} approach where boxes are generated with a box proposal mechanism (i.e. OWL-ViT) and then described by FlexCap. We compare these results with a \emph{describe-then-localize} approach where we first ask a state-of-the-art (SOTA) VLM (i.e. LLAVA~\cite{liu2023llava}) for a comprehensive description of the image with all objects and then localize these descriptions using a SOTA open-vocabulary object detection method (i.e. OWL-ViT~\cite{minderer}). The \textit{Recall} of all the objects in the image is a major criteria in open-ended object detection, and as shown in Fig.~\ref{fig:det_desc}(a), we demonstrate that \textit{localize-then-describe} approach powered with FlexCap performs significantly better compared to \textit{describe-then-localize} approach using existing works.
+
+In Fig.~\ref{fig:det_desc} (b-e), we observe that our \textit{localize-then-describe} approach retrieves more parts of the image, particularly the small and medium size objects, compared to the \textit{describe-then-localize} approach. This is mainly because most VLMs are trained to describe the salient objects in the image rather than exhaustively list all the objects present in the scene. We show some typical examples of missed detections in Fig.~\ref{fig:missed_det}.
+\begin{figure*}[t!]
+\footnotesize{
+    \centering
+    \begin{subfigure}[t]{0.18\textwidth}
+        \centering
+        \includegraphics[height=.95in]{figures/flexcap_llava_recall}
+        \caption{Recall v/s IOU}
+    \end{subfigure}%
+    ~ 
+    \begin{subfigure}[t]{0.18\textwidth}
+        \centering
+        \includegraphics[height=.95in]{figures/flexcap_llava_all_objects}
+        \caption{Number of\\Objects Found}
+    \end{subfigure}
+    ~
+    \begin{subfigure}[t]{0.18\textwidth}
+        \centering
+        \includegraphics[height=.95in]{figures/flexcap_llava_small_objects}
+        \caption{Number of Small Objects Found}
+    \end{subfigure}
+    ~
+    \begin{subfigure}[t]{0.18\textwidth}
+        \centering
+        \includegraphics[height=.95in]{figures/flexcap_llava_medium_objects}
+        \caption{Number of Med. Objects Found}
+    \end{subfigure}
+    ~
+    \begin{subfigure}[t]{0.18\textwidth}
+        \centering
+        \includegraphics[height=.95in]{figures/flexcap_llava_large_objects}
+        \caption{Number of Large Objects Found}
+    \end{subfigure}
+    \label{fig:det_desc}
+    \caption{\textbf{Open-Ended Object Detection} on the Visual Genome dataset. We find that the localize-then-describe approach, which involves describing every detected box with FlexCap, achieves higher recall (see (a)) and produces more bounding boxes with good matching scores (see (b)) compared to describe-then-localize approach with SOTA VLMs and open-vocabulary detection. The difference between the two approaches is most stark for small and medium sized objects (see (c-e)).
+    }
+    \label{fig:det_desc}
+    }
+\end{figure*}
+\begin{figure*}[t!]
+    \centering
+        \includegraphics[width=\textwidth]{figures/missed_by_llava}
+    \caption{\textbf{Objects missed by LLAVA but found by FlexCap.} We show some  typical examples of objects (5 per image to avoid clutter) that FlexCap can find with OWL-ViT but LLAVA does not.}
+    \label{fig:missed_det}
+\end{figure*}
+
+\begin{figure}[h!]
+
+\begin{center}
+   \includegraphics[width=1.0\linewidth]{figures/prefixing}
+\end{center}
+   \caption{\textbf{Extracting properties by conditioning \methodname with prefixes.} Examples of \methodname extracting properties of objects of different categories by using relevant prefixes. Note how we are able to retrieve a one-word answer from the model by controlling the length of the caption.}
+\label{fig:attributeprefix}
+\end{figure}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/attribute_caption_collage.pdf}
+    \caption{\textbf{Generating conditional captions using prefixes.} Conditional captions allow us to extract desired information from the input bounding box.}
+    \label{fig:attribute_caption_collage}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/diff_prefixes}
+    \caption{\textbf{Diverse captioning with Prefixes.} FlexCap can be used to perform conditional captioning of images. In all three examples, the input bounding box covers the whole image. We show three prefixes: \textit{"a", "the photo was taken in ", "notice"} resulting in diverse captions for the same image. }
+    \label{fig:diff_prefixes}
+\end{figure}
+
+\begin{figure}[t]
+\begin{center}
+   \includegraphics[width=1.0\linewidth]{figures/length_control}
+\end{center}
+   \caption{\textbf{Examples of length controlled captions generated by \methodname.} Note that attributes (``pink flamingo kite") and context (``in the jungle") are generated as the length increases.}
+\label{fig:length_control}
+\end{figure}
+
+\subsection{Qualitative Results}
+\label{sec:qual}
+
+\noindent\textbf{Extracting object properties.} Not only does \methodname allow conditioning on the box and the length of the answer, it also allows textual prompting of a caption. We can use this to our advantage to extract object properties of interest such as color and material. We show examples of this in Fig.~\ref{fig:attributeprefix}. Say we want to extract the color and material of objects, we design two prefixes: 1) "\textit{LENGTH-4 The color is }\verb|____|" and 2) "\textit{LENGTH-5 This is made of} \verb|____|". The pre-fixed length tokens guide the model to produce outputs that are just one word. Note how the model is aware of the object in the bounding box and completes the caption based on the input prefix.
+
+Upon further exploration, we discover prefixes which can extract different kinds of information from an image. We show examples of this in Fig.~\ref{fig:attribute_caption_collage}. \methodname can extract the following attributes: the actions of human (\textit{"The person is"}), the uses of objects (\textit{"This is used for"}), OCR (\textit{"The sign says"}), names of books (\textit{"The book is called"}), authors of books (\textit{"Written by"}), and  the locations where the photos were taken (\textit{"The photo was taken in"}). Note how the same model is able to extract different information from the same bounding box: the name of the book title and the author name based on the prefixing (images 4 and 5). In Fig.~\ref{fig:diff_prefixes}, we highlight how different prefixes can lead to generation of diverse captions. Note how the model correctly identifies the country, possibly using the logo on the train. We find the prefix \textit{"Notice"} leads to captions highlighting noteworthy aspects in an image which the un-prefixed caption does not. We show more examples of this prefixing in the supplementary material.
+\noindent\textbf{Zero-shot Dense Captioning.} We can use \methodname with OWL-ViTv2~\cite{minderer2023scaling} to perform dense captioning without further training. We use OWL-ViTv2 to propose bounding boxes in the image. \methodname then labels each bounding box with a caption. We show examples of this in the \href{https://flex-cap.io}{project webpage}.
+
+\subsection{Ablations and Analysis}
+\label{sec:ablations}
+\noindent\textbf{Large-scale Contrastive Pre-Training.} In this section, we study the impact of using a contrastively pre-trained vision encoder or training from scratch using only box-caption objective. For this experiment, we use ViT-B/16 as our backbone and train on the WebLI Region Captioning dataset. We report the results on ground truth (GT) box captioning  and dense captioning on GRiT proposals on the Visual Genome dataset in Table~\ref{subtab:cpt}. In Row 1, we observe that a length-conditioned region captioning objective can be used for training both the backbone and text decoder from scratch and achieve competitive performance. Second, we observe using a large-scale contrastively pre-trained (CPT) model results in better performance. Note that these CPT weights have already been open-sourced~\cite{zhai2023sigmoid}. 
+
+\noindent\textbf{Data Scaling.} In this experiment we measure how scaling the localized captions dataset affects performance. We first take ViT-B/16 encoder contrastively pre-trained with a large image-text dataset (WebLI). We now train it on two different region captioning datasets of different scales. We show the results of this experiment in Table~\ref{subtab:data_scaling}. We find that even after contrastive pre-training on a large scale, a large region-caption dataset can result in significant performance boost ($\sim$5\% mAP for GT box captioning). This shows the importance of designing a scalable dataset creation method such as the one introduced in Section~\ref{sec:dc}. We also note that the dataset and pre-trained weights required to reproduce the model with YFCC100M are available publicly.
+
+\noindent\textbf{Model Scaling.} Next, we measure the impact of changing the image encoder's size. We train two models: ViT-B/16 (85M) v/s SO-ViT/14 (428M). Just like the data scaling experiments, both of these have been pre-trained on the WebLI dataset in a contrastive manner. The text decoder is kept the same architecture for both these experiments. We report the results of this experiment in Table~\ref{subtab:model_scaling}. We find that the larger model results in better performance.
+
+\begin{table}[t]
+\scriptsize
+\input{tables/contrastive_pt}
+\input{tables/data_scaling}
+\input{tables/model_scaling}
+\caption{{\bf Ablations.} We vary different aspects of model pre-training, dataset size, and model size and measure its effect on region capitoning task on the Visual Genome dataset.  In (a) and (b) the visual backbone is ViT-B/16 and in (b) and (c) all models start from contrastively pre-trained weights.}
+\label{tab:ablations}
+\end{table}
+
+\label{sec:fidelity}
+\noindent\textbf{Compliance.} We observe that our model produces captions in a controllable manner with minor deviations. In Figure~\ref{fig:length_control}, we show qualitative examples of the \methodname model producing different length captions for the same box. Note how the model progressively adds more information about the object by incorporating context in the longer sentences (\textit{in the jungle}), attributes (\textit{pink flamingo kite}), and alternative nouns (\textit{chevy}, \textit{feline}). 
+
+
+
+\section{Related Work}
+
+
+\noindent {\bf Visual question answering} (VQA), a task designed to assess if a computer can answer questions about an image, often requires grounding visual concepts and reasoning. Although initially introduced for supervised evaluation of the task~\cite{antol2015vqa}, most recently VQA also become one of the most powerful benchmarks for evaluating task and dataset independent visual dialog. Several existing models such as ViperGPT~\cite{Suris2023-ja}, Flamingo~\cite{Alayrac2022FlamingoAV}, BLIP~\cite{li2022blip,Li2023-px}, PaLI~\cite{chen2023pali} show convincing zero-shot performance on the VQA benchmarks that rivals the supervised approaches. Unlike most previous zero-shot approaches, which tightly couple vision and language components in a single model, \methodname generates a high-level human interpretable representation of an image and demonstrates that, through straight-forward application of LLMs, we can achieve comparable performance with state-of-the-art results across VQA benchmarks. Unlike others, ViperGPT~\cite{Suris2023-ja}, also decouples vision and language components and reinterprets visual questions with LLM generated programs, and executes them using existing visual perception tools. Whereas, in our case we use only one powerful vision tool, i.e. \methodname, to generate all the necessary information and leave the reasoning to an LLM. In that sense, \methodname is quite complementary to ViperGPT as it can be one of the powerful tools that can improve the controllable visual understanding of the image for ViperGPT.
+\noindent \textbf{Open vocabulary object detection} models like \ OWL-ViT~\cite{minderer} and ViLD~\cite{gu2021open} enable the user to query any given text on the image and obtain matched bounding boxes for those queries. In these models the text is often encoded by a text encoder like CLIP~\cite{radford2021learning} and T5~\cite{raffel2020exploring}. The text embeddings are compared with the category-agnostic box proposals coming from the visual backbone. In this work, we use OWL-ViT's text and vision encoders to associate bounding boxes with text-queries to produce our training data. By training a localized captioning model, we remove the manual step of providing per-dataset or per-image text queries to use OWL-ViT. 
+RegionCLIP~\cite{zhong2022regionclip} obtained good performance on open-vocabulary object detection by utilizing region-level vision-language contrastive learning on large scale data. We differ from this work as we generate the description for each bounding box instead of associating  text queries (defined manually) with bounding boxes.
+
+\noindent {\bf Dense captioning} involves localizing salient regions of the image and describing them with natural language sentences, introduced in \cite{johnson2016densecap}. 
+In practice, the existing work often produces longer and more informative descriptions of objects or their compositions using visual attributes of objects \cite{yin2019context,kim2019dense} or contextual and global image cues \cite{yang2017dense,li2019learning}. However, the richness of descriptions in this line of work are often limited to existing image captioning datasets \cite{lin2014microsoft,krishna2017visual}. By utilizing a large scale dataset  of billions of noisy image-text pairs collected from the web (similar to \cite{jia2021scaling,chen2022pali}), we aim to generate more diverse sentences with a focus on describing the visual content in controllable detail using a richer visual descriptive space learned from the web. 
+\noindent \textbf{Length-controlled image captioning} has been explored in ZeroCap~\cite{tewel2022zerocap} and LIC~\cite{deng2020length}. ZeroCap~\cite{tewel2022zerocap} implements length control as a post-processing step by changing the probability of sampling the end-of-sentence token. Hence the model is not naturally trained with word length conditioning in mind and cannot guarantee fine-grained length control at the level of number of words. On the other hand, LIC~\cite{deng2020length} generates length-controllable captions by conditioning the model with learned tokens that represent different length intervals. However there are considerable differences compared to \methodname. First, our approach allows for controllability at the level of image regions, while LIC only provides full image captions. This is a significant difference, as it allows us to generate concise or detailed captions for all the objects in
+the image. Second, our approach has a more precise level of caption-length control. LIC uses a coarse subjective level
+of control with four or five levels of length (e.g.\ short, medium, long, and longer), while our approach allows for an exact number of words to be specified. 
+
+
+
+\section{Conclusion}
+
+
+In this work, we introduce FlexCap, a flexible captioning model that can describe localized regions in an image with controllably rich captions. To train \methodname, we generate a large-scale image-box-caption dataset that is rich in diversity of visual descriptions and their length. We achieve it by utilizing existing web-scale noisy image-text pairs and open-vocabulary object detection models. 
+We show how localized rich descriptions provided by FlexCap can help us connect images and videos to LLMs and achieve strong performance on visual question answering and dense captioning tasks. 
+We also show that our \methodname model benefits from contrastive pretraining, localized captions dataset size scaling, and model size scaling, and is compliant to the length conditioning. 
+We also demonstrate the effectiveness of \methodname-enabled \textit{localize-then-describe} approach over the \textit{describe-then-localize} approaches.
+
+

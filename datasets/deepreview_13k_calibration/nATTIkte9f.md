@@ -1,0 +1,201 @@
+# LMO-DP: Accurately Fine-Tuning Language Models with Stronger Differential Privacy
+
+- Decision: Reject
+- Avg Score: 4.75
+- Scores: 3, 5, 6, 5
+
+## Abstract
+Differentially Private Stochastic Gradient Descent (DP-SGD) and its variants have been proposed to ensure rigorous privacy for fine-tuning large-scale pre-trained language models. State-of-the-art (SOTA) DP-SGD methods rely heavily on the Gaussian mechanism since its key component – moment accountant (MA) leverages the properties of Gaussian noise to accumulate the overall privacy budget via tight DP composition. However, the privacy constraints imposed in DP-SGD, solely on the Gaussian noise, may still overly perturb the gradients and degrade the fine-tuning accuracy, especially in stronger privacy regimes (e.g., the total privacy budget $\epsilon < 3$). To address such limitations, we propose a novel Language Model-based Optimal Differential Privacy (LMO-DP) framework, which takes the first step to enable the tight composition of a sub-optimal DP mechanism (non-Gaussian) for accurately fine-tuning language models, even in stronger privacy regimes (e.g., $0.5 \leq \epsilon < 3$). Furthermore, LMO-DP efficiently approximates the sub-optimal DP and fast convergence, compared to the SOTA methods. For instance, fine-tuning RoBERTa-large (with 300M parameters) on the SST-2 dataset can achieve the 92.20% accuracy (given the total privacy budgets $\epsilon = 0.3$ and $\delta = 0$), compared with the ∼50% accuracy of most SOTA methods. We also draw similar findings on text generation tasks while privately fine-tuning GPT-2.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes LMO-DP, a framework for fine-tuning language models with DP. This work optimizes (minimizes) the noise added for DP to the cross-entropy in LM model training in a way that ensures a bounded RDP. The authors propose a sub-optimal reduction to the optimal optimization problem. The search space of LMO geometries is shown to be comprehensive. Altogether, this enables training of high utility models that outperform prior work by a significant margin, especially at low epsilons.
+
+### Strengths
+The main strength of this work is the strong empirical results. This work achieves extremely impressive empirical results that outperform prior work at even an order of magnitude larger epsilon. For example, Table 3 shows that LMO-DP at epsilon of 0.16 outperforms all prior work at even epsilon of 1.4.
+
+To achieve these results, this work proposes a novel approach to optimizing (minimizing) the amount of noise added while satisfying a finite RDP guarantee. This is achieved by building on the work of Mohammady et al (2020). 
+
+These results are highly timely and significant, as LLMs are seeing increasing prevalence in academia and adoption in industry.
+
+(*) Finally, as both a question and a strength, this work seems independent of LMs and can potentially have larger impact. The main crux seems to be optimizing over the cross-entropy loss which is used more broadly than just LMs.
+
+### Weaknesses
+Though this work achieves impressive results, it is unclear how sound these results are, for several reasons. 
+
+**First, the results presented are often times quite unclear and imprecise. This manifests in a few ways.**
+
+(A) The results rely heavily on the supplemental material, with no proofs or high-level descriptions of proofs provided in the main-text. This makes it difficult to follow the line of thought and verify if the high-level approach is sound. 
+
+(B) One of the key algorithms is Algorithm 3 which is required to understand section 4.3 but does not appear in the main-text. 
+
+(C) Some of the terminology is often imprecise: e.g., (1) "corresponding parameters, including \theta and others" and (2) "secondary optimization" on page 6. What are "others" and where is this "secondary optimization". Neither seem to appear in Algorithm 3 (nor the initial optimization mentioned just prior). 
+
+(D) This work compares several orthogonal methods to DP on different (often unrelated axes) in a rather confusing way. At the heart of this work is minimizing the amount of noise needed by DP. Yet, this work lists and compares with largely orthogonal work that explores memory reduction (ghost clipping) or parameter efficiency techniques (which improve memory/noise scale through the # of parameters) but  cna be used in conjunction with these methods. Why does Table 1 give low memory to this work? This seems like a false claim considering this work does not optimize memory but instead the noise standard deviation. Also, this work claims faster convergence but does not provide any theoretical guarantee to convergence, only some empirical exploration.
+
+**Second, the results in some places appear unsound, or, require additional explanation.**
+
+(E) The comparison of noise of LMO-DP to standard Gaussian noise for DP is unclear. The work claims "less noise" and relies on Figure 2 to compare this for several choices of epsilon. However, due to the scale, it is very vague what the actual difference is. The figure should use a log scale and also report useful statistics like the average reduction. Interpreting this figure, it looks as though the chosen noise is often 0 (or, vanishingly small). This would be an extremely significant improvement over DP that requires much more analysis to both understand how/where this is coming from and to ensure correctness. One key analysis would be to show what the noise looks like under the extremes (i.e., any single component), and, to for example, show how this noise changes as a function of the components.
+
+(F) The empirical details are lacking for both reproducibility and understanding of results. How large are the dataset sizes? How many classes are there? These details significantly influence DP learning.
+
+(G) Figure 5 is also extremely difficult to interpret. Looking at it, it looks like this model can be trained in <10 steps. This is quite surprising. How many steps does non-private training take?
+
+(H) Figure 4 and several tables indicate that LMO-DP with a full order magnitude less privacy cost can outperform DP-SGD. This is an outstanding feat that is likely due to weakness E) above. Understanding how this manifests is crucial and is currently underexplored.
+
+(I) Though I am not very familiar with the work of Mohammady et al. (2020), their work requires specifying both the utility metric and the query (to be protected by DP). Theorem 4.1 currently only shows the loss/utility metric (cross-entropy) but does not define the query. This makes it seem as though the query is acutally releasing the loss and not the gradients which would lead to privacy leakage. Please clarify.
+
+### Questions
+(*) in strengths.
+
+(F) In weaknesses.
+
+(I) In weaknesses
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper introduces a new way to train language models with differential privacy guarantees. Rather than adding Gaussian noise as done by DP-SGD and to the best of my knowledge all improvements that build on it, the authors build on a result by Mohammady (2020) and add a mixture of noise of several distributions. They extend the Renyi DP accountant to handle non-Gaussian noise. Finally, they also present empirically results showing that they can beat the DP-SGD state of the art. The improvements are particularly striking in the low $\varepsilon$ regime.
+
+### Strengths
+- Strong empirical results. The paper presents results for good model utility with very strong privacy guarantees of $\varepsilon < 0.1$. This is a significant improvement over current SOTA.
+- The authors provided a repo to reproduce the result.
+- The method is simple but very effective. It should be fairly straightforward to implement this method in most DP training libraries such as opacus which will be of great value to the community.
+- Comprehensive evaluation
+
+### Weaknesses
+The main weakness of this paper is the presentation. The manuscript reads like a rushed submission that requires more careful proof reading. For example:
+- What does LMO stand for? It is introduced as "Language model-based optimal" but Appendix C says it's "Laplace Mixture of Outcomes" which has not been introduced at all.
+- Many references to the abstract for essential content which makes it difficult to read the paper fluently.
+- Inconsistent values throughout the paper e.g. for $\alpha$ equation (2) states integers 2, ..., 129 whereas algorithm 1 states 3, ..., 130
+
+In addition, sections 3.3 and 4 are hard to follow and imprecise. The description of the LM geometry is vague and lacks precise definitions, making it difficult to understand the core concepts. The connection between the proposed noise mixture and the optimization process is not clearly explained, and the theoretical justifications are not presented with sufficient rigor. The explanation of Figure 1 and how it demonstrates the coverage of the space by the mixture of distributions is also not clear.
+
+### Questions
+- Can you explain what you mean by LM geometry in more detail? I found it hard follow the LM Geometry section? What are the specific characteristics? Is $\mathbb{P}_{i/o}$ simply the conditional probability $\mathbb{P}[o|i]$? This seems to be a conventional language model. I'm failing to understand what aspect of this definition is geometric.
+- Why did the authors chose RDP accounting over tighter accountants e.g. PRV accountant? PLRV based accountant should be able to handle multiple different noise distributions? Would that provide an even better privacy utility trade off?
+- Can you explain figure 1 in more detail and how it shows that the mixture of distributions covers the whole space?
+- It would be interesting to learn more about the mixture of noise distribution? What type of noise is the main contribution?
+- The authors often refer to the privacy curve $\delta(\varepsilon)$ as the PLRV, while they are equivalent they're not the same.
+
+As stated above, I believe the main weakness of the paper is the overall presentation. It believe if the authors could improve the writeup the value to the community would significantly higher.
+
+### Soundness
+3 good
+
+### Presentation
+1 poor
+
+### Contribution
+4 excellent
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper proposes a novel DP framework for training large language models. It employs the composition of sub optimal DP mechanisms for fine-tuning LLMs. The method empirically outperforms the existing baselines.
+
+### Strengths
+1. The paper provides a method to tightly compose the DP mechanisms compared to traditional gaussian mechanisms, which usually add a lot of noise. 
+2. LMO subspace is an interesting way of finding LM geometries, as it provides universal RDP guarantees along with strong empirical results. 
+3. Empirical results are strong compared to the baselines. 
+4. Algorithm is relatively simple to implement compared to the standard DP-SGD implementations.
+
+### Weaknesses
+1. Algorithm 3 seems to be important, adding it to the paper would be nice.
+2. There is an inherent tradeoff between privacy and utility, however the results seem to be the opposite, as in even for extremely small values of epsilon, the accuracy of model is pretty high, can the authors please explain this observation?
+3. How would the results change if the models were trained from scratch instead of fine-tuning?
+
+### Questions
+How can the proposed method be extended to vision tasks? or vision generative models?
+For instance NAR generative models solve a bert like optimization problem during training, is there a trivial way to extend this method?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This work proposes a new approach for fine-tuning large language models under differential privacy. It proposes an optimization framework that finds a good model parameter distribution subject to Renyi-DP constraints. Experiments show that the accuracy significantly surpasses existing works even with a very small privacy budget ($\varepsilon < 3$).
+
+### Strengths
+1. The problem of fine-tuning large models on private data is extremely relevant in practice.
+2. The accuracy significantly surpasses previous work, especially in the high privacy regime.
+
+### Weaknesses
+1. There are many recent works on tight privacy accounting for differential privacy such as [1] and [2]. The authors should discuss whether they can be applied to the proposed algorithm.
+2. In section 3.3, the global optimization seems to be formulated for a fixed pair of neighboring datasets $D$ and $D'$. However, differential privacy requires all pairs of $D$ and $D'$, so to me, there should be a max over all possible $D, D'$ somewhere in the formulation. I hope the authors can explain where the worst case over all neighboring datasets is considered in this formulation.
+
+3. The core privacy mechanism appears to protect the output labels or probabilities, rather than the gradients or model parameters. This is a significant departure from standard differentially private fine-tuning approaches like DP-SGD, which protect intermediate gradient updates. This discrepancy makes direct comparisons with prior work, such as Bu et al. (ICML 2023), potentially misleading, as those methods assume an adversary has access to the gradient information. The current approach seems more aligned with protecting the final query output, which is a different problem setting than the typical DP-SGD based fine-tuning.
+
+### Questions
+1. In equation (2), is there a particular reason for the range of $\alpha$ to be 2 to 129? Is it possible that the best parameter is achieved outside of this range for some datasets and problems?
+2. It is surprising to me that the noise level for $\varepsilon =2,3$ is slightly larger than $\varepsilon=0.2$. Could the authors explain this phenomenon?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

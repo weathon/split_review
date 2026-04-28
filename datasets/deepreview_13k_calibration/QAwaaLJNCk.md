@@ -1,0 +1,178 @@
+# Improving Factuality and Reasoning in Language Models through Multiagent Debate
+
+- Decision: Reject
+- Avg Score: 6.00
+- Scores: 8, 6, 5, 5
+
+## Abstract
+Large language models (LLMs) have demonstrated remarkable capabilities in language generation, understanding, and few-shot learning in recent years. An extensive body of work has explored how their performance may be further improved through the tools of prompting, ranging from verification, self-consistency, or intermediate scratchpads. 
+    In this paper, we present a complementary approach to improve language responses 
+    where multiple language model instances propose and debate their individual responses and reasoning processes over multiple rounds to arrive at a common final answer.
+    Our findings indicate that this approach significantly enhances mathematical and strategic reasoning across a number of tasks. We also demonstrate that our approach improves the factual validity of generated content, reducing fallacious answers and hallucinations that contemporary models are prone to. Our approach may be directly applied to existing black-box models and uses identical procedure and prompts for all tasks we investigate.
+    Overall, our findings suggest that such "society of minds" approach has the potential to significantly advance the capabilities of LLMs and pave the way for further breakthroughs in language generation and understanding. Project website at \url{https://composable-models.io/llm_debate/}.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper introduces a method where multiple language model instances individually propose and jointly debate their
+responses and reasoning processes to arrive at a common answer - essentially a form of voting applied to language models. They test this on six datasets, some of which are datasets that contain challenging reasoning questions.
+
+Interestingly, the authors note that the various answers, following a debate, converge on a single common answer.
+
+### Strengths
+A novel approach is presented that raises the performance of LLMs through inter-model debate. This approach is subject to a number of parameters (#agents, #rounds of debate etc.), and the effects of these parameters (e.g., debate length on accuracy) are carefully analyzed, and it is reported how other approaches, such as chain-of-thoughts, improve this approach. The write-up is very clear, and the appendix contains a host of useful pieces of information, such as examples, performance scores, dataset descriptions etc.
+
+### Weaknesses
+ (See "Questions" section)
+
+### Questions
+In the paper where the Minerva model was introduced (https://arxiv.org/abs/2206.14858), which you also cite in terms of using fine-tuning, the authors are using a simple form of majority voting (on a single model) to enhance the output performance.
+Do you know how much your multi-model approach improves over this form of "auto-debate" (i.e., if you run for each of the models' majority voting, like in the Minerva paper, how close would that come to your results)?
+
+You have mentioned further majority voting schemes in the Related Work section. Could you perhaps insert a table highlighting the differences and similarities of your approach to these approaches? You essentially say: "In contrast, in our work, we aim to use communication between different language models to enable more effective reasoning and factuality in language models." Since your methodology has a number of parameters (#agents, #rounds of debate etc.), it would be good to have a more comprehensive comparison.
+
+If these questions are answered in full, I'd be happy to consider raising my rating.
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a method called multi-agent debate to improve the performance of LLMs on factuality and reasoning. 
+
+The paper contributes: 
+1. A novel method that is multi-agent debate; 
+2. Claimed by the authors, a new benchmark of factual correctness that language models struggle with; 
+3. Extensive experiments are conducted to verify the effectiveness of the proposed method, based on six different reasoning and factual accuracy tasks.
+
+### Strengths
+Originality: The proposed method is novel. Though some similar and more advanced ideas have come up recently, this paper should be the very first paper that studies multi-agent ensemble + reflection. 
+
+Significance: The experiments of the paper are extensive. The method has been tested on several reasoning tasks.
+
+### Weaknesses
+Evaluation: The paper lacks a deep evaluation of why multi-agent debating can improve the LLMs' reasoning ability.
+
+Based on my understanding, multi-agent debating = ensemble multiple model's answers + models' evaluation.
+
+However, the paper does not analyze the intrinsic reason why the method can work. Although the analysis in the paper explores the impact of different numbers of agents and rounds of debate on the results, this outcome is predictable, as having more debates and rounds would yield more answers. By ensembling these results, the performance would naturally improve. However, such analysis still does not touch upon the essence of the method. It may be an issue with how the paper is written, as it keeps emphasizing the term 'debate', obscuring the fundamental principles of the method.
+
+Lacking scaling-up experiments: One baseline called majority voting is important since it also ensembles multiple model answers. One issue of the baseline explored in this paper is that it only uses around 3*2 =6 answers, which is quite small. It is interesting to see how effective the multi-agent debate is when compared to majority voting with 50 or even 100 samplings.
+
+### Questions
+Why the paper didn't use different model bases to study multi-agent debate? Mostly, the paper only uses one gpt-3.5 or gpt-4 as the base. I know PaLM is used in the further evaluation experimental part, but it is not enough.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper proposes to improve factuality and reasoning in LLMs by employing multiple agents to independently generate reasoning paths, and then leverage responses from each other to derive the final response across multiple rounds. Evaluated on math and reasoning benchmarks, as well as factuality benchmarks, results suggest that the proposed method can outperform previous methods including self-consistency.
+
+### Strengths
+1. This paper introduces an interesting and effective method utilizing multiple agents which reference each other to derive answers for the next round. Compared to similar methods (self-consistency), the proposed method achieves better performance on various benchmarks. This can be an interesting finding to future research in prompting and leveraging generation from multiple LLMs for self-critic.
+2. The paper presents several insightful ablation studies, suggesting that different language models, and different prompts can complement with each other. This finding may suggest a new direction in inspecting knowledge obtained in LLMs and uncertainty represented.
+
+### Weaknesses
+1. Although the performance improved, it is still not clear why "debating" would improve model performance. Especially, for uncertain answers (examples in Figure 9), it is not convincing why referencing each others' answers would generate more factual answers, as reasoning is not very relevant. Further exploration is required, in particular with more agents. Moreover, even for reasoning tasks (in Figure 2 Round 2), it does not seem that much reasoning is involved. The model is mostly copying, or echoing what the correct answer is, rather than having in-depth "debate", or reasoning, about why one answer is correct and the other is wrong. Without more analysis, this contribution is limited.
+2. Following the first point, some details are not clear. See questions below.
+
+### Questions
+1. Can you clarify what short and long represent in Figure 3?
+2. Can you explain why "summarization" would actually improve the model performance? Inevitable summarization would result in information loss. This finding seems counter-intuitive. Have you conducted similar experiments on other tasks?
+3. When would the model agents be more "agreeable"? Would they be more agreeable when there are more similar answers (regardless of correctness), or would then tend to be more agreeable when the answer is correct? Can you verify the relationship between "agreeable" and "a result of instruction tuning or RLHF" using pre-aligned checkpoints?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper introduces a new approach to improve the language responses of Large Language Models (LLMs) by implementing a multiagent debate system. The authors propose a method where multiple language model instances propose and debate their individual responses over multiple rounds to arrive at a unified final answer. The paper demonstrates that this approach significantly enhances mathematical and strategic reasoning and improves the factual validity of generated content. The authors also introduce a new benchmark for evaluating the factual accuracy of generated biographies of famous computer scientists.
+
+### Strengths
+1. This paper presents a new approach to improve the performance of Large Language Models (LLMs) using a multiagent debate system.
+2. The introduction of a new benchmark for evaluating the factual accuracy of computer scientist biographies is an addition to the field.
+
+### Weaknesses
+1. The novelty is overstated. In essence, the primary experiment merely involves using different random seeds, prompting ChatGPT to generate varied responses, and then refining them. Although there's an additional experiment that uses different language models like ChatGPT and Bard, the test set is very limited.
+
+2. The proposed method is resource-intensive and not suitable for lengthy questions or answers. Employing multiple agents and several rounds of debate can lead to very long conversations, potentially exceeding the context limit and reducing performance.
+
+3. While the presentation is drawn out, the idea and approach are straightforward. Nevertheless, the author dedicates considerable space to prompt examples, and the explanations are protracted.
+
+### Questions
+None
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

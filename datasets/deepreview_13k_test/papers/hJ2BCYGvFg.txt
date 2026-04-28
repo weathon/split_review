@@ -1,0 +1,298 @@
+\title{Improving the Efficiency of Test-Time Search in LLMs with Backtracking}
+
+\begin{abstract}
+Solving reasoning problems is an iterative multi-step computation, where a reasoning agent progresses through a sequence of steps, with each step logically building upon the previous one to reach a desired conclusion. If the desired solution is not attained, the agent must backtrack and try reasoning chains that are quite different from previous attempts. Though prior work such as test-time search against an outcome verifier can improve performance, most search is done in parallel via Best-of-N reranking, and independently for each attempt at a problem, thus wasting a significant amount of computation in sampling multiple full solutions even beyond the point that is needed. Can we reduce the total amount of computation by sharing information and computation across multiple attempts to a given problem? In this paper, we build a novel approach combining process verifiers that predict likelihoods of success \emph{per step} with preemptive backtracking to maximize performance per generated token. To do this, the PRM can be used to identify where a problematic step in a solution trace is by using the sensitivity of the predictions of the learned verifier and allowing the model to do focused resampling of the problematic portion of a solution. This approach can significantly reduce the amount of computation by leveraging partial computation from previous revisions. To further enhance the computational efficiency of inference, we introduce in-context process supervision, where the verifier is conditioned on the history of revisions that are attempted, reducing uncertainty in the verification decisions and improving the verifier's confidence with each round of backtracking. This framework for iterative backtracking, leveraging in-context process supervision, enables an effective tradeoff between inference and model performance.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Solving reasoning problems in large language models (LLMs) involves drawing inferences, making decisions with incomplete or ambiguous information, and solving problems in a structured, logical manner. Reasoning problems are commonplace in many domains such as code development, where reasoning is needed to understand complex logical structures, debug errors, and anticipate edge cases, and mathematics, where it is vital for proving theorems and solving challenging problems.  
+
+One promising direction to enhance response quality of responses in reasoning problems is the strategic use of test-time computation, where a model is given an inference compute budget that it could leverage to improve its solution quality. In fact, prior work such as Snell et al. (2024); Charniak & Johnson (2005); Cobbe et al. (2021) explore different mechanisms for solution generation given a fixed generation budget, exploring search algorithms such as BofN, Beam Search, and Look-Ahead search. In scenarios where an LLM generates a complex sequence, small but consequential mistakes made at intermediate steps can lead to a cascade of errors, rendering the entire sequence incorrect. Traditional search methods, which operate in parallel and start from the beginning of the sequence, fail to efficiently handle these errors, often wasting inference-time compute on parts of the solution that are already correct, thus failing to solve intermediate errors. Is there an approach that can more efficiently leverage inference-time compute for error recovery?  
+
+In this work, we propose backtracking-based iterative refinement for improving LLM solutions. Instead of starting from the beginning with each new sample, our method identifies problematic steps in the solution trajectory and resamples only the parts of the sequence that need correction.  
+
+This adaptive approach not only reduces the computational burden but also allows for more targeted revisions, effectively correcting uncorrelated errors and improving the overall solution quality.  
+
+Our method leverages process-based verifiers (PRMs), trained to predict points in the reasoning chain where the model is most likely to make mistakes. The PRM estimates the probability of success of a reasoning chain conditioned on a partial solution, akin to a value function in RL, as shown in by Snell et al. (2024). Using the PRM value function, we can then compute an advantage estimate to assess the relative importance of each step and guide the backtracking process by focusing on the steps that contribute least to the solution quality and selectively resampling them. These set of targeted revisions allow for compute to be spent more efficiently, leading to higher-quality solutions with fewer revisions. We also establish a stopping criterion in this framework for early termination of backtracking after a solution has been found.  
+
+Ultimately the success of backtracking relies on how accurate the PRM is on intermediate reasoning steps. If we revise a solution after we encounter an unrecoverable state in a reasoning problem, the like  
+
+![](images/2e702c2342caf52e37922e1ca401b7f0f0cddd63bce661c37e3a7273ed9fe816.jpg)  
+Figure 1: Left: an illustration of using the value-based verifier for backtracking. Backtracking is a potential approach to revise an incorrect reasoning chain. Using an error localization criterion, we can identify an appropriate step to revise from to regenerate the solution from. We continue to iteratively revise the solution until a stopping criterion such as satisfying the outcome reward is met. Right: Leveraging In-Context Process Supervision. This approach conditions on prior attempts at a problem to reduce the uncertainty of process reward estimates on future attempts.  
+
+lihood of success even after recovering is very small. To improve the accuracy of the PRM, we temper distribution shift issues by employing on-policy sampling and label balancing. Additionally, we propose a method to smooth the verifier’s outputs to account for estimation errors. We additionally introduce in-context process supervision which allows the PRM to condition on prior attempts at a problem to reduce the uncertainty of the supervision on future attempts. Conditioning on a history of past revisions, the verifier is able to identify failure modes in past attempts and subsequently avoid rating them highly if they are present in future attempts. By providing a framework for sequentially identifying errors and revising them, our approach offers a more scalable and effective solution for test-time inference in LLMs, making it particularly suited for tasks that are more difficult or longer horizon. We demonstrate the computational efficiency of our approach, showing that it significantly improves the test-time compute tradeoff with respect to the number of of generated tokens vs. the accuracy of the generated solution.  
+
+
+
+\section{2 PRELIMINARIES AND NOTATION  }
+
+
+A process reward model (PRM) assesses the validity of intermediate steps taken during the reasoning process, providing feedback on whether these steps are logical/consistent and make progress towards the solution. Let $\mathbf{s}_{t}$ represent the state at step $t$ , and let ${\bf a}_{t}$ denote the action taken at that step. One approach to learn the PRM is through Monte-Carlo (MC) regression as done in Wang et al. (2023); Snell et al. (2024), where the value at each step is supervised with the Monte-Carlo return-to-go $\mathcal{R}^{\mathcal{D}}(s,a)$ , which estimates the probability of success of a rollout from a particular state $s$ and action $a$ . The Monte-Carlo return-to-go is computed as the sum of future discounted rewards, $\begin{array}{r}{\mathcal{R}^{\mathcal{D}}(s,a)\,=\,\sum_{t=i}^{t=T}\gamma^{t}r_{t}}\end{array}$ ,p thoe trhe $\gamma$ nisd  tohfe t hdei secpoiusnotd ef.a cHtoerr,e ,a tnhde  trheew saurdm f uisn cttaikoenn i so svpera rtshee,  0tr faojer cetaocrhy $i$ intermediate step in the reasoning problem till the answer is predicted. If the answer matches the ground truth answer, a reward of 1 is provided for this final step, otherwise 0. The loss function is divergence of the estimated value from the dataset Monte-Carlo return-to-go:  
+
+$$
+\mathcal{L}_{\mathcal{Q}}=\mathbb{E}_{(s,a)\sim\mathcal{D}}\left[\mathcal{L}_{K L}\left(Q(s,a),\mathcal{R}^{\mathcal{D}}(s,a)\right)\right]
+$$  
+
+One instantiation of the divergence is soft binary cross-entropy, where each step $(\mathbf{s}_{t},\mathbf{a}_{t})$ has a target $y_{t}\in[0,1]$ :  
+
+$$
+\mathcal{L}_{\mathrm{process}}=-\sum_{t}\left[y_{t}\log\hat{y}_{t}+(1-y_{t})\log(1-\hat{y}_{t})\right],
+$$  
+
+where $\hat{y}_{t}=\mathcal{R}^{\mathcal{D}}(s,a)$ is the predicted probability that the step $(\mathbf{s}_{t},\mathbf{a}_{t})$ is correct.  
+
+In contrast, an outcome reward model (ORM) only evaluates the correctness of the final answer, disregarding individual reasoning steps. Let o represent the final outcome of the reasoning process. We can similarly learn an ORM through binary classification, where the final outcomes $\mathbf{o}$ are labeled with binary labels youtcome $\in\{0,1\}$ :  
+
+$$
+\mathcal{L}_{\mathrm{outcome}}=-\sum_{i}\left[y_{\mathrm{outcome},i}\log\hat{y}_{\mathrm{outcome},i}+(1-y_{\mathrm{outcome},i})\log(1-\hat{y}_{\mathrm{outcome},i})\right],
+$$  
+
+where $\hat{y}_{\mathrm{outcome},i}=R_{\mathrm{outcome}}(\mathbf{o}_{i})$ is the predicted probability that the final outcome $\mathbf{o}_{i}$ is correct.  
+
+Collecting large amounts of process-level feedback can be undesirable due to noise in the process labels as well as the higher cost of collection. This motivates approximating process-level supervision with a learned value function $Q(s,a)$ can be learned through sparse feedback (outcome rewards).  
+
+Linear search in test-time inference: Test-time inference often requires efficient search strategies using to navigate the potential solution space. We define linear search algorithms as those that operate with a fixed compute budget and a predetermined width of potential completions. Prior work such as Snell et al. (2024) leverages linear search algorithms like Beam Search and Best of $\mathbf{N}$ to find near-optimal solutions during inference. In Best of $\mathbf{N}$ , $n$ candidate solutions are generated and the solution with the highest evaluation score $S$ is selected:  
+
+$$
+\hat{y}=\arg\operatorname*{max}_{y_{i}\in\{y_{1},y_{2},\ldots,y_{n}\}}S(y_{i})
+$$  
+
+where $S(y_{i})$ denotes the evaluation score of the $i$ -th candidate $y_{i}$ , and $\hat{y}$ is the selected output.  
+
+In beam search, multiple solution paths are expanded in parallel. At each step $t$ , the algorithm retains the top $k$ candidates based on their scores $\bar{S(y_{1:t})}$ :  
+
+$$
+\mathcal{B}_{t}=\mathrm{Top-}k\left(\{y_{1:t-1}\cdot y_{t}\ |\ y_{t}\in\mathcal{Y}\},S(y_{1:t})\right)
+$$  
+
+where $B_{t}$ represents the set of the top $k$ sequences at step $t,\,\mathcal{V}$ is the set of all possible tokens, and $S(y_{1:t})$ is the evaluation score of the sequence $y_{1:t}$ . These methods provide varying tradeoffs between computational efficiency and search accuracy, helping to explore the reasoning space effectively during inference.  
+
+Linear Search methods can be effective in parallel sampling scenarios, where sequential revisions of a solution are not possible, enabling the discovery of better solutions than single-shot sampling from the model. A non-linear search algorithm, in contrast, can adaptively allocate inference time compute. This can allow for more inference time compute to be spent on portions of the problem that are harder to get right. To build a non-linear search algorithm, we will formalize our intuitions in a multi-step single-turn MDP for reasoning, which we describe next.  
+
+![](images/fb8b51fc465f9d207fc390e09bfd89f820c41e37ad96405271df8ec4c4ef47e7.jpg)  
+Linear Search  
+
+![](images/5ad61787799252af705b64dfabe5ab6acc9f2e833250863211c07166a164d6b2.jpg)  
+Figure 2: Linear vs Non-Linear Search Linear search assumes a fixed compute allocation during inference time. However, with Non-Linear search, we can adaptively allocate inference time compute to parts of the reasoning chain that require more computation.   
+Non-Linear Search  
+
+Multi-step, Single-turn Markov Decision Process (MDP) for Reasoning: A reasoning chain in test-time inference can be conceptualized as a multi-step Markov  
+
+Decision Process (MDP). We formally define a reasoning chain as a trajectory with a bounded horizon $H$ , represented as $(s,a,r,t)_{0}^{H}$ . These trajectories originate from a dataset of prompts $x$ and responses $y$ , which is decomposed into several semantic steps $a_{1},a_{2},\cdots,a_{t}$ that, when concatenated, reconstruct the original response $y$ .  
+
+We formally define an MDP as:  
+
+$$
+\mathcal{M}=(\mathcal{S},\mathcal{A},\mathcal{T},R,\gamma,\rho_{0})\,,
+$$  
+
+where:  
+
+• $\boldsymbol{S}$ : The state $s_{i}$ at any step $i$ includes the current prompt $x$ and the sequence of previously selected semantic steps a0...i−1.   
+• $\boldsymbol{\mathcal{A}}$ : The action $a_{i}$ involves selecting the next semantic step in the reasoning chain.   
+• $\tau$ : The transition dynamics function is the deterministic concatenation of the state and action: $P(s^{\prime}|s,a)=\mathrm{concat}(s,a)$ .   
+• $R$ : The reward $r=R(s,a)$ , which is a function of the current state and action, evaluates the quality or relevance of the selected semantic step within the given context.   
+• $\gamma$ : The discount factor.   
+• $\rho_{0}$ : The initial state distribution, representing the distribution of initial prompts $x_{i}$ .  
+
+This MDP $\mathcal{M}$ allows us to define familiar constructs such as a policy $\pi(a|s)$ and a value function $Q(s,a)$ at a stepwise level.  
+
+
+
+\section{3 BACKTRACKING FOR SEQUENTIAL RESPONSE IMPROVEMENT  }
+
+
+As explored in the preliminaries, a linear search algorithm may be a suboptimal formulation for search. To explore this further, consider a didactic problem where an LLM needs to generate a repeating sequence of numbers from 0 to 9. In particular, at each step $t$ , the model has 10 possible actions corresponding to the digits 0 through 9, with the correct action determined by the modulus operation $t$ mod 10, which produces the next digit in the sequence. The LLM answer is judged after $N\;=\;1500$ tokens through exact match with the desired sequence. The task is represented in Figure 3.  
+
+Now, consider a base language model (policy) that is mostly proficient at producing the correct digit at each step but struggles specifically with  
+
+![](images/782824841c11e4d94d819f7772254c4ca39cfafd6adc9cef6344533a8a0c2591.jpg)  
+
+Figure 3: Didactic Task: Mod 10 sequence generation. The state is the context or the set of characters generated so far. The action is a single character that is generated. The horizon of generation is 1500 characters. The reward is provided at the outcome level, whether the sequence matches the target sequence.  
+
+generating the digit 6 when $t$ mod $10\,=\,6$ . Here, the model correctly outputs 6 only $5\%$ of the time and incorrectly outputs 1, leading to significant errors in the sequence. We formally define the base policy as:  
+
+$$
+\pi_{\mathrm{base}}(a_{t}\mid s_{t})={\left\{\begin{array}{l l}{\operatorname*{Pr}(a_{t}=6\mid t\equiv6\pmod{10}=0.05\quad{\mathrm{if~}}t\equiv6\quad{\mathrm{mod~}}10,}\\ {\operatorname*{Pr}(a_{t}=1\mid t\equiv6\quad{\mathrm{mod~}}10)=0.95\quad{\mathrm{if~}}t\equiv6\quad{\mathrm{mod~}}10,}\\ {\operatorname*{Pr}(a_{t}=d\mid t\equiv d\mod{10})=1\qquad{\mathrm{if~}}t\equiv d\mod10,d\neq6.}\end{array}\right.}
+$$  
+
+When generating a long sequence of characters $N=1500$ , this error in generating 6 reliably (i.e., whenever $t$ mod $10=6$ ) compounds exponentially and results in a substantially wrong sequence. Over 1500 steps, there are 150 opportunities for the model to output the digit 6, but with a $5\%$ success rate, it correctly outputs 6 in only $\approx8$ instances, leading to 142 errors.  
+
+3.1 EXAMINING LINEAR AND NONLINEAR SEARCH IN THE DIDACTIC TASK:  
+
+Let’s examine how a linear search algorithm like Best-of-N would perform in revising this incorrect sequence. If we sequentially apply Best-of-N to revising an incorrect solution, and assume each error is uncorrelated, the expected number of samples required to generate a fully correct sequence becomes exponential in the number of errors: $\dot{\boldsymbol E}[\boldsymbol N]\,\dot{=}\,20^{150}$ . This requires an impractically large number of samples to generate a fully correct sequence in expectation, rendering linear search methods ineffective for this task.  
+
+Can we instead adaptively utilize our compute resources through non-linear search? A common failure mode for linear search is that the search can reach an unrecoverable state (e.g., a mistake in the last steps of a proof), leading to subsequent incorrect steps. By allowing the model to backtrack to a point in the solution before the irrecoverable state, we can give the model an opportunity to try again and correct its errors. Additionally, if multiple uncorrelated errors exist in a solution, this process can be repeated until the problem is solved correctly or the sample budget is exhausted. This adaptive approach prevents wasting computation on parts of the solution that are already correct.  
+
+For intuition, let’s apply a sequential backtracking procedure to our didactic problem. For purposes of understanding, we start with the simpler scenario where we know the step where a mistake occurs from an oracle. We can backtrack to the step before the mistake and use the same linear search algorithm (Best-of-N) to correct this single mistake, which would require $E[N]=20$ samples in expectation. By performing multiple iterations of revisions and retaining the best solution so far, we can solve the problem in a much more tractable manner, with the total expected number of samples being linear in the number of errors: $E[N]=20*150$ .  
+
+This motivates the need for non-linear search approaches such as backtracking. While parallel algorithms like Best-of-N or Beam Search can perform well in some scenarios, they become computationally expensive when revisions are required, as they necessitate generating a large, fixed number of samples from the beginning of the solution. For challenging or long-horizon problems, this approach is computationally prohibitive, as significant computation could be wasted on generating tokens for parts of the solution that are already correct or occur after an unrecoverable mistake has been made. Next, we will construct a framework for effective backtracking.  
+
+
+
+\section{3.2 DEFINING THE BACKTRACKING FRAMEWORK FOR SOLUTION REVISION  }
+
+
+In this work, we instantiate non-linear search through a novel sequential improvement and backtracking framework for solving reasoning problems. We build a setup to realize a practical implementation of this framework by answering the following key questions: (1) How can problematic parts of a solution be identified and revised?, (2) Can we leverage the history of sequential revisions to better guide search and identify problem parts of a solution, and (3) What are practical considerations to build a robust framework for backtracking? We consider each of these key questions in the following discussion.  
+
+Localizing incorrect steps with PRMs. The first key component of the framework is identifying where in the solution a mistake is made. One natural choice for this is the advantage function, $A^{\pi}(s,a)$ , defined as:  
+
+$$
+A^{\pi}(s,a)=Q^{\pi}(s,a)-V^{\pi}(s)
+$$  
+
+At a particular state (i.e context of a reasoning chain), the advantage function measures the difference in the expected success of a particular action (i.e step in the reasoning chain) compared to a baseline $V^{\pi}(s)$ , or the expected success of actions queried from a proposal distribution or base policy. Intuitively, here the baseline can be viewed as a form of calibration/normalization, where the advantage function not only considers the expected success rate (PRM, $Q^{\pi}(s,a))$ ) but the success rate relative to the performance of the proposal distribution or policy.  
+
+When the advantage function is low for an action within a trajectory, this indicates that this action may be a poor sample from the proposal distribution in expectation. Therefore, resampling may be desirable as a better action from the proposal distribution can be queried. This motivates using the minimum advantage step within a trajectory $\tau$ to revise from:  
+
+$$
+i_{r e v i s e}=\operatorname*{min}_{i}A(s_{i},a_{i}),i\in\{1,\ldots,H\}
+$$  
+
+where $H$ is the horizon of a trajectory $\tau$ .  
+
+Modeling two different functions, $Q^{\pi}(s,a)$ and $V^{\pi}(s)$ is undesirable due to computational inefficiencies in training and querying both functions. One thing we can leverage is that the dynamics of the underlying MDP (as seen in Section 2) is deterministic. Thus, we can choose to model only a Q-value function (PRM), $Q^{\pi}(s,a)$ and use it to compute $V^{\pi}(s)$ , but querying it at the previous state, computing the advantage as the value difference between subsequent steps within the trajectory.  
+
+$$
+\begin{array}{r}{A^{\pi}(s^{\prime},a^{\prime})=Q^{\pi}(s^{\prime},a^{\prime})-Q^{\pi}(s,a),\;\;\mathrm{where}\;\;s^{\prime}=c o n c a t(a,s),}\\ {i_{r e v i s e}=\displaystyle\operatorname*{min}_{i}Q^{\pi}(s_{i},a_{i})-Q^{\pi}(s_{i-1},a_{i-1}),i\in\{2,\ldots,H\}}\end{array}
+$$  
+
+This reformulation allows us to additionally view the advantage as a measure of progress, or how much an action contributes to the success of a trajectory.  
+
+Suffix Generation and Stopping Criteria. Once the revision step $i_{r e v i s e}$ has been identified, we can resample the entire suffix of the solution, conditioned on the partial solution before the minimum advantage step with one of two approaches: (1) Best-Of-N sampling or (2) Beam Search. The value function at the final (solution) step is an outcome verifier. Therefore, we can use the value of the verifier at the final step of the solution to determine which solution to keep. Additionally, we can do this process sequentially, allowing for subsequent revisions from the previously modified reasoning chain(s). We perform this sequential backtracking process a maximum of $M$ times, ensuring that the revision process does not continue indefinitely and we can control the sample budget.  
+
+Summary of the Backtracking Framework This framework offers an effective approach for solving complex reasoning problems, allowing for robust, incremental improvements that lead to more refined and accurate solutions. We summarize the algorithm framework in Algorithm 1.  
+
+
+
+\section{3.3 ITERATIVE REVISIONS AS A MULTI-STEP, MULTI-TURN MDP.  }
+
+
+An additional approach to improving compute efficiency of search is to make the process verifier aware of what did not work well in prior attempts. This should allow the verifier to adapt its predictions over the course of the search process, which intuitively should translate to better value predictions. To do this we need to extend verifiers with some notion of “state” of the search process. This can be done by conditioning the verifier on a linearization of the entire search procedure so far, which we denote as in-context verifiers. This can be formalized as follows:  
+
+Sequential Revisions for test-time inference can be viewed as a multi-step and multi-turn Markov Decision Process (MDP). We define a multi-turn revision trajectory $\tau$ as $\tau~=~\{s,a,r,t\}_{0}^{H}$ of a bounded horizon $H$ , where each of the $N$ revisions has a sub-horizon (i.e., token lengths) $H_{1},H_{2},\cdot\cdot\cdot H_{N}$ . These revision trajectories are constructed from several individual reasoning chains consisting of a prompt $x$ and response $y$ . Here, the response is broken into several semantic steps $a_{1},a_{2},\cdot\cdot\cdot a_{t}$ , which when concatenated form the original response $y$ .  
+
+Given a dataset of revision trajectories, we can formally we define a modified MDP ${\mathcal{M}}_{\mathrm{multiturn}}$ from our Multi-Step, Single-Turn MDP $\mathcal{M}$ (Defined in Section 2) as:  
+
+$$
+\mathcal{M}_{\mathrm{multiturn}}=\left(S_{\mathrm{multiturn}},\mathcal{A},\mathcal{T},R,\gamma,\rho_{0}\right),
+$$  
+
+where the state $s_{i}~\in~S_{\mathrm{multiturn}}$ at step $i$ in revision turn $k$ consists of the current prompt $x$ , the sequence of current turn reasoning steps $a_{0\ldots i-1}^{(k)}$ , and previous turns reasoning steps $a_{0\dots H}^{(1\dots k-1)}$ turnwise context c0...k−1.  
+
+Learning In-Context Value Verifiers. Given the MDP ${\mathcal{M}}_{\mathrm{multiturn}}$ , we can define familiar reinforcement learning objects such as a policy $\pi(a|s)$ and a value function $Q^{\pi}(s,a)$ . These objects can be designed to interact at both a stepwise and turnwise level, enabling a comprehensive supervision process that leverages the history of past revisions and turnwise feedback.  
+
+The value function $Q(s,a)$ can be conditioned on both the current reasoning chain and the steps from prior revisions. Let $\{y_{1},y_{2},\dots,y_{k-1}\}$ represent the set of past $k-1$ revisions, where each revision yj has its own sequence of steps {a(1j ), a(2j ), . . . , a(Hjj)}. The value function at any step i within the $k$ -th revision can then be expressed as:  
+
+$$
+Q(s_{n e w},a),s_{n e w}=(x,a_{1}^{(1)},a_{2}^{(1)},\ldots,a_{H_{1}}^{(1)},\ldots,a_{i}^{(k)},c_{0\dots k-1},k)
+$$  
+
+Here the turnwise context $c_{0...k-1}$ are additional tokens in the form: $I s$ the turn correct? yes or no. This token sequence allows the model to understand whether the steps taken in prior revisions were correct or incorrect, providing the value function the outcome of its previous attempts in context.  
+
+We can model the cumulative Monte-Carlo return-to-go estimate over all future revisions (given a fixed horizon of revisions), accounting for the potential improvement or deterioration of the solution  
+
+as further revisions are made. The cumulative return $\mathcal{R}_{t}$ for step $t$ within the $k$ -th revision is:  
+
+$$
+\mathcal{R}_{t}=\sum_{i=t}^{H_{k}}\gamma^{i-t}R(s_{i},a_{i})+\sum_{j=k+1}^{N}\sum_{o=1}^{H_{j}}\gamma^{\left[(H_{k}-t)+\left(\sum_{b=k+1}^{j}H_{b}\right)+o\right]}R(s_{o},a_{o})
+$$  
+
+where $H_{k}$ is the sub-horizon of the current revision, $N$ is the total number of revisions, and $s_{o},a_{o}$ denote the states and actions in future revisions. This cumulative return models the expected future rewards from not just the current revision but also subsequent revisions, allowing the policy to make decisions that optimize long-term performance across all revision stages.  
+
+Intuitively, the conditioning of the value function to leverage the historical context provided by prior revisions. This enables models to implement effective strategies such as becoming more confident about a certain mistake, allowing for error correction in subsequent attempts, or more confident about previously successful steps, allowing for further positive reinforcement. In contrast, the single-turn value function would potentially lead to the same deterministic set of failure actions over revision turns as the value function is unable to adapt to previous attempts that the policy has tried.  
+
+3.4 PRACTICAL CONSIDERATIONS FOR BACKTRACKING  
+
+Tempering Distribution Shift in Process Supervision. A primary challenge in maintaining the robustness of the value function is the distribution of responses it is trained on. Typically, the value function is initialized using an offline dataset, such as PRM800K, but a significant distribution shift often occurs between the policy’s responses during inference and the data used for the initial value function training. This shift can lead to miscalibration, where the value function inaccurately assesses the quality of the base policy’s step proposals, resulting in sub-optimal outcomes.  
+
+![](images/fe44c473eef6c4f2878b932c368ad9b6115898ea45d50c56e793455d096a5446.jpg)  
+Figure 4: Outcome Accuracy of PRM. We evaluate the outcome accuracy of different variants of the process supervision models. Here, both on-policy sampling and label-balancing leads to higher accuracies for successful and failure trajectories.  
+
+for effectively guiding the policy model during   
+both backtracking for revision step identification and rollout selection. This calibration becomes particularly important when dealing with steps in backtracking as misidentifying an error can be catastrophic, where an unrecoverable state can be encountered due to errors in the base policy. An unrecoverable state can significantly hinder the success of the solution chain of thought, making it essential to pinpoint where errors occur in the solution process. In particular, the chosen revision step must precede the point where an unrecoverable error is introduced, ensuring that the revision process can correct the trajectory.  
+
+To counteract this distribution shift, the PRM is trained with on-policy samples as done in Snell et al. (2024); Luo et al. (2024), allowing the PRM to better identify specific types of errors made by the proposal model during inference.  
+
+Another source of distribution shift is the set of trajectories encountered in revisions being primarily unsuccessful as successful trajectories do not require further revision. Thus, we introduce a label-balancing mechanism during finetuning. Specifically, let $\ensuremath{\mathcal{D}}=\ensuremath{\mathcal{D}}_{\mathrm{positive}}\cup\ensuremath{\mathcal{D}}_{\mathrm{negativ}}$ e be a dataset where $\ensuremath{\mathcal{D}_{\mathrm{positive}}}$ and $\mathcal{D}_{\mathrm{negative}}$ represent successful and unsuccessful trajectories re  
+
+![](images/4963cc1a6ae92f71d6cde65dc7fab6bee781bb34efd435607b59c74b5019c13d.jpg)  
+Figure 5: Learnt PRM Values: Here we plot the value based PRM for successful and unsuccessful trajectories. For successful trajectories, we see monotonically increasing values that match the target Monte-Carlo Return. For negative trajectories, we see the value increase and then decrease after a mistake is made, allowing us to identify, where to revise from.  
+
+spectively, and both sets are balanced such that $|\mathcal{D}_{\mathrm{positive}}|=|\mathcal{D}_{\mathrm{negative}}|$ . The final objective function for fine-tuning becomes:  
+
+$$
+V_{\theta}=\arg\operatorname*{min}_{\theta}\Big[\mathbb{E}_{x,a\sim{\mathcal{D}}_{\mathrm{positse}}}{\mathcal{L}}(V_{\theta}(x),{\mathcal{R}}^{\mathcal{D}_{\mathrm{positse}}(s,a)})+\mathbb{E}_{x,a\sim{\mathcal{D}}_{\mathrm{negaive}}}{\mathcal{L}}(V_{\theta}(x),{\mathcal{R}}^{\mathcal{D}_{\mathrm{negaive}}(s,a)})\Big]
+$$  
+
+![](images/fc7a01ed9e2e1f63e47923a86263cff83e9ab4050bfcd8c04b532c43dc49969e.jpg)  
+Figure 6: Backtracking allows for better test time sample efficiency, measured by generated tokens vs accuracy. Here we allow for up to 4 revisions using the Oracle PRM (left) and 8 revisions with the learnt PRM (right). We compare against two baselines: revising from the first step and revising from a random step to show the efficacy of localizing errors with the PRM. The choice of suffix generation after a step to revise from is identified is Best-of-N sampling with $\scriptstyle\mathrm{N}=4$ for the oracle PRM and $_{\mathrm{N}=16}$ for the learnt PRM.  
+
+Advantage smoothing for effective backtrack step selection. During inference, estimation errors in computing the advantage function can lead to suboptimal revision step selections. To address this, we introduce a strategy to smooth the value function during the selection process, which we denote as minimum advantage with tie margin, where the revision step with the smallest advantage value is selected, but a margin of tolerance is allowed.  
+
+Formally, let $A(i)\ =\ A(s_{i},a_{i})$ denote the advantage function for step $i$ in a trajectory $\tau=$ $\{(s_{i},a_{i})\}_{0}^{H}$ , and $\omega$ denote the tie margin. We first identify the minimum advantage value $A_{\mathrm{min}}=$ $\operatorname*{min}_{i}A(i)$ , and then select the first step $i_{s m o o t h}$ satisfying:  
+
+$$
+i_{s m o o t h}=\operatorname*{min}_{j}\left\{j:\left|A_{\operatorname*{min}}-A(j)\right|\leq\omega\right\}
+$$  
+
+This relaxation allows for a more conservative step to be selected for backtracking, restricting the presence of incorrect steps to be present in the context of the model while decoding.  
+
+
+
+\section{4 EXPERIMENTAL EVALUATION  }
+
+
+To evaluate how backtracking would perform on reasoning problems, we consider mathematical reasoning problems from the Hendrycks Math dataset (Hendrycks et al., 2021) for model evaluation. This dataset spans a broad range of mathematical topics, from basic arithmetic to advanced university-level subjects such as algebra, calculus, and geometry. It is designed to assess a model’s proficiency in solving both straightforward and complex mathematical problems. We leverage the processed datasets in Sun et al. (2024) which uses outcome/process level supervision from Lightman et al. (2023). To validate the backtracking framework, we explore three key experimental questions.  
+
+Can we more efficiently leverage test-time compute than linear search algorithms? We first define a metric that captures the balance between inference resources and model performance: the total number of tokens generated across sequential revisions versus the accuracy of the generated solutions in these revisions. The number of generated tokens is a valid element to consider for efficiency as LLM providers such as Together, OpenAI, and Google generally measure cost as a function of both the input and output tokens. Additionally, accuracy is an established metric for performance in reasoning problems such as those found in Hendryks MATH, where a solution can be verified as correct or incorrect by comparing the generated answer with the ground truth answer.  
+
+![](images/e98f2651204652f601f03c745cdf6015cb0a101e7201b0644029c9a2aa3cf223.jpg)  
+Figure 7: Outcome and Process Metrics for Value Functions: We plot the aggregate left: outcome accuracy and right: process-wise MSE from ground truth Monte-Carlo return-to-go. For both metrics, we find that parameterizing the PRM in the Multi-Turn formulation leads to better performance. To study sequential revisions, we collect an on-policy dataset utilizing the test-split of Hendryks Math (Hendrycks et al., 2021) with 100 incorrect solutions. From this point sequential revisions  
+
+are performed with our framework and two baselines, backtracking to the initial step and random step, to evaluate the success of error localization in our framework. This analysis with two variants of the PRM: an oracle PRM and a learnt PRM as seen in Figure 6. The oracle PRM, estimated by rolling out at each step in the reasoning chain and looking at the success rate by comparing the solution with the ground truth as done in prior work (Wang et al., 2023), provides an upper bound on performance, while the learnt PRM demonstrate the practical effectiveness of our approach. For the oracle PRM, we find that backtracking allows us to see $a\approx15\%$ improvement over linear search (backtracking from the first step) and significantly outperforms backtracking from a random step, demonstrating the necessity of accurate error localization. We see similar trends with the learned value functions, comparing a single-turn value function, multi-turn (in-context) value function, and baselines of revising from the first and random steps.  
+
+![](images/07b91228eac344078e9efa5f8b12df5ec327921c204e1e33a8c697df39ac1f4b.jpg)  
+Figure 8: Evolution of Values over Sequential Revisions in a Reasoning Problem: We plot the evolution of left: Value (PRM) and right: Advantages for steps in a reasoning problem. In sequential revisions, the value of the trajectory is able to be successfully optimized to be monotonically increasing over steps. The advantage is able to successfully identify a problematic step midway in the trajectory, leading to a successful revisions.  
+
+How effective are the learnt PRMs at localizing errors for backtracking? One key component of our framework is the learnt process verifier. If the verifier is inaccurate for intermediate steps in the reasoning problem, revisions can be suboptimal, especially if after an unrecoverable state. To evaluate the performance of the PRMs, we consider two metrics: (1) outcome accuracy of the PRM, allowing us to determine if the PRM can correctly identify if a reasoning chain is incorrect/correct, and (2) step-wise MSE from the ground truth monte-carlo return-to-go estimate, to evaluate how the PRM performs on intermediate reasoning steps on held-out queries and steps. We additionally use this metric to compare different parameterizations of our value function such as the turn-independent and turn-dependent PRMs. As seen in Figure 7, the absolute performance of the PRM is high for both variants of the PRM with a high outcome accuracy and low step-wise MSE. Additionally, the in-context, multi-turn PRM can lead to both better outcome accuracy and step-wise MSE. These metrics show the efficacy of the learnt PRM at both an outcome and process level, enabling to use the PRM for both identifying if an error occurred in a reasoning chain and where it did.  
+
+![](images/dd24c5e4ffd996481ef81b3a27d2ca9284f3f3422f20547f828064b36e324e4d.jpg)  
+Figure 9: Qualitative Example of Revision: In the example revision, the PRM is able to localize where an error is made in the incorrect solution and correct a modular arithmetic mistake. Futhermore, we qualitatively examine how the behavior of the PRM (value function) evolves over reasoning steps as seen in Figure 5. For correct solutions, the value function should predict monotonically increasing values, while for incorrect solutions, predict lower values after errors occur.  
+
+Do sequential revisions through backtracking exhibit desired behaviors? We conduct a qualitative analysis of the revision trajectories generated by our backtracking framework. We present a visualization of the revision trajectories in Figure 9, highlighting in an example reasoning problem in the MATH dataset, an error in modular arithmetic was correctly identified by the PRM.  
+
+Additionally, we provide visualizations of the evolution of the learnt value function and corresponding advantage over sequential revisions in Figure 8. The advantage is a useful criterion to identify where a mistake has been made in the trajectory, where resampling just a single revision leads to a successful outcome. Additionally, backtracking enables effective ”optimization” over the learnt values, where future revisions have a larger value over reasoning steps than previous revisions.  
+
+
+
+\section{5 RELATED WORK  }
+
+
+Learning and leveraging process-level supervision for LLMs The idea of using process-level supervision was popularized in Uesato et al. (2022) and more recently in Lightman et al. (2023). Both of these works show the promise of using PRMs for MATH. Building upon this idea, papers such as Math-Shepherd (Wang et al., 2023), MiPS (Wang et al., 2024), and OmegaPRM (Luo et al., 2024) present more efficient automated ways to gather data for process-level rewards.  
+
+Parallel sampling in test-time inference Test-time inference with search has been extensively studied in works such as Feng et al. (2024); Yao et al. (2023); Hao et al. (2023). One key part of this equation is the way samples are selected (Welleck et al., 2024). A common paradigm involves generating multiple trajectories in parallel, then employing some type of model or function to merge these trajectories. In particular, during test-time inference, the integration of a reward model with a proposal distribution (LLM) can be employed to refine the output responses to a given prompt. For instance, search algorithms such as best-of-N (Charniak & Johnson, 2005) and beam search have been explored in works such as Snell et al. (2024), which leverage reward models to select the most promising candidate samples in reasoning tasks. Another notable family of techniques include self-consistency (Wang et al., 2023) and weighted majority voting (Uesato et al., 2022), which are designed for factual queries with extractable answers. In self-consistency, the language model selects the responses it generates with the highest frequency across multiple samples. This work can be used in conjunction to our approach, without the use of a verifier. More recent methods such as universal self-consistency (Chen et al., 2023) and branch-solve-merge (Saha et al., 2024) explicitly prompt language models to merge the sampled trajectories.  
+
+Iterative revisions in test-time inference An alternative paradigm to parallel sampling in testtime inference is iterative revisions of reasoning steps. Prior work such as RISE (Qu et al., 2024), SCoRe (Kumar et al., 2024) and Self-Refine (Madaan et al., 2023) parameterize a proposal distribution that can correct mistakes in an incorrect solution. This approach is complementary as our fixed proposal distribution can be substituted with the modified learned distribution from these works. Additionally, in statistics and Markov chain optimization/inference, Sitewise Resampling and similar approaches (Yang et al., 2019; Wang et al., 2024; Liu et al., 2000; Gagnon et al., 2023) allow for the sequential reuse of generated samples.  
+
+
+
+\section{6 DISCUSSION, CONCLUSION, AND LIMITATIONS  }
+
+
+In this work, we present a framework for sequential response improvement for reasoning problems with PRM based backtracking. Backtracking allows the model to localize where in the response an error has been made and make targeted revisions to efficiently resolve mistakes in a reasoning chain. We additionally introduce in-context process-supervision to allow the verifier to adapt its predictions throughout the search process conditioned on prior attempts at a solution, increasing confidence about a mistake it has made in the past and reinforcing behavior that has led to success. Evaluating this framework with oracle and learned verifiers in the MATH domain, we achieve a $\approx15\%$ improvement in test-time compute efficiency compared to linear search algorithms.  
+
+There are still many open questions and limitations. While we used a fixed proposal distribution for responses, methods like RISE (Qu et al., 2024) leverage self-improvement to steer the distribution. Could these approaches be combined to enhance sequential corrections? Additionally, our analysis focused on a single reasoning domain (math). Can we develop a general verifier applicable across domains such as code, legal reasoning, and robotic planning? How does scaling to multiple domains affect performance, especially in areas where stepwise reasoning is less clearly defined, like code? Finally, can we use sequential Monte-Carlo sampling approaches to use PRMs effectively?  
+
+
+
+\section{7 REPRODUCIBILITY STATEMENT  }
+
+
+For reproducibility, we provide the following details so readers can replicate the results found in our paper. Firstly, we provide algorithm pseudocode as seen in Algorithm 1, giving the reader transparency in how to replicate the backtracking framework.5.6.  
+
+
+
+

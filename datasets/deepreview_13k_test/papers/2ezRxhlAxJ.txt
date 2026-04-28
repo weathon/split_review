@@ -1,0 +1,224 @@
+\title{Efficient-vDiT: Efficient Video Diffusion Transformers With Attention Tile}
+
+\begin{abstract}
+Despite the promise of synthesizing high-fidelity videos, Diffusion Transformers (DiTs) with 3D full attention suffer from expensive inference due to the complexity of attention computation and numerous sampling steps. For example, the popular Open-Sora-Plan model consumes more than 9 minutes for generating a single video of 29 frames. This paper addresses the inefficiency issue from two aspects: 1) Prune the 3D full attention based on the redundancy within video data; We identify a prevalent tile-style repetitive pattern in the 3D attention maps for video data, and advocate a new family of sparse 3D attention that holds a linear complexity w.r.t. the number of video frames. 2) Shorten the sampling process based on multi-step consistency distillation; We split the entire sampling trajectory into several segments and perform consistency distillation within each one to activate few-step generation capacities. We further devise a three-stage training pipeline to conjoin the low-complexity attention and few-step generation capacities. Notably, with 0.1% pretraining data, we turn the Open-Sora-Plan-1.2 model into an efficient one that is 7.4x −7.8x faster for 29 and 93 frames 720p video generation with a marginal performance trade-off in VBench. In addition, we demonstrate that our approach is amenable to distributed inference, achieving an additional 3.91x speedup when running on 4 GPUs with sequence parallelism.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Diffusion Transformers (DiTs) based video generators can synthesize long-horizon, high-resolution, and high-fidelity videos (Peebles & Xie, 2023; OpenAI, 2024; Kuaishou, 2024; Lab & etc., 2024; Zheng et al., 2024; Esser et al., 2023; Yang et al., 2024b). The 3D attention is a core module of such models. It flattens both the spatial and temporal axes of the video data into one long sequence for attention computation and reports state-of-the-art generation quality (Lab & etc., 2024; Yang et al., 2024b; Huang et al., 2024). The computation of 3D attention often consumes the majority of the time during the entire forward propagation of a 3D DiT, especially with long sequences when generating extended videos. Thus, existing 3D DiTs suffer from prohibitively slow inference due to the slow attention computation as well as the multi-step diffusion sampling procedure.  
+
+This paper tackles the issue by simultaneously sparsifying 3D attention and reducing sampling steps to accelerate 3D DiTs. To explore the redundancies in video data (recall that by nature videos can be efficiently compressed), we examine the attention states in 3D DiTs and identify an intriguing phenomenon, referred to as the Attention Tile. As shown in Figure 1(a), the attention maps exhibit uniformly distributed and repetitive tile blocks, where each tile block represents the attention between latent frames1. This repetitive pattern suggests that not every latent frame needs to attend to all others. Moreover, the Attention Tile pattern is almost independent of specific input (Figure 1). With these, we propose a solution that replaces the original attention with a fixed set of sparse attention mask during inference (§3.3). Specifically, we constrain each latent frame to only attend to a constant number of other latent frames, reducing the complexity of attention computation from quadratic to linear.  
+
+We then consider shortening the sampling process of a video from 3D DiT to further amplify the acceleration effect. Inspired by the recent advance in diffusion distillation (Salimans & Ho, 2022; Song et al., 2023; Kim et al., 2023; Liu et al., 2023b; Sauer et al., 2023; Yin et al., 2024; Heek et al., 2024; Xie et al., 2024), we adopt a simple yet effective multi-step consistency distillation (MCD) (Heek et al., 2024) technique into our approach to achieve the efficient generation of compelling videos. In particular, we split the entire sampling trajectory into adjacent segments and perform consistency distillation within each one. We also progressively decrease the number of segments to improve the generation quality at rare steps.  
+
+![](images/692e8c74a9e7a393d3e6bf6045c9e2f49082db633e7f3e2e4d3c66f9863b94fa.jpg)  
+Figure 1: We observe the Attention Tile pattern in 3D DiTs. (a) the attention map can be broken down into smaller repetitive blocks. (b) These blocks can be classified into two types, where attention weights on the diagonal blocks are noticeably larger than on off-diagonal ones. (c) These blocks exhibit locality, where the attention score differences between the first frame and later frames gradually increases. (d) The block structure is stable across different data points, but varies across layers. We randomly select 2 prompts (one landscape and one portrait) and record the important positions in the attention map that accounted for $90\%$ $95\%$ , $99\%$ ) of the total. We printed the proportion of stable overlap of important positions across layers.  
+
+Due to the orthogonality between sparse attention and MCD, a naive combination is possible, such as directly distilling a sparse student 3D DiT from a pre-trained model. However, the initial gap between the sparse student and the teacher can be large so that the training suffers from a cold start. To tackle this issue, we introduce a more refined model acceleration process named EFFICIENT-VDIT. Initially, MCD is utilized to generate a student model with the same architecture but fewer sampling steps than the teacher. Subsequently, we determine the optimal sparse attention pattern for each head of the student and then apply a knowledge distillation procedure to the sparse model to maintain performance. With $0.1\%$ the pretraining data, we train Open-Sora-Plan-1.2 models into variants that are $7.8\times$ and $7.4\times$ faster, with a marginal performance trade-off in VBench. (Huang et al., 2024). In addition, we provide evidence that our approach is amenable to advances in distributed inference systems, achieving an additional $3.91\times$ speedup when running on 4 GPUs.  
+
+In summary, our contribution are:  
+
+1. We discover and analyze the phenomenon of Attention Tile in 3D full attention DiTs, and propose a family of sparse attention mask with linear complexity to address the redundancy.   
+2. We design a framework EFFICIENT-VDIT based on our analysis of Attention Tile, which turns a pre-trained 3D DiT to a fast variant in a data efficient manner.   
+3. We evaluate on two Open-Sora-Plan 1.2 models for 29 frames and 93 frames generation. EFFICIENT-VDIT achieves up to $7.8\times$ speedup with little performance trade-off on VBench and CD-FVD. We further demonstrate the potential of integrating our method with advanced distributed inference techniques, achieving additional $3.91\times$ with 4 GPUs.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Video Diffusion Transformers There is a rich line of research in diffusion based models for video generation (Ho et al., 2022; He et al., 2022; Luo et al., 2023; Wang et al., 2023c; Ge et al., $2023\mathrm{a}$ ; Chen et al., 2024b; Guo et al., 2023; 2024). More recently, Peebles & Xie (2023) introduces the architecture of Diffusion Transformers (DiTs), and several popular video generation models have been developed using the DiTs backbone, for instance, Ma et al. (2024); Zheng et al. (2024); Lab & etc. (2024); Yang et al. (2024b). More specifically, Lab & etc. (2024); Yang et al. (2024b) has explored the use of 3D Full Attention Transformers, which jointly model spatial and temporal  
+
+3D Full Attention DiT ConsistMenucltyi -SDtiestpillation Layer-wise Sparsity Search Knowledge Distillation Layer 1 Layer 2 Layer 1 Layer 2 Layer 1 Layer 2 Layer 1 Layer 2 Sampling: DDIM Attention: Tile SSpaeemdp: liFnags:t eCro; nAscisct: eHnicgyh Attention: Tile Attention: Adaptive Linear Sampling: Consistency Attention: Adaptive Linear Sampling: Consistency Speed: Slow; Acc: High Speed: Faster; Acc: High Speed: Fastest; Acc: Low Speed: Fastest; Acc: High EFFICIENT-VDIT takes in a pre-trained 3D Full Attention video diffusion transformer(DiT), with slow inference speed and high fidelity. It then operates on three stages to greatly accelerate the inference while maintaining the fidelity. In Stage 1, we modify the multi-step consistency distillation framework from (Heek et al., 2024) to the video domain, which turned a DiT model to a CM model with stable training. In Stage 2, EFFICIENT-VDIT performs a searching algorithm to find the best sparse attention pattern for each layer. In stage 3, EFFICIENT-VDIT performs a knowledge distillation procedure to optimize the fidelity of the sparse DiT. At the end, EFFICIENTVDIT outputs a DiT with linear attention, high fidelity and fastest inference speed. relationship, instead of previous models that separately model spatial and temporal relationship (e.g. one Transformer layer with spatial attention and the other with temporal attention (Zheng et al., 2024; Ma et al., 2024)). The design of 3D full attention has gained increasing popularity due to their promising performance. In this work, we tackle the efficiency problem specifically for 3D full attention diffusion Transformers. In addition, there is a line of research that combines video diffusion model with sequential or autoregressive generation. These methods may also achieve speedup due to their use of shorter sequence length. EFFICIENT-VDIT aims to speedup in a single diffusion forward, which is compatible with orthogonal to autoregressive manner methods (Henschel et al., 2024; Xiang et al., 2024; Chen et al., 2024a; Valevski et al., 2024). Accelerating diffusion inference Many work in diffusion models have been proposed to reduce the number of sampling steps to accelerate diffusion inference (Song et al., 2020; Lu et al., 2022a;b) (Liu et al., 2024). Song et al. (2023) proposes the consistency models which distills multiple steps ODE to one step. Wang et al. (2023b) extends CMs to video generation model. Li et al. (2024b) further extends the idea with reward model to speed up video diffusion model inference. Another line of research that accelerates diffusion models inference utilize multiple devices (Li et al., 2024c; Wang et al., $2024\mathrm{a}$ ; Chen et al., 2024d; Zhao et al., 2024). These works exploit the redundancy between denoising steps and use stale activations in distributed inference to hide communication overhead, and are naturally incompatible with work that reduce the redundancy between steps. In this work, we exploit the redundancy in attention computation, which is orthogonal to works that leverage distributed acceleration and redundancy between denoising steps. Our pipeline integrates a multi-step CM approach (Xie et al., 2024) by default, and in experiment, we show that it can also seaminglessly integrate with parallel inference. Sparsity in Transformer inference has been investigated in the context of Large Language Models (LLMs) inference, which can be decomposed into pre-filling and decoding stages (Yu et al., 2022). StreamingLLM discovers the pattern of Attention Sink, and keeps a combination of first few tokens and recent decoded tokens during decoding phrase (Xiao et al., 2023). Zhang et al. (2024a;b) adaptively identify the most significant tokens during test time. Video DiTs have different workload than LLMs, where DiTs perform a single forward in each diffusion step without a decoding phrase. In particular, our paper is among the first to explore sparse attention in the context of 3D Full Attention DiTs. In addition, our finding that Attention Tile is data-independent motivates us to design a solution which does not require inference time adaptive searching, which is a bottleneck in work such as Zhang et al. (2024b). Sparsity has also been studied in Gan and other diffusion-based models, yet we focus on the new architecture 3D DiT (Li et al., 2020; 2022). A recent paper (Wang et al., 2024b) also discusses the redundancy in DiTs models, but no performance has been shown. 3 EFFICIENT-VDIT  
+
+EFFICIENT-VDIT is a framework that takes in a 3D full attention DiT model $T$ , and outputs a DiT that runs efficiently during inference $T_{\mathrm{Fast}}$ . EFFICIENT-VDIT consists of three stages. The first stage (§3.2) performs a multi-step consistency distillation and outputs $T_{\mathrm{MCM}}$ , following the method developed in image diffusion models (Xie et al., 2024). The second stage (§3.3) takes in $T_{\mathrm{MCM}}$ , performs a one-time search to decide the optimal sparse attention mask for each layer, and outputs a model $T_{\mathrm{Sparse}}$ with the optimal sparse attention mask. The last step(§3.4) performs a knowledge distillation to preserve the model performance, using $T_{\mathrm{MCM}}$ as the teacher and $T_{\mathrm{Sparse}}$ as the student, following the distillation design in (Gu et al., 2024; Jiao et al., 2019).  
+
+In this section, we first introduce the characteristics of Attention Tile that motivate the design of the sparse patterns in Section 3.1. Then, we will introduce the framework EFFICIENT-VDIT by stages.  
+
+
+
+\section{3.1 PRELIMINARY: CHARACTERISTICS OF Attention Tile  }
+
+
+In $\S1$ , we briefly describe that the attention map consists of repetitive tile blocks. In this section, we dive into three characteristics that lead to our design and usage of a family of sparse attention masks.  
+
+Large Diagonals Tile blocks on the main diagonals has higher attention scores than off-diagonal ones. In Figure 1(b), we plot the attention scores at the main diagonal tile blocks, compared to attention scores at the off-diagonal blocks, on Open-SoraPlan-1.2 model (Lab & etc., 2024). We find that on average the main diagonal blocks contain values $2.80\times$ higher than the off-diagonal ones. This suggests a separate treatment of tile blocks on and off the main diagonals.  
+
+Locality Off-diagonal tile blocks are similar, but the similarity decreases with further distance. In Figure 1(c), we plot the relative differences between the first latent frame and subsequent latent frames. We find that the differences increase monotonically. This indicates a need to retain the computation of several tile blocks (i.e. more than one) to accommodate information in distant tile blocks.  
+
+Data Independent The structure of the tile is relatively stable across different inputs. We plot the overlap of indices for largest attention scores for different prompts. We observe that roughly $90\%$ of them coincide. This suggests reusing a fixed set of attention masks during inference for different inputs.  
+
+![](images/a3095e68ce2b7a72c2cb0286888ccde2f4367f3973c1f9a446ba302e56e1515d.jpg)  
+Figure 3: Exemplar attention mask $(2:6)$ . It maintains the attention in the main diagonals and against 2 global reference latent frames. Tile blocks in white are not computed.  
+
+Motivated by the above characteristics, we develop a family of sparse attention masks where we keep the attention computation in the main diagonal and the attention with a constant number of global reference latent frames. Figure 3 visualizes one instance of the attention mask. The formulation will be introduce formally in $\S\ 3.3$ .  
+
+
+
+\section{3.2 STAGE 1: MULTI-STEP CONSISTENCY DISTILLATION  }
+
+
+We follow (Xie et al., 2024) to perform a multi-step latent consistency distillation(MLCD) procedure to obtain $T_{\mathrm{MCM}}$ as classic CM map from an arbitrary ODE trajectory state to the endpoint. MLCD generalize CM by dividing the entire ODE trajectory in latent space into $S$ segments and carrying out consistency distillation for each segment independently which reduce the difficulty for training dramatically. MLCD obtains a set of milestone states marked as $\{t_{\mathrm{step}}^{s}\}_{s=0}^{S}$ . The loss for MLCD is:  
+
+$$
+\mathcal{L}_{\mathrm{MLCD}}=\left\|\mathrm{DDIM}\left(z_{t_{m}},f_{\theta}(z_{t_{m}},t_{m}),t_{m},t_{s\in\mathbb{P}}^{s}\right)-\mathrm{nograd}\left(\mathrm{DDIM}\left(z_{t_{n}},f_{\theta}(z_{t_{n}},t_{n}),t_{n},t_{s\in\mathbb{P}}^{s}\right)\right)\right\|_{2}^{2}
+$$  
+
+where $s$ is uniformly sampled from $\{0,\ldots,S\}$ , $t_{m}$ is uniformly sampled from $[t_{\mathrm{step}}^{s},t_{\mathrm{step}}^{s+1}].$ , $t_{n}$ is uniformly sampled from $[t_{\mathrm{step}}^{s},t_{m}]$ , $\mathrm{DDIM}(z_{t_{m}},f_{\theta}(z_{t_{m}},t_{m}),t_{m},t_{\mathrm{step}}^{s})$ means one-step DDIM transformation from state $z_{t_{m}}$ at timestep $t_{m}$ to timestep $t_{\mathrm{step}}^{s}$ with the estimated denoised image $f_{\theta}(z_{t_{m}},t_{m})$ and nograd refers to one-step diffusion without guidance scale.  
+
+Algorithm 1 Searching for the optimal set of sparse attention masks   
+Require: Available mask list from dense to sparse $[\mathrm{Mask}_{1},\mathrm{Mask}_{2},...,\mathrm{Mask}_{n}],$ , teacher model $M_{T}$ , student model $M$ , loss function $\mathcal{L}$ , number of timestep samples $m$ .   
+Require: Forward function FORWARD, threshold $r$ , which is the maximum tolerance for $\mathcal{L}$ . Require:   
+1: for each layer $l$ in model layers do   
+2: Initialize best mask $\leftarrow$ None   
+3: for $i$ from 1 to $n$ do $\triangleright$ Iterate over masks from dense to sparse 4: Apply $\mathrm{Mask}_{i}$ to the current layer $M^{(l)}$   
+5: Initialize $\mathcal{L}_{i}^{\mathrm{max}}\leftarrow-\infty$ ▷Initialize max loss for this mask 6: for each timestep $t$ sampled $m$ times from Uniform $(0,1)$ do   
+7: $\hat{y}\gets\mathrm{FORWARD}(M_{T}^{(l)},\mathrm{Mask}_{i},t)$   
+8: Compute $\mathcal{L}_{i}(t)\gets\mathcal{\bar{L}}(y,\hat{y})$   
+9: Update $\mathcal{L}_{i}^{\operatorname*{max}}\leftarrow\operatorname*{max}(\mathcal{L}_{i}^{\operatorname*{max}},\mathcal{L}_{i}(t))$ ▷Update the maximum loss 10: end for   
+11: if $\mathcal{L}_{i}^{\mathrm{max}}<r$ then   
+12: best mask $\leftarrow\mathbf{Mask}_{i}$ ▷Update the best mask if max loss is within threshold 13: else   
+14: break   
+15: end if   
+16: end for   
+17: Assign best mask to the current layer $M^{(l)}$   
+18: end for  
+
+3.3 STAGE 2: LAYER-WISE SEARCH FOR OPTIMAL SPARSE ATTENTION MASK  
+
+Sparse Attention Masks Following our analysis in $\S3.1$ , a desired sparse attention mask should separately treat on and off diagonal tile blocks, leverages the repetitive pattern in offdiagonal tile blocks while considering locality. In this paper, we aim on a family of masks that achieve linear compute complexity while prioritizing simplicity and implementation efficiency. Specifically, we simply keep tile blocks in the main diagonals(marked as golden color in Figure 3). For off-diagonal tile blocks, we keep a constant number of $k$ latent frames, and only retain attention between against these ”global reference frames” (mark as blue color in Figure 3). Since $k$ is constant, the overall complexity of the attention is linear with respect to the number of latent frames. For simplicity, we choose these $k$ reference frames uniformly from all $F$ latent frames. For clarity, we denote a mask with two numbers - $k:F-k$ . For example, the example figure 3 shows an attention mask of $2:6$ .  
+
+![](images/bb1a7ef6c917d994cee9d85ebab36eac7346f9ab8aa741d17902bb1f4d36e9d7.jpg)  
+Figure 4: Search results for OpenSora-Plan v1.2 model (29 frames). We verify that different layers have different sparsity in 3D video DiTs.  
+
+Layer-wise Searching For Attention Masks Previous studies has suggested that different layers exhibit different amount of sparsity (Wang et al., $2023\mathrm{a}$ ; Ge et al., 2023b; Yang et al., 2024a). Using the MSE difference of the final hidden states as a guidance, we develop a searching method to find the best combinations of attention masks across layers (Algorithm 1). Intuitively, we first perform a profiling process on $T_{M C M}$ . The profiling step loops over layers, and greedily selects the largest $k$ which does not incur a higher MSE difference than a predefined threshold $r$ . In the experiment section $(\mathrm{~\S~}4)$ , we show evidence that this is a key to maintaining video quality. For simplicity, we apply the greedy version of the search throughout the main paper. Figure 3.4 shows an exemplar algorithm output.  
+
+3.4 STAGE 3: KNOWLEDGE DISTILLATION WITH $T_{T C M}$  
+
+Stage 2 introduces performance drop since we significantly modify the attention mask. In Stage 3, we apply the method of knowledge distillation, using the model with full attention $T_{M C M}$ as the teacher, and the model with sparse attention $T_{S p a r s e}$ as the student (Hinton, 2015). We follow a similar design as knowledge distillation methods in Transformer models for Languages (Gu et al., 2024; Jiao et al., 2019), which combines the loss from attention output and hidden states output, over $L$ total layers.  
+
+$$
+\mathcal{L}_{\mathrm{total}}=\frac{1}{L}\left(\sum_{i=1}^{L}\left(\mathcal{L}_{\mathrm{attention}}^{(i)}+\mathcal{L}_{\mathrm{mlp}}^{(i)}\right)\right)+\lambda\mathcal{L}_{\mathrm{diffusion}},
+$$  
+
+where each term is defined as follows:  
+
+Attention Loss $\mathcal{L}_{\mathrm{attention}}$ : To calculate La(tit)ention, we apply the MSE loss between the output of the student’s self-attention layer $\hat{O}_{\mathrm{attn}}^{(i)}$ and the teacher’s self-attention layer output $\tilde{O}_{\mathrm{attn}}^{(i)}$ :  
+
+$$
+\mathcal{L}_{\mathrm{attention}}^{(i)}=\mathrm{MSE}(\hat{O}_{\mathrm{attn}}^{(i)},\tilde{O}_{\mathrm{attn}}^{(i)}).
+$$  
+
+MLP Loss Lmlp: We calculate L(mil)p as the MSE between the outputs of the student’s MLP layer Oˆ(i) p and the teacher’s MLP layer output O˜(mil)p:  
+
+$$
+\mathcal{L}_{\mathrm{mlp}}^{(i)}=\mathrm{MSE}(\hat{O}_{\mathrm{mlp}}^{(i)},\tilde{O}_{\mathrm{mlp}}^{(i)}).
+$$  
+
+In addition, we keep the diffusion loss $\mathcal{L}_{\mathrm{diffusion}}$ for the student model. In practice, we observed that the diffusion loss tends to be an order of magnitude smaller compared to other losses. To balance the contribution of the diffusion loss during the training process, we scale it by a factor $\lambda$ , ensuring it has a comparable impact on the overall loss function.  
+
+
+
+\section{4 EXPERIMENT  }
+
+
+We first present our experiment settings and evaluation metrics in $\S4.1$ . We then discuss system performance in $\S4.2$ , demonstrating the effectiveness on a single GPU and applicable to multiple GPUs. In $\S4.3$ , we compare the video quality with and without variants of our methods with VBench and CD-FVD (Huang et al., 2024; Ge et al., 2024). Finally, we show visualization results in $\S4.4$ of the generation quality for the original model, the MLCD model, and the final model.  
+
+4.1 EXPERIMENT SETUP  
+
+Models. We use the 29 and 93 frames models of the popular 3D DiT based Open-Sora-Plan family (Lab & etc., 2024). The model uses VAE inherits weights from the SD2.1 VAE (Rombach et al., 2022a), with a compression ratio of $4\mathrm{x}8\mathrm{x}8$ (temporal, height and width). For the text encoder, it uses mt5-XXL as the language model, and it incorporates RoPE as the positional encoding (Xue, 2020; Su et al., 2024). In addition to the VAE encoder, videos are further processed by a patch embedding layer that downsamples the spatial dimensions by a factor of 2. The videos tokens are finally flattened into a one-dimensional sequence across the frame, width, and height dimensions.  
+
+Metrics. We evaluate video quality using VBench and Content-Debiased Frechet Video Distance (FVD) (Huang et al., 2024; Ge et al., 2024). VBench assesses the quality of video generation by aligning closely with human perception , computed for each frame of the video and then averaged across all frames, providing a comprehensive assessment. CD-FVD measures the distance between the distributions of generated and real videos toward per-frame quality over temporal realism.  
+
+Baselines. We consider two models as the major baselines: the original Open-Sora-Plan model and the model after consistency distillation. Following the default settings of Open-Sora-Plan models Lab & etc. (2024), we use 100 DDIM steps for the original model, which is consistent across all experiments and training in the paper. For the MLCD model, we select the checkpoint with 20 inference steps as we empirically find that it achieves the best qualitative result.  
+
+Implementation details. We use FlexAttention from PyTorch 2.5.0 (Ansel et al., 2024) as the attention backend. We generate videos based on the VBench standard prompt list for VBench evaluation. To avoid potential data contamination in CD-FVD evaluation, we use a set of 2000 samples from the Panda-70M (Chen et al., 2024c) test set to build our real-world data comparison. As we use the CD-FVD score between real-world data and generated videos to evaluate the capacity of DiT models, the prompt style needs to align with the real-world data clip samples. Therefore, we randomly select prompts from the Panda-70M test set caption list for video generation by the models.  
+
+Training details. All models are trained using the first 2000 samples from the Open-Sora-Plan’s mixkit dataset.The global batch size is set to 2, and training is conducted for a total of 10000 steps, equivalent to 10 epochs of dataset. The learning rate is 1e-5, and the gradient accumulation steps is set to 1. The diffusion scale factor $\lambda$ is 100. The MLCD model is trained with 100 DDIM steps of the original model. The final model is trained with a 20-step MLCD model checkpoint.  
+
+
+
+\section{4.2 SYSTEM PERFORMANCE  }
+
+
+The major target of EFFICIENT-VDIT accelerates inference in a single GPU by using multi-step consistency distillation and sparse attention. In $\S4.2.1$ , we demonstrate the system speedup with various settings. In addition, we demonstrate an advantage of our method that it can be seaminglessly integrate with advanced parallel method, i.e. sequence parallelism, in $\S4.2.2$ .  
+
+
+
+\section{4.2.1 EFFICIENT-VDIT SPEEDUP ON A SINGLE GPU  }
+
+
+We test our approach on a single A100-SXM 80GB GPU. Table 1 shows the computation time for a single sparse attention kernel, while Table 2 presents the average execution time of all layers after layerwise search in Algorithm 1. ‘2:6’ refers to 2 global reference frames in Figure 3. Sparsity refers to the proportion of elements in the kernel that can be skipped. During testing, we consider only the attention operation, where the inputs are query, key, value, and mask, and the output is the attention output. We do not account for the time of VAE, T5, or embedding layers. The measurement method involves 25 warmup iterations, followed by 100 runs. The median of the $20\mathrm{th}$ to 80th percentile performance is used as the final result.  
+
+In Table 1, we observe that as the sparsity increases, the computation time decreases significantly. For instance, with a 2:6 attention mask, corresponding to a sparsity level of $45.47\%$ , the execution time reduces to $31.35~\mathrm{ms}$ , resulting in a $1.86\times$ speedup compared to the full mask. In Table 2, the effect of increasing threshold $r$ on speedup is evident. As $r$ increases, the sparsity grows, leading to a greater reduction in computation time and a corresponding increase in speedup. For example, with $r=0.050$ , the sparsity reaches $37.78\%$ , achieving a speedup of $1.64\times$ . When $r$ is further increased to 0.400, the sparsity level rises to $55.07\%$ , and the speedup improves to $2.25\times$ . This positive correlation between $r$ , sparsity, and speedup highlights the efficiency gains that can be achieved by leveraging higher sparsity levels.  
+
+Table 1: Speedup with different masks.   
+
+![](images/c67ee479342e785ef75dc8fe985400d9db156a7dac3d2e514d6509f110439b82.jpg)  
+
+Table 2: Speedup with different threshold $r$ .   
+
+![](images/a4162dc3e56d810bf83c2022faf9d7878a1532f29b4f549fa06e9c577adbdbc0.jpg)  
+
+4.2.2 EFFICIENT-VDIT SPEEDUP IN DISTRIBUTED SETTING  
+
+EFFICIENT-VDIT utilize sparse attention and consistency distillation to achieve speedup. These methods are orthogonal to the recent advances in distributed systems, mainly sequence parallelism based solution in LLMs (Liu et al., $2023\mathbf{a}$ ; Li et al., $2024\mathrm{a}$ ; Jacobs et al., 2023) and model parallelism (or with hybrid sequence parallelism) based solution in diffusion Transformers (Li et al., 2024c; Wang et al., 2024a; Chen et al., 2024d). We consider sequence parallelism in this section for is simplicity and empirical lower overhead (Li et al., 2024a;c; Xue et al., 2024).  
+
+Implementation We utilize the All-to-All communication primitives to implement sequence parallelism (Jacobs et al., 2023). In the attention computation, the system partitions the operations along the head dimension while keeping the entire sequence intact on each GPU, allowing a simple implementation of EFFICIENT-VDIT by applying the same attention mask as in the one GPU setting 2. As a result, EFFICIENT-VDIT is natively compatible with All-to-All sequence parallelism.  
+
+We conduct a scaling experiment with sequence parallelism on 4x A100-SXM 80GB GPUs, interconnected with NVLink. We observe a speedup of $3.68\times\mathrm{~-~3.91\times~}$ for 29 and 93 frames generation on 4 GPUs, which is close to a theoretical speedup of $4\times$ (Table 3). If reported 29 frames generation on multi-GPUs, $\mathrm{Ours}_{r=0.100}$ can achieve $25.8\mathrm{x}$ speedup on 4 GPUs and $13.0\mathrm{x}$ speedup on 2 GPUs.  
+
+Table 3: EFFICIENT-VDIT with sequence parallelism. Time as wall-clocktime per step.   
+
+![](images/36a7003ba6783e1697193846821b31923de142fe77f2caed14d95d3f1617b1f8.jpg)  
+
+Table 4: Results on Open-Sora-Plan with 93 frames and $720\mathrm{p}$ resolution. We select motion smoothness and temporal flickering from VBench as they measure frame transition, which are crucial for sparse attention methods.  
+
+![](images/f7443d3f1905c9edba4c7dbcfc3132661f10a9f1e505339c5f512e4c3fcc2edc.jpg)  
+
+
+
+\section{4.3 VIDEO QUALITY BENCHMARK  }
+
+
+Table 5: Open-Sora-Plan with 29 frames and $720\mathrm{p}$ resolution results on VBench and CD-FVD. $\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\$ indicates that this checkpoint is trained using the layerwise search strategy described in Algorithm 1, with a threshold of $r{=}0.1$ . We selects some dimensions for analysis, with the remaining dimensions provide in the Table 8.  
+
+![](images/477ec96d79f51ab72cf10f1879fd317f21dfd66ddb1cfec8b4f3415a5d79bb31.jpg)  
+
+In this section, we first evaluate EFFICIENT-VDIT with layerwise searching on CD-FVD and VBench (Huang et al., 2024; Ge et al., 2024). We compare with the baseline of the original OpenSora-Plan 1.2 model, and the model we obtain only using the MLCD method. We then conduct two ablation experiments to understand the effectiveness of the MLCD method, and our layerwise searching algorithm.  
+
+Table 5 demonstrates the main result of the 29 frames model. In VBench, We find that the results of all our search models are within $1\%$ final score against the Base model with no noticeable drop in several key dimensions. At higher acceleration ratios, such as $\mathrm{Ours}_{r=0.400}$ , the model maintains stable performance, with minimal deviations from the Base model, demonstrating the robustness of our approach while achieving significant speedups. However, we note that the imaging quality and subject class are lower than those of the base model. The reason why the VBench score remains within $1\%$ difference is that our model improves the dynamic degree. With more sparsity, our pipeline has the characteristics of being able to capture richer motions between frames, but trading off some degrees of imaging quality and subject class accuracy.  
+
+![](images/e95602f446cde1fb43c7efc3103568e45b0ab7535500bd3c13bfd568fd7b5354.jpg)  
+Figure 5: Qualitative samples of our models. We compare the generation quality between the base model, MLCD model, and after knowledge distillation. Frames shown are equally spaced samples from the generated video. EFFICIENT-VDIT is shortened as $\mathbf{\nabla}^{*}\mathbf{E}$ -vdit’ for simplicity.  
+
+In CD-FVD, our models with smaller acceleration ratios achieve better scores than MLCD model. For example, $\mathrm{Ours}_{r=0.025}$ achieves a score of 186.84 with a speedup of $5.85\times$ , outperforming the MLCD model. As the acceleration ratio increases, the score degrades as expected. $\mathrm{Ours}_{r=0.400}$ reaches a score of 231.68 with a speedup of $7.80\times$ , showing a trade-off between acceleration and performance. Our models maintain performance with minimal performance drop and achieve a significant speedup. In table 4, we show the effectiveness of EFFICIENT-VDIT in a subset of VBench for 93 frames. We observe a similar conclusion that we achieve $7.4\times$ speedup.  
+
+Effect of MLCD We conduct tests on VBench and CD-FVD, first comparing the differences between the Base model and the MLCD model, and then evaluating the compatibility of CM with the attention mask. As shown in Table 6, the MLCD model performs as well as or better than the Base model across most dimensions on VBench, achieving an overall VBench score of $76.81\%$ .  
+
+Due to the MLCD model requiring fewer sampling steps than the Base model, it achieves a $5.00\times$ speedup. Furthermore, we observe that the MLCD model, even after undergoing knowledge distillation, maintains performance without any drop in quality. The VBench score and CD-FVD trends are consistent, indicating that the MLCD model supports attention mask operations effectively, similar to the original model. Therefore, the MLCD model continues to deliver high-quality performance while offering significant acceleration benefits.  
+
+Effect of Layerwise Search We conduct tests on VBench and CD-FVD, selecting the MLCD model as the baseline. We compare applying a uniform mask across all layers (e.g., 4:4, 3:5) with the layerwise mask from Algorithm 1. As shown in Table 7, in VBench, using the layerwise mask with $\it{T}=0.025$ , 0.050, 0.100) achieve a score exceeding $76.00\%$ , significantly outperforming the results without layerwise masking, while also providing a better speedup $7.05\times$ vs. $5.80\times)$ . In CD-FVD, the layerwise mask consistently results in scores below 250. However, as sparsity increases, the score without layerwise masking exceeds 250, indicating a decrease in video generation quality. Therefore, the layerwise approach enhances the quality of generated videos.  
+
+Table 6: Ablation experiments on the effect of MLCD.   
+
+![](images/d28d71fc41e5ddbd59a1bfafab39bdab4f2e29aa934bee778b9109f29067d028.jpg)  
+
+Table 7: Ablation experiments on the effect of our layerwise searching algorithm.   
+
+![](images/8b4ce969d1609a41eb0b07162515521cdf040649f208cde71873fdd7c556320c.jpg)  
+4.4 QUALITATIVE RESULT  
+
+As illustrated in Figure 5, we compare the video results generated by three methods: the original model, after applying MLCD, and after knowledge distillation. The generation settings are consistent with those in Table 5, demonstrating that both the MLCD and knowledge distillation methods maintain the original quality and details.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this paper, we first describe the phenomenon of Attention Tile, and dive into its characteristics of repetitive, large diagonals, locality, and data independent. Then we describe a class of sparse attention pattern tailored to address the efficiency problem in Attention Tile. Lastly, we introduce our overall framework that leveraged this class of sparse attention, which further leverages multistep consistency distillation, layerwise searching, and knowledge distillation for faster generation and high performance. Experiments on two varaints of the Open-Sora-Plan model has demonstrated that our method can achieve similar performance, with $0.1\%$ the pre-training data, and up to $7.8\times$ speedup. Further ablation study has shown that our method can be natively integrated with advanced parallelism method to achieve further speedup.  
+
+
+

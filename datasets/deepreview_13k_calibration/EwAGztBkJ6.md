@@ -1,0 +1,156 @@
+# On the Generalization of Gradient-based Neural Network Interpretations
+
+- Decision: Reject
+- Avg Score: 4.00
+- Scores: 3, 6, 3
+
+## Abstract
+Feature saliency maps are commonly used for interpreting neural network predictions. This approach to interpretability is often studied as a post-processing problem independent of training setups, where the gradients of trained models are used to explain their output predictions. However, in this work, we observe that gradient-based interpretation methods are highly sensitive to the training set: models trained on disjoint datasets without regularization produce inconsistent interpretations across test data. Our numerical observations pose the question of how many training samples are required for accurate gradient-based interpretations. To address this question, we study the generalization aspect of gradient-based explanation schemes and show that the proper generalization of interpretations from training samples to test data requires more training data than standard deep supervised learning problems. We prove generalization error bounds for widely-used gradient-based interpretations, suggesting that the sample complexity of interpretable deep learning is greater than that of standard deep learning. Our bounds also indicate that Gaussian smoothing in the widely-used SmoothGrad method plays the role of a regularization mechanism for reducing the generalization gap. We evaluate our findings on various neural net architectures and datasets, to shed light on how training data affect the generalization of interpretation methods.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper studies the problem of generalization of gradient-based saliency maps of deep networks. Theoretical bounds are shown and experiments are carried out to validate the results.
+
+### Strengths
+This paper is well written upto the experiments section. After that I find it difficult to comprehend the presentation. Details in Questions.
+
+### Weaknesses
+I find the main problem the paper is trying to address somewhat contrived. Firstly, the usual motivation for post-hoc explanation of deep networks is to explain the prediction of a **given** network (trained or otherwise) on a **given** sample, as we get insights as to why a particular decision was made. From this perspective, I do not see the motivation to study how well the input gradients will generalize from train set to test set (in expectation). Why are we interested in knowing the MSE loss between our current network an the optimal network as defined in eq(6).
+
+Continuing on my first point, the authors further claim "the generalization condition is necessary for a proper interpretation result on test samples, it is still not sufficient for a satisfactory interpretation performance". I fail to appreciate this statement since it is not clear satisfactory interpretation (as defined by the authors) is the gradient-based saliency map generated for our optimal f* that minimizes the population loss. In my opinion, this is of little interest from the perspective of understand why a given network made a particular decision. I invite the authors to convince me otherwise.
+
+Lastly, post-hoc explanations have been criticized for some time now in the community due to their reliability in explaining deep network presentations [1,2,3] (some of the references analyze the saliency map techniques evaluated in this work). This means that even if I had the **exact** same saliency map as the ground truth f*, methods like integrated gradients and simple gradients are simply unreliable in explaining what the deep network is doing. Given, the above three arguments I fail to appreciate the utility of studying the generalization of saliency maps for deep networks.
+
+Lastly, I find the experiment section not clearly written. I expand on this in specific questions below.
+
+1. Adebayo, J., Gilmer, J., Muelly, M., Goodfellow, I., Hardt, M., & Kim, B. (2018). Sanity checks for saliency maps. Advances in neural information processing systems, 31.
+2. Shah, H., Jain, P., & Netrapalli, P. (2021). Do input gradients highlight discriminative features?. Advances in Neural Information Processing Systems, 34, 2046-2059.
+3. Adebayo, Julius, et al. "Post hoc explanations may be ineffective for detecting unknown spurious correlation." International conference on learning representations. 2021.
+
+### Questions
+1. Figure 2 is not clear. The caption says "we observe that model pairs generate increasingly consistent interpretations." It is not clear o me what is being compared here for consistent interpretation? Since f* (the optimal classifier) is never accessible to us. What is the baseline here then?
+
+2. The following statement is unclear "We train a neural net for every data subset
+for 200 epochs. To further improve the interpretation generalization, we allow models to train on
+“more data” by using pre-trained ImageNet weights, then fine-tuning for 50 epochs." Why are we training for 200 epochs and then taking Pretrained weights and fine-tuning for 50 more epochs? Do we start with the fine tuned weights and train for 250 epochs. This should be made clear. 
+
+3. The following is unclear "On test set data, we plot
+the normalized Spearman correlation of network interpretations against softmax predictions." What exactly is the equations for this computation? Is the softmax predictions the argmax of the softmax or the entire k dimensional softmax scores? What are the two quantities among which the correlation is computed?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The work derives generalization bounds incorporating gradient based interpretations, which yield non-trivial results. It shows that the generalization of interpretations requires more training, and show that it can be improved with spectral normalization.
+
+### Strengths
+The paper is interesting, and the bound is both non-trivial and important. It shows that generalization bounds may incorporate intuitive signals for the human observer. Further, it yields more into how neural network interpretations work. The empirical experiments match the theoretical results.
+
+### Weaknesses
+The overall paper is good other than minor comments on the presentation (see Questions)
+
+Figure 1: the text and legend can be enlarged/improved. How were the lines produced? what exactly is shown in Figure 1b? What does each point represent? It seems like the lines don't represent the data. Have the authors considered different seeds for each network to add more points to the graph?
+
+### Questions
+Figure 1: the text and legend can be enlarged/improved. How were the lines produced? what exactly is shown in Figure 1b? What does each point represent? It seems like the lines don't represent the data. Have the authors considered different seeds for each network to add more points to the graph?
+
+** Possible missing references:**
+
+[1] Galanti, T., Galanti, L., & Ben-Shaul, I. (2023). Comparative Generalization Bounds for Deep Neural Networks. Transactions on Machine Learning Research, (ISSN 2835-8856).
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+**Update:** I would like to thank the authors for their response, and I have read all the reviews and the corresponding responses. 
+I decide to keep my original score as my main concerns remain. Specifically, I remain unconvinced about the significance of studying the generalization of interpretation methods. Consider the reference classifier in your revised version, namely $f^*(x)=\mathbb{E}\_{f\sim\mathrm{Unif}(F^*)}f(x)$, the question arises: is $\mathbb{E}\_{f\sim\mathrm{Unif}(F^*)}||I(f,x)-I(f^*,x)||_2$ small? As mentioned in my previous question 2, if the optimal $f$ set can have large variance/standard deviation, why does it matter if the saliency maps are sensitive to the training data? 
+___
+
+
+This paper investigates the generalization of gradient-based interpretation methods in deep learning. The authors demonstrate the significant influence of the sample size on the interpretation, such as saliency maps, in deep neural networks. Then they derive two generalization bounds for common gradient-based interpretation techniques by using the analysis presented in Bartlett et al. (2017). Notably, for SmoothGrad, they show that the generalization error of interpretation has a linear decrease with the standard deviation of the SmoothGrad noise. The paper complements these findings with numerical results demonstrating the impact of training sample size on interpretation outcomes.
+
+### Strengths
+The paper is well-written and investigates a topic that has not been explored before, namely the generalization of gradient-based interpretation.
+
+### Weaknesses
+My primary concern lies in understanding the importance of investigating the generalization aspect of interpretation methods, and the validation of the generalization definition in this paper. Additionally, the theoretical contributions in this paper are somewhat restricted, as a substantial portion of the analysis is derived from Bartlett et al. (2017), with the key distinction being the definition of "loss" and "error".
+
+For more detailed questions, please refer below.
+
+1. Regarding the definition of $f^*$ in Eq.(5):
+Firstly, there is no guarantee that you only have one such optimal classifier. In the case where Eq.(5) returns a set of $f^*$, doesn't the definition of loss in Eq.(6) become problematic? While all the $f^*$ will yield the same testing performance, they do not necessarily produce the same output for the interpretation method. In other words, $\mathrm{Loss}_I(f,x)$ is also a function of $f^*$, denoted as $\mathrm{Loss}_I(f^*,f,x)$. This differs significantly from studying standard generalization error. Therefore, the generalization error defined in Eq.(6) can vary for the same $f$ and $x$.
+
+2. Another question arises in this context. Considering that there could be multiple $f^*$ with identical testing performance, and they may not produce the same saliency maps, why does it matter if the saliency maps are influenced by the training data? Is there any guarantee that different $f^*\in\mathcal{F}$ with different weight parameters will return identical outputs from the interpolation methods (for the same $x$)?
+
+3. Let's assume there is only one such $f^*$. According to Theorem 1, the generalization bound implies that interpretation demands a larger training set compared to the standard classification problem. An essential mystery in the success of deep learning is that overparameterized neural networks can generalize well without needing more data than the number of parameters. If Simple Gradient Method and Integrated Gradient prove to be unreliable with the same amount of data, does this imply that they are ineffective for interpreting deep neural networks?
+
+4. What is the fundamental implication of establishing generalization bounds for gradient-based interpretation methods when we cannot ensure good performance on the training data? In the context of standard generalization error, we can say an upper bound is provided to guide the minimization of empirical risk while controlling key quantities in the bound.  However, for interpretation methods, let $\hat{f}^*$ be the empirical minimizer for a given training dataset, even if standard training leads to $f_w\to\hat{f}^*$, $\mathrm{Loss}_I(\hat{f}^*,x)=||I(\hat{f}^*,x)-I(f^*,x)||_2$ can still be large. In other words, we lack clarity on whether interpretation methods might overfit to the training data (in the sense defined in Eq.(5)). In light of this uncertainty, discussing regularization is not feasible at this point.
+
+### Questions
+1. Regarding the definition of $f^*$ in Eq.(5):
+Firstly, there is no guarantee that you only have one such optimal classifier. In the case where Eq.(5) returns a set of $f^*$, doesn't the definition of loss in Eq.(6) become problematic? While all the $f^*$ will yield the same testing performance, they do not necessarily produce the same output for the interpretation method. In other words, $\mathrm{Loss}_I(f,x)$ is also a function of $f^*$, denoted as $\mathrm{Loss}_I(f^*,f,x)$. This differs significantly from studying standard generalization error. Therefore, the generalization error defined in Eq.(6) can vary for the same $f$ and $x$. 
+
+2. Another question arises in this context. Considering that there could be multiple $f^*$ with identical testing performance, and they may not produce the same saliency maps, why does it matter if the saliency maps are influenced by the training data? Is there any guarantee that different $f^*\in\mathcal{F}$ with different weight parameters will return identical outputs from the interpolation methods (for the same $x$)?
+
+3. Let's assume there is only one such $f^*$. According to Theorem 1, the generalization bound implies that interpretation demands a larger training set compared to the standard classification problem. An essential mystery in the success of deep learning is that overparameterized neural networks can generalize well without needing more data than the number of parameters. If Simple Gradient Method and Integrated Gradient prove to be unreliable with the same amount of data, does this imply that they are ineffective for interpreting deep neural networks?
+
+4. What is the fundamental implication of establishing generalization bounds for gradient-based interpretation methods when we cannot ensure good performance on the training data? In the context of standard generalization error, we can say an upper bound is provided to guide the minimization of empirical risk while controlling key quantities in the bound.  However, for interpretation methods, let $\hat{f}^*$ be the empirical minimizer for a given training dataset, even if standard training leads to $f_w\to\hat{f}^*$, $\mathrm{Loss}_I(\hat{f}^*,x)=||I(\hat{f}^*,x)-I(f^*,x)||_2$ can still be large. In other words, we lack clarity on whether interpretation methods might overfit to the training data (in the sense defined in Eq.(5)). In light of this uncertainty, discussing regularization is not feasible at this point.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+1 poor

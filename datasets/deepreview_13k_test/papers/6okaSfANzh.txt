@@ -1,0 +1,274 @@
+\title{Large Language Model Cascades with Mixture of Thought Representations for Cost-Efficient Reasoning}
+
+\begin{abstract}
+
+Large language models (LLMs) such as GPT-4 have exhibited remarkable performance in a variety of tasks, but this strong performance often comes with the high expense of using paid API services. In this paper, we are motivated to study building an LLM cascade to save the cost of using LLMs, particularly for performing reasoning (e.g., mathematical, causal) tasks. Our cascade pipeline follows the intuition that simpler questions can be addressed by a weaker but more affordable LLM, whereas only the challenging questions necessitate the stronger and more expensive LLM. To realize this decision-making, we consider ``answer consistency'' of the weaker LLM as a signal of the question difficulty and propose several methods for the answer sampling and consistency checking, including one leveraging a mixture of two thought representations (i.e., Chain-of-Thought~\citep{wei2022chain} and Program-of-Thought~\citep{chen2022program, gao2022pal}). Through experiments on six reasoning benchmark datasets, with GPT-3.5-turbo and GPT-4 being the weaker and stronger LLMs, respectively, we demonstrate that our proposed LLM cascades can achieve performance comparable to using solely the stronger LLM but require only 40\% of its cost.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large language models (LLMs) such as GPT-4 have exhibited remarkable performance in reasoning tasks~\citep{rae2021scaling,lewkowycz2022solving,zhong2023agieval}. Because of the intensive computing resources required for training and hosting the LLMs for inference, many such LLMs are only accessible via paid API services, thus leading to high monetary costs. In this work, we are motivated to study strategies for reducing the costs of using LLMs while not sacrificing task performance, particularly for LLMs' applications to reasoning tasks.
+
+Different types and versions of LLMs often come with different capabilities and costs. Typically, LLMs with better performance (termed ``stronger LLMs'') are more expensive than those with relatively worse overall performance (termed ``weaker LLMs''). For example, GPT-4 \citep{openai2023gpt4} is 30 times more expensive than GPT-3.5-turbo for the output tokens.\footnote{\url{https://openai.} It thus implies a promising solution to cost-saving. That is, simple questions could be answered by the weaker but more affordable LLM, whereas only the difficult questions need to be tackled by the more expensive, stronger LLM. Drawing inspirations from here, \citet{chen2023frugalgpt} explored the idea of ``LLM cascades'', where a question is always first answered by a weaker LLM, and then optionally routed to a stronger LLM when the the weaker LLM's answer is not accepted (Figure~\ref{fig:llm_cascade}). To decide this routing, this work suggested fine-tuning a smaller LLM to score each question along with its answer produced by the weaker LLM. While this approach could work for some tasks, in practice, we observed that it did not yield satisfying performance for intricate reasoning tasks. Intuitively, it is very challenging to evaluate the difficulty and the answer correctness of a reasoning question solely based on its literal expression, even with a large enough LLM, since the errors could be nuanced despite the reasoning paths appearing promising~\citep{madaan2023self-refine}.
+
+In this work, we proposed to devise this routing decision-maker from a different angle, i.e., the ``answer consistency'' of the weaker LLM~\citep{wang2023selfconsistency}. This is inspired by the observation that answers from the weaker LLM tend to be consistent in multiple sampling paths when the question is easy, but inconsistent when the question is hard. To implement this idea, we proposed two types of methods, a vote-based method that examines if the agreement of multiple answer samples on the majority-voted answer surpasses a pre-defined confidence threshold, and a verification-based method that checks if the majority-voted answers sampled from different prompts are consistent. 
+To realize the two methods in reasoning tasks, we further investigated multiple strategies for answer sampling, including sampling from a single set versus two sets of task demonstrations. In particular, we proposed to leverage a ``mixture of thought (MoT) representations'', which samples answers from both Chain-of-Thought~\citep[CoT]{wei2022chain} and Program-of-Thought~\citep[PoT]{chen2022program, gao2022pal} prompts, emulating how experts can provide diverse perspectives to the same question. This follows the same spirit of ensembling~\citep{rokach2010ensemble}, but is applied to developing LLM cascades for the first time. 
+By pairing different sampling strategies with the two answer consistency checking methods (i.e., vote and verification), we end up with ten approaches to implementing the LLM cascade. 
+
+
+To evaluate the proposed approaches, we conducted experiments on six reasoning datasets, covering mathematical, symbolic, and causal reasoning tasks, using GPT-3.5-turbo as the weaker LLM and GPT-4 as the stronger one. The experimental results demonstrated the effectiveness of LLM cascades based on answering consistency. That is, different approaches that we proposed for LLM cascades can generally achieve performance comparable to or even better than fully using the stronger LLM, while they require only half or less relative cost to the latter. In particular, our approaches based on a mixture of thought representations achieved comparable task performance with only 40\% of the cost of GPT-4. 
+Our results also underscored the effectiveness of sampling answers from diverse prompt settings, such as sampling from different task demonstrations or different thought representations. Our further analysis revealed that different prompt settings can often provide different opinions for the more complex questions while tending to be consistent for easier ones, which allows us to distinguish questions at different difficulty levels more accurately for cascade decision-making. Finally, we also compared our consistency-based approaches with fine-tuned smaller LLMs~\citep{chen2023frugalgpt} as well as other variants that make the routing decisions based on the literal expressions of the question and its answer. Our approaches exhibited strong advantages over all of them.
+
+
+\section{LLM Cascades for Cost-Efficient Reasoning}
+
+\subsection{Overview of LLM Cascades}
+\input{tex_fig/overview}
+
+We leverage a cascade of LLMs to save the cost of in-context LLM reasoning, as illustrated in Figure~\ref{fig:llm_cascade}. Specifically, we assume two LLMs. The weaker LLM (denoted as $LLM^w$) yields relatively worse performance but is less costly, whereas the stronger LLM (denoted as $LLM^s$) enjoys better task performance but is more expensive. Given a question $Q$, the LLM cascade first employs the weaker LLM to obtain an initial answer $A^w$. This answer, along with other metadata produced by the weaker LLM, will then be fed to a cascade decision maker to decide whether the answer can be accepted as the final one. If the answer is rejected, the stronger LLM should be invoked to provide a more reliable answer $A^s$. As a consequence, the total cost of answering the question becomes 
+\begin{equation}\label{eq:cost-est}
+    C=C^w + C^d + \mathds{1}_{reject} \: C^s,
+\end{equation}
+where $C^w$ and $C^s$ indicate the costs from calling the weaker and the stronger LLMs, respectively, $C^d$ denotes any cost involved in the LLM cascade decision-making process, and $\mathds{1}_{reject}=1$ holds if and only if the decision maker rejects the answer.
+Both LLMs solve the question via few-shot in-context learning, e.g., for the weaker LLM, an answer $A^w$ is produced by sampling from
+$P_{LLM^{w}}(A^{w} \: | \: E_1 || E_2 || \ldots || E_M || Q)$,
+where $E_1 || E_2 || \ldots || E_M || Q$ denotes a concatenation of $M$ task demonstrations and the input question $Q$, forming the ``prompt input'' to the LLM~\citep{brown2020language}. As $M$ task examples are used to demonstrate the task, it indicates a ``$M$-shot in-context learning'' of LLM.
+For reasoning tasks, in practice, a LLM will typically be prompted to elaborate on its reasoning process via ``thought representations'', such as Chain-of-Thought \citep[CoT]{wei2022chain} and Program-of-Thought \citep[PoT]{chen2022program, gao2022pal}, where the reasoning process is described step by step via natural language and programming language, respectively. The answer (e.g., a numerical result of the mathematical calculation) can then be extracted from the texts (for CoT) or obtained by executing the code (for PoT).
+\subsection{Answer Consistency-based Cascade decision-making}
+The core of our LLM cascade is the decision maker, which takes in the output from the weaker LLM, and then decides whether to route to the stronger LLM or not. An ideal cascade decision maker should call the stronger LLM only when the answer by the weaker LLM is wrong, such that the total cost $C$ can be minimized without degrading the overall task performance (compared with using the stronger LLM all the time). To this end, we propose two methodologies based on the ``answer consistency'' of the weaker LLM, which we elaborate on below. 
+
+\paragraph{Answer Consistency and Sources of Sampling} 
+Answer consistency has been found helpful for improving the LLM performance in reasoning tasks~\citep{wang2023selfconsistency}. Instead of greedily decoding one answer for each question, \citet{wang2023selfconsistency} sampled a diverse set of reasoning paths (or thought processes) and then selected the most consistent answer by marginalizing out the sampled paths. Drawing inspiration from the prior work, we make the following hypothesis: When the weaker LLM samples highly consistent answers for a given question, it reveals a high ``confidence'' in solving this question and its most consistent answer is likely to be correct; in this case, there is thus no need to invoke the stronger LLM. 
+
+To realize this intuition, we generalize from~\citet{wang2023selfconsistency} and consider three sources of sampling consistency:
+\begin{itemize}[itemsep=0pt,topsep=0pt,leftmargin=10pt]
+    \item \textbf{In-distribution sampling}: As~\citet{wang2023selfconsistency}, we consider sampling multiple answers given the same prompt input to the weaker LLM. In practice, this can be achieved by setting a non-zero temperature for the weaker LLM.
+    \item \textbf{Sampling from different in-context demonstrations}: We further consider sampling answers from two sets of task demonstrations under the same thought representation. 
+    For example, to demonstrate the CoT process in mathematical reasoning tasks, \citet{wei2022chain} annotated eight math examples as the demonstrations and performed 8-shot in-context learning. 
+    We additionally annotated another eight examples as the second set of demonstrations, which allowed us to further diversify the sources of answer sampling.
+    \item \textbf{Sampling from different thought representations}: While existing literature typically investigated either CoT or PoT independently, in this work, we propose to leverage the synergy of both thought representations in a single task. 
+    We hypothesize that an LLM obtains truly high confidence in its problem-solving, only when it is able to produce a consistent answer agnostic to how the intermediate steps are represented.
+    Therefore, we propose to sample the weaker LLM answers from a ``mixture of thought (MoT) representations'', which includes both CoT and PoT prompts. 
+\end{itemize}
+Below, we introduce our methodologies for consistency checking based on the answer samples.
+
+\begin{figure*}[t!]
+    \centering
+\includegraphics[width=0.95\textwidth]{images/figure/Model/cost-efficient-LLM-MoT-overview_v6.pdf}
+    \caption{An overview of our approaches (6 vote-based and 4 verification-based). We use \textcolor[RGB]{0, 138, 0}{\rule{0.6em}{0.6em}}{\vphantom{x}\phantom{}} to represent the answers from PoT and \textcolor[RGB]{55,126,184}{\rule{0.6em}{0.6em}}{\vphantom{x}\phantom{}} to represent the answers from CoT.  $Demo_i$ is the $i$-th set of demonstrations. 
+    }
+    \label{fig:overview}
+\end{figure*}
+
+\paragraph{Method 1: Vote-based decision-making}
+The first method calculates the consistency of the weaker LLM's answer samples by voting. Formally, for a single prompt, we denote the set of answers produced by the weaker LLM for each question $Q$ as $(A^w_1, A^w_2, ..., A^w_K)$, where $K$ is the pre-defined number of samples. When sampling from two different prompts, we denote $(A^w_{11}, A^w_{12}, ..., A^w_{1K_1})$ and $(A^w_{21}, A^w_{22}, ..., A^w_{2K_2})$ as the answer samples produced by each of them, where $K_1$ and $K_2$ represent the pre-defined sample size for each prompt setting, respectively. 
+Note that for this method, we do not distinguish answers sampled with a single prompt or multiple prompts (e.g., samples from different prompts have exactly equal weights when voting).
+The most consistent answer can then be selected as the one that most samples agree with, and this answer will also be regarded as the final answer $A^w$ by the weaker LLM. The decision maker measures the weaker LLM's consistency via the agreement score
+\begin{equation}\label{eq:vote-based}
+s = \frac{\sum_{i=1}^K \mathds{1}_{A^w_i=A^w}}{K} \text{ or } s = \frac{\sum_{i=1}^{K_1} \mathds{1}_{A^w_{1i}=A^w} + \sum_{i=1}^{K_2} \mathds{1}_{A^w_{2i}=A^w}}{K_1+K_2}.
+\end{equation}
+The larger the $s$, the more consistent the weaker LLM's answer samples. In conjunction with a pre-defined threshold value $\tau$, the decision maker accepts the weaker LLM's most consistent answer $A^w$ when $s \geq \tau$ and rejects it otherwise. As a result, the total cost of answering a question (Eq~\ref{eq:cost-est}) can vary depending on the threshold.
+
+\paragraph{Method 2: Verification-based decision-making}
+In the case of producing samples from two different prompt settings (i.e., different demonstrations or thought representations), we propose the second method, which compares the most consistent answers produced by each prompt as the answer verification. 
+As previously mentioned, we could obtain two sets of answers from distinct prompts: $(A^w_{11}, A^w_{12}, ..., A^w_{1K_1})$ and $(A^w_{21}, A^w_{22}, ..., A^w_{2K_2})$.
+Our method then verifies the most consistent answers within each prompt, denoted as $A_1^{w\prime}$ and $A_2^{w\prime}$ respectively, as follows:
+\begin{equation}\label{eq:verification-based}
+    s = \mathds{1}_{A_1^{w\prime} = A_2^{w\prime}}.
+\end{equation}
+Only when $s$ equals 1, i.e., when the two answers are the same, the weaker LLM's answer will be accepted by the decision maker. In this case, the final answer of the weaker LLM will be the same as the two most consistent answers, i.e., $A^w = A_1^{w\prime} = A_2^{w\prime}$.
+
+In comparison, these two methods have different applicable scenarios. The vote-based method is well-suited for scenarios with pre-defined cost constraints. In such cases, we have the flexibility to tune the threshold to ensure it aligns with the constraint. On the other hand, the verification-based method is capable of producing relatively optimal results without the need for threshold tuning, although it lacks flexibility. We will systematically compare the two methods in experiments.
+
+\subsection{LLM Cascades for Reasoning Tasks}\label{subsec:llm_cascade_reasoning}
+We instantiate the proposed two methods in LLM reasoning tasks with different sampling sources, resulting in 10 approaches, as summarized in Figure~\ref{fig:overview}.
+Specifically, 6 approaches adopt vote-based decision-making: \texttt{CoT-1D-Vote} collects $K$ answers sampled from prompting the weaker LLM with the CoT representation, and then calculates the answer consistency for decision-making, following Eq~\ref{eq:vote-based}. Similarly, \texttt{PoT-1D-Vote} bases its decision-making on answers sampled from a PoT prompt. To diversify the sources of the answers, for each thought representation, we further consider sampling from two sets of CoT or PoT demonstrations, resulting in \texttt{CoT-\emph{2D}-Vote} and \texttt{PoT-\emph{2D}-Vote}, respectively.
+Finally, the vote-based approaches also include two variants leveraging a mixture of thought (MoT) representations. For \texttt{MoT-1D-Vote}, $K_1$ answers are sampled from the CoT prompt and another $K_2$ from the PoT prompt, and a union set of their answers are then used to compute the consistency score $s$. For \texttt{MoT-2D-Vote}, the procedure is similar, except that the CoT and the PoT prompts are annotated from two sets of demonstration examples.
+The verification-based approaches assume answer samples from two different prompts. We instantiate 4 variants, including \texttt{CoT-2D-Verify}, where we prompt the weaker LLM with two sets of CoT demonstrations, resulting in two answer sets 
+for decision-making (Eq~\ref{eq:verification-based}); \texttt{PoT-2D-Verify}, where we similarly prompt the weaker LLM with two sets of PoT demonstrations; \texttt{MoT-1D-Verify}, where we consider two sets of answers from two thought representation prompts (but on the same set of task demonstration examples); and \texttt{MoT-2D-Verify}, which additionally employs different sets of demonstrations when prompting the weaker LLM with different thought representations.
+
+\paragraph{Cost-Comparable Sample Size Configuration} 
+To fairly compare all approaches in terms of their effectiveness in identifying easy (or correct) vs. hard (or correct) questions, we aim to configure their costs to be comparable.
+Since we use the same prompt to the stronger LLM, $C^s$ is agnostic to the specific approach. However, different approaches may require varying costs in calling the weaker LLM (i.e., $C^w$).
+For example, even with the same total sampling size (i.e., $K=K_1 + K_2$), \texttt{CoT-1D-Vote} and \texttt{CoT-2D-Vote} result in different input token usages because the former prompt the LLM once but the latter prompt it twice, doubling the token usages. 
+Therefore, we unify the $C^w$ by a coarse-grained cost alignment.
+Our analysis suggests different configurations of $K$ for different approaches. 
+
+Since our configuration can only yield comparable costs due to certain simplifications, rather than exact costs, we still report the actual token cost for each approach.
+
+
+\section{Economical Workflow of Multiple LLMs}
+
+\subsection{Task Formulation}
+Our initial objective involves dynamically selecting an appropriate version of LLMs to effectively respond to a given question. This selection process can be approached through various paradigms, each hinging on distinct factors guiding the decision-making. These factors encompass the content of the test question itself, the results generated by the weaker LLM, or a fusion of both elements. If we make the decision based on the question or the fusion of questions and results, the involvement of an external verifier becomes imperative. Upon our evaluation, the integration of an external verifier into the system yielded suboptimal results (refer to Section \ref{verifier}). Compared with the other two, the scheme with only generated results could be handled with an additional method to measure the uncertainty. Consequently, we choose to make the decision rooted in the uncertainty of the generated answers from the weak LLM. All subsequent discussions are on this scheme.
+
+\begin{figure*}[]
+    \centering
+    \includegraphics{images/figure/task_pipeline/cost-efficient-LLM-pipeline.drawio.pdf}
+    \caption{Overview of our task.}
+    \label{fig: task}
+\end{figure*}
+To only consider the weaker LLM-generated answers, our decision-making task could be formulated as the figure \ref{fig: task}. Given a task comprising exemplar instances $e_1, e_2, \ldots$, the associated prompts are derived as $P = [P_1, P_2, \ldots, P_L]$, where $P_i = (e_{i1} || e_{i2} || \ldots || e_{iM})$, adhering to the M-shot learning. The symbol $||$ signifies the concatenation of texts. For any given query $Q$ under consideration, the combined form $P||Q$ is supplied to the weaker LM denoted as $LM_w$, resulting in the production of a set of answers denoted as $A_W = [A_1, A_2, \ldots, A_L]$, where $A_i = LM_w(P_i || Q)$. By introducing a sampling temperature higher than zero, a collection of $K$ responses $A_i = (A_{i1}, A_{i2}, \ldots, A_{iK})$ can be generated corresponding to the prompt $P_i$. Our goal is to make the decision whether to switch to the stronger LLM or maintain confidence in the current results based on $A_W$. If our decision maker accepts the $A_W$, the final answer $A_f$ will be returned as $A_f = A_W$. Otherwise, the input $P||Q$ is directed towards the stronger LLM, designated as $LM_s$, subsequently yielding the response $A_S = LM_s(P||Q)$. Consequently, the final rejoinder $A_f$ is established as $A_f = A_S$.
+
+\subsection{Decision Maker Designation}
+In order to assess the uncertainty of the LLM regarding the $A_W$ and to evaluate its trustworthiness, we have devised two distinct and effective strategies shown in figure \ref{fig: model}. To control the cost, we set the prompt number $L=2$.
+
+\subsubsection{Method A: Voting Percentage Checking}
+The first strategy involves calculating the proportion of major voting answers among $A_W$ and comparing it to a predefined threshold $\tau$. For $A_W$, we can get the major answer $A_{major}=Voting(A_{11},A_{12},...,A_{1K},A_{21},A_{22},...,A_{2K})$. And we can get the percentage of $A_{major}$ over the number of all answers as the score $s$:
+\begin{equation}
+s = \frac{\sum_{i=1}^{K}\mathbbm{1}_{A_{1i} = A_{major}}+\sum_{i=1}^{K}\mathbbm{1}_{A_{2i} = A_{major}}}{2K}
+\label{eq2}
+\end{equation}
+If the value of $s$ is close to 1, it indicates that the weaker LLM is confident in its answer. In conjunction with a predefined threshold value $\tau$, we can compare $s$ and $\tau$ to make a decision. If $s$ is greater than $\tau$, we accept the generated answer to be trustworthy and return it as the final answer. Otherwise, we switch to a stronger LLM to seek assistance in obtaining a more reliable answer.
+
+
+\subsubsection{Method B: Consistency Verifying over Different Prompting Results}
+The second strategy is to verify the consistency in the results for different promptings. For $A_W$, we can get the major answer for $A_1$, donated as $A_{major1}=Voting(A_{11},A_{12},...,A_{1K})$, and major answer for $A_2$, donated as $A_{major2}=Voting(A_{21},A_{22},...,A_{2K})$.
+Then we examine whether $A_{major1}$ is equal to $A_{major2}$ to get the score $s$
+\begin{equation}
+s = \mathbbm{1}_{A_{major1} = A_{major2}}
+\label{eq3}
+\end{equation} 
+If the $s$ is equal to $1$, major answers from different promptings exhibit consistency and we trust in the answer $A_W$. If the major answers vary, we reject the answer and opt to switch to a stronger LLM.
+
+
+\begin{figure*}[]
+    \centering
+    \includegraphics{images/figure/Model/cost-efficient-LLM-MoT-overview.drawio.pdf}
+    \caption{The overview of our pipeline with MoT.}
+    \label{fig: model}
+\end{figure*}
+
+\subsection{Prompting Choices And the Number of Answers Generated by the Weaker LLM}
+\begin{wrapfigure}{r}{0.4\textwidth} 
+    \centering
+    \includegraphics[width=5cm,height=3cm]{images/figure/Experiment Setting/experiment setting.png}
+    \caption{The possible prompting choice}
+    \label{fig: prompting choice}
+\end{wrapfigure}
+Our prompting choices are shown in figure \ref{fig: prompting choice}. The option labeled as 1D involves utilizing a single set of demonstration examples, whereas the 2D option involves employing two distinct sets of demonstration examples. CoT \citep{wei2022chain} utilizes the text representation as intermediate stages, whereas PoT \citep{gao2022pal,chen2022program} involves the code representation. MoT refers to the utilization of CoT in one prompt and PoT in another. In the context of $X_1$-2D (where $X_1$ can represent CoT, PoT, or MoT), prompt $P_1$ and $P_2$ comprise dissimilar sets of demonstration examples, establishing them as distinct promptings. Conversely, in $X_2$-1D (where $X_2$ can represent CoT or PoT), $P_1$ and $P_2$ consist of the same sets of demonstration examples, thereby making them identical. Notably, MoT-1D holds a special status. Even though the demonstration examples are the same, the intermediate representations in their answers are different, making them two different promptings. Regarding the methodology of vote percentage assessment, there exist six choices: CoT-1D, PoT-1D, MoT-1D, CoT-2D, PoT-2D, and MoT-2D. In the case of the approach consistency verification, four choices with different promptings are available: MoT-1D, CoT-2D, PoT-2D, and MoT-2D.
+
+Next, we will discuss the relationship between the choice of prompts and the value of K, the number of answers generated by the weaker LLM. Previous works (\cite{li2022advance, wang2023selfconsistency}) have simply set the number of results generated per prompt based on the number of prompts and the total sampling paths, e.g., the act of producing 20 results with a single prompt is considered to be the same with adopting 2 different prompts, each yielding 10 results. However, such analyses often overlook the cost matter. For the context of M-shot learning, when each individual instance encompasses $N_{tok}$ tokens, the cost $C_1$ for the setting $L_1=1$ and $K_1=20$ equates to $C_1=(M+K_1)\times N_{tok}$. In parallel, the expense $C_2$ for the scenario characterized by $L_2=2$ and $K_2=10$ stands at $C_2 =2\times(M+K_2)\times N_{tok}$, inevitably surpassing $C_1$. Our goal in this paper is to reduce cost, so considering cost equivalence for using each prompting choice is more fair and reasonable. Consequently, our selection of the number of generated answers K is related to the type of prompting. The details can be found in Table \ref{tab: approaches}. To facilitate computation, we introduce certain assumptions. These include treating the tokens employed in CoT and PoT as commensurate and assuming token uniformity across all instances. However, in our experiment, we could get the number of real input tokens and output tokens, and then assess real costs.
+
+\input{tables/tab-approaches}
+
+
+\section{Experiment}
+
+\subsection{Experimental Setting}
+We evaluate our LLM cascade approaches on six datasets, covering (1) mathematical reasoning, including GSM8k \citep{gsm}, ASDIV \citep{asdiv}, and TabMWP \citep{tabmwp}; (2) symbolic reasoning from BIG-Bench Hard \citep{bigbench}, including DATE and Navigate; and (3) causal reasoning, including CREPE \citep{crepe}. In our pipeline, we leverage the GPT-3.5-turbo (4k context) as the weaker LLM and the GPT-4 (8k context) with CoT self-consistency~\citep[SC]{wang2023selfconsistency} as the stronger LLM. Throughout our experiments, we set the number of task demonstrations as $M=8$. We use the same demonstration examples as prior work \citep{chen2022program, wei2022chain}. When additional task demonstrations are needed (e.g., for \texttt{2D} approaches), we randomly sample examples from the training data and manually annotate them with thought representations. We set the number of sampling paths as $K=20$ for GPT-3.5-turbo and $K=3$ for GPT-4. The sampling temperature by default is $0.4$ for both LLMs. The metrics we use are the task accuracy and the relative cost compared with the cost of GPT-4 with CoT SC (denoted as \texttt{GPT-4-CoT-SC}). A lower relative cost and higher accuracy indicate better performance. We also compared our approaches with baselines using only the weaker LLM (i.e., \texttt{GPT-3.5-CoT-SC}, \texttt{GPT-3.5-PoT-SC}) or only the strong LLM in different ways (i.e., \texttt{GPT-4-CoT-Greedy}, \texttt{GPT-4-PoT-Greedy}, \texttt{GPT-4-CoT-SC}, \texttt{GPT-4-PoT-SC}).
+
+\subsection{Main Results}\label{section: main result}
+\input{tex_fig/main_result}
+
+Figure \ref{fig: experiment} illustrates the performance of our proposed approaches. For \texttt{Vote}-based approaches, we draw curves by changing the pre-defined threshold $\tau$ varying from 0.4 to 1. A high value of threshold signifies a more rigorous criterion for trusting the answers from the weaker LLM, making more examples transferred to the stronger LLM.
+Our observations are as follows:
+
+\paragraph{Our pipeline achieves comparable task performance with significantly reduced costs.}
+On average, all of our cascade variants (\texttt{Vote} or \texttt{Verify}) demonstrate significant cost efficiency. In particular, as shown in the average plot, the four \texttt{MoT} variants achieve comparable task performance ($\sim$0.929 accuracy) to \texttt{GPT-4-CoT-SC} (0.931) while demanding only 40\% of its cost. On CREPE, \texttt{MoT} variants even outperform \texttt{GPT-4-CoT-SC} (0.885 vs. 0.871) at 47\% of its cost.
+Our approaches based on \texttt{CoT} and \texttt{PoT} also exhibit the capability to save costs while maintaining the overall task performance. For example, \texttt{CoT-2D-Vote} achieved 0.924 task accuracy on average but demanded only 57\% relative cost. 
+These observations suggest the effectiveness of our cascade decision maker via checking the answer consistency of the weaker LLM.
+
+\paragraph{Sampling from diverse prompt settings helps cascade decision-making.}
+Our results show that variants involving diverse sources of sampling, such as \texttt{CoT/PoT-2D-Vote} and \texttt{MoT-1D/2D-Vote}, can more precisely distinguish between easy and hard reasoning questions, compared with their counterparts sampling from single sources, i.e., \texttt{CoT/PoT-1D-Vote}. For example, between \texttt{CoT-2D-Vote} and \texttt{CoT-1D-Vote}, the former outperforms the latter by 1.4\% absolute accuracy under the same relative cost of 0.4 on average.
+\paragraph{Mixing thought representations is particularly effective.}
+Furthermore, we find that mixing the two thought representations (i.e., \texttt{MoT-1D/2D-Vote}) outperforms decision-making using either of them (i.e., \texttt{CoT-1D/2D-vote} and \texttt{\texttt{PoT-1D/2D-vote}}). 
+This is illustrated by the gap in the average plot and is consistent on most datasets except DATE, where many test questions are very similar to the demonstration examples.
+Intuitively, this is because different thought representations can bring in more diverse ``opinions'' of the weaker LLM on the same input question, resembling how a group of experts with diverse perspectives could contribute to more effective results in collaborative work. It can also be viewed as ``ensembling'' LLMs, which utilizes the intuition that variants of the same model typically share few mistakes~\citep{rokach2010ensemble}.
+We provide a further investigation of this effect in Section~\ref{sec:MoT-analysis}. We also note that when using \texttt{MoT}, no obvious difference is perceived between using one set (i.e., \texttt{MoT-1D-Vote}) or two sets (i.e., \texttt{MoT-2D-Vote}) of task demonstrations. This result reveals that tuning the thought representations is more helpful for measuring an LLM's (un)certainty on its answer than tuning the task demonstrations. 
+
+\paragraph{Increasing the threshold yields marginal benefits for \texttt{MoT-1D/2D-Vote}.}
+As costs increase, the curves of \texttt{MoT-1D/2D-Vote} flatten out, showing that pushing the threshold to exceedingly high is unnecessary. This is because even for an easy question, the weaker LLM may still have hallucinations in a small set of answers. Setting the threshold too high can lead to the decision-making being influenced by them. It may result in easy questions being sent to the stronger LLM incorrectly, thus driving up the overall cost. In our practice, a threshold that can balance cost and accuracy typically falls between 0.5 and 0.6. When it comes to \texttt{MoT-1D/2D-Verify}, we can strike a balance between cost and accuracy as the verification method can tolerate a few hallucinations. 
+
+\subsection{Analysis on Mixture of Thought Representations}\label{sec:MoT-analysis}
+\input{tex_fig/MoT_analysis_v2}
+
+To understand the effect of MoT, we analyze three vote-based approaches. We first group questions into “easy” and “hard” based on whether the weaker LLM can answer them correctly (i.e., whether the majority-voted answer $A^w$ is correct or not). For all easy/hard questions, we then calculate the average consistency score following Eq~\ref{eq:vote-based}.
+We present the average consistency scores for each approach, categorizing easy and hard questions based on whether the weaker LLM can answer them correctly (i.e., $Aw$ being correct). 
+A higher average consistency score indicates our decision-maker places greater trust in the answer from the weaker LLM. 
+Hence, an effective cascade decision-maker should reveal relatively higher consistency scores for easy questions and lower ones for hard questions, leading to a larger "gap" between them.
+
+We show the results in Figure~\ref{fig: mot_analysis_v2} (Top). It is observed that all approaches lead to higher consistency scores on the easy questions than those on the hard questions, which explains their overall effectiveness for cascade decision-making. Because of involving two different thought representations, \texttt{MoT-1D-Vote} tends to have a lower consistency score compared with the two \texttt{CoT} approaches. However, it still ends up with a larger ``gap'' in the consistency scores for the easy and the hard questions, which is particularly prominent on the Navigate dataset where it gives the best performance gain (Figure~\ref{fig: experiment}). In contrast, \texttt{CoT-1D-Vote} results in the smallest score gap, indicating its weakness in distinguishing between the easy and the hard questions, particularly for Navigate. This weakness is mitigated by diversifying the prompting with two sets of task demonstrations (i.e., \texttt{CoT-2D-Vote}), but it still underperforms mixing the thought representations.
+
+Finally, in Figure~\ref{fig: mot_analysis_v2} (Bottom) we show that when CoT cannot answer a hard question, prompting the weaker LLM with another set of task demonstrations (but still under the CoT representation) often yields the same mistaken answer, which thus results in a high consistency score. On the contrary, PoT tends to make mistakes in a very different way and result in a different mistaken answer, which explains the low consistency score of \texttt{MoT-1D-Vote}.
+
+
+
+
+\subsection{Robustness Evaluation}
+\input{tex_fig/robustness}
+We further analyze if our results are sensitive to the change of the sampling temperature $T$ or the sample size $K$. 
+We select datasets for each type of reasoning task and conduct experiments with \texttt{CoT-2D-Vote} and \texttt{MoT-1D-Vote}.
+Our results are shown in Figure~\ref{fig: robust}. 
+We first look into the effect when increasing the sampling temperature $T$ from 0.4 (our default setting) to 0.8. For both approaches, increasing their temperature yields comparable or slightly better performance. This is owing to the increased answer diversity when the temperature gets higher. However, in any case, \texttt{MoT-1D-Vote} consistently outperforms \texttt{CoT-2D-Vote}.
+Increasing the sample size $K$ from 20 to 40, on the other hand, leads to a rightward shift of the curves, implying that it requires higher cost to achieve the same task accuracy. This can be explained by the higher cost of the larger sample size, whereas increasing the sample size does not contribute to the detection of easy vs. hard questions. Like in the results of varying temperatures, \texttt{MoT} robustly outperforms \texttt{CoT} in any case.
+
+\subsection{Comparison to External Text-based Verifiers}
+\label{subsec:text-verifiers}
+\input{tex_fig/verifier}
+
+As mentioned, prior work implemented the LLM cascade decision-maker by training an external verifier, which scores a question and its answer (from the weaker LLM) based on their literal descriptions~\citep{chen2023frugalgpt, sakota2023flyswat}. Related to the above work, \citet{chen2023self-debug} and \citet{madaan2023self-refine} also showed the promise of prompting LLMs to evaluate their own responses. To perform a general comparison with such external verifiers, we conducted experiments on GSM8k, DATE, and CREPE with the following baselines:
+\texttt{Finetuned-Q}, which is a RoBERTa-base model~\citep{liu2019roberta} fine-tuned to decide whether a question should be routed to the stronger LLM based on its description; \texttt{Finetuned-QA}, which works similarly as \texttt{Finetuned-Q} but additionally takes the majority-voted answer from the weaker LLM (\texttt{GPT-3.5-CoT-SC}) as input; \texttt{LLM-Q}, where we instead prompt GPT-3.5-turbo as the verifier to judge based on the question description; and \texttt{LLM-QA}, which similarly employs GPT-3.5-turbo to decide upon the question and the weaker LLM's majority-voted answer.
+
+The results in Figure~\ref{fig: verifier} show that incorporating the external verifiers cannot achieve comparable accuracy with \texttt{GPT-4-CoT-SC}. For example, on the GSM8k dataset, the highest accuracy with the external verifiers is 0.892, which is way lower than the accuracy (0.958) of \texttt{GPT-4-CoT-SC} and the accuracy (0.951) of our approaches. They also show lower task accuracies than our approaches under the same cost. It indicates that the external verifiers cannot yield satisfying results in complex reasoning tasks, which can be due to the intrinsic challenge of deciding question difficulty and answer correctness solely based on their textual descriptions.
+\subsection{ADDITIONAL STUDIES}
+\paragraph{How weak can the weaker LLM be?}
+We evaluate our approaches when adopting LLAMA2-13B \citep{touvron2023llama} as the weaker LLM and GPT-4 as the stronger LLM.
+On the DATE dataset, our approaches still works.
+However, LLAMA2-13B as the weaker LLM doesn't yield ideal results on GSM8k and CREPE. That is because most of the questions in GSM8k and CREPE are excessively complex for LLAMA2-13B. Therefore, LLAMA2-13B often fails to answer the questions consistently across multiple samplings. Hence, the choice of a weaker LLM should be contingent on the task's level of difficulty. When the current weaker LLM struggles with the task, it is advisable to consider switching to a more powerful LLM.
+
+
+
+\paragraph{Can the stronger LLM benefit from the weaker LLM hints?}
+In our LLM cascade, all questions will obtain answers from the weaker LLM, no matter if they will be sent to the stronger LLM or not. Therefore, an interesting question is whether the answer produced by the weaker LLM (correct or incorrect) can provide ``hints'' to enhance the stronger LLM. To answer this question, we experimented with \texttt{MoT-1D-Verify}, where we additionally passed the two inconsistent answers $A_1^{w\prime}$ and $A_2^{w\prime}$ as hints to the stronger LLM following the format of prior work~\citep{zheng2023progressive}. We observed that the hints can only yield slight improvement on DATE, but greatly hurt the model performance on GSM8k and CREPE. Therefore, we conclude that hints from the weaker LLM, when it is uncertain about the question, do not help the stronger LLM.
+\paragraph{Can our method generalize to factual-based tasks?} We also explored whether our method can be generalized to factual-based reasoning tasks in 
+
+
+
+\section{Related Work}
+
+Earlier research has delved into techniques to enhance the cost efficiency of LLMs, including quantization, pruning, and decoding methods\citep{bai2021quant,kurtic2023pruning,Leviathan2022FastIF}. While many LLMs are closed-source, certain studies have concentrated on how to utilize the API efficiently. 
+\citet{chen2023frugalgpt} proposed an LLM cascade, which sends a query to a list of LLMs sequentially if the answers provided by the prior LLMs are regarded unacceptable.
+A concurrent effort is made by \cite{sakota2023flyswat}, where the proposed approach determines which LLM to invoke prior to sending the query to any LLM. 
+Both of these approaches employed external verifiers fine-tuned from smaller LMs and therefore demanded substantial training data and additional model learning. In our experiments, we showed the ineffectiveness of these approaches when they were used to save costs for complex reasoning tasks, which echos the discovery of the shortcomings of LLM fine-tuning in recent work~\citep{ni2023selfsampling}. In contrast, we proposed a novel solution for LLM cascades based on the answer consistency of the weaker LLM, which is training-free and is not limited to a specific weaker LLM. 
+
+\paragraph{Reasoning with LLMs} LLMs have demonstrated strong capability in solving reasoning tasks~\citep{rae2021scaling,lewkowycz2022solving,zhong2023agieval}. The standard few-shot in-context learning for LLMs is to feed the question to the LLM and let it generate the answer directly \citep{brown2020language}. \citet{wei2022chain} then proposed the Chain-of-Thought approach, showing that prompting LLMs to think step by step can significantly improve their performance in solving reasoning problems, as it activates the built-in reasoning capabilities of LLMs~\citep{madaan2022text}. To further facilitate the mathematical steps in a reasoning task, \citet{chen2022program} and \citet{gao2022pal} proposed the Program-of-Thought prompting, using code as the intermediate step and executing it with an external interpreter to entangle reasoning and numerical calculation.
+While most existing works studied CoT and PoT independently as alternative approaches, several other works have delved into the synergy between them, e.g., integrating code into CoT~\citep{cheng2023binding,he2023solving}, ensembling algebraic and code representations~\citep{imani2023mathprompter, yue2023mammoth}, or performing automatic selection between CoT and PoT \citep{zhao2023automatic_select}. Similar to these works, our approaches employ CoT and PoT jointly; however, unlike them, we leverage this synergy for the novel application of cost-saving for LLM reasoning. 
+On the other hand, like our LLM cascades, there are also recent works building pipelines chaining multiple LLMs~\citep{varshney-baral-2022-model, xiong2023diving, li-etal-2023-contrastive-decoding,lin2023swiftsage}, but these works have a different focus on improving the task accuracy, rather than reducing the LLM costs.
+
+\paragraph{Uncertainty of LLMs} Our approach involves measuring the uncertainty of the results of LLMs. Multiple concurrent works have investigated using the voting score to evaluate the answer's uncertainty~\citep{xiong2023can,si2023promptingReliable,cai2023human-loop}. However, they dismissed the potential application for different representations of intermediate steps in the evaluation. 
+
+
+
+\section{Conclusion}
+
+We introduce a simple yet efficient and universally applicable economical pipeline to dynamically decide the LLMs in reasoning tasks, so as to save the token costs. Our approach based on checking the answer consistency of the weaker LLM is novel and effective.
+Our discoveries emphasize that leveraging prompts with a mixture of thought representations in weaker LLM achieves the best performance as it introduces diverse answers. Compared with fully employing the stronger LLM, our pipeline requires approximately 40\% of expenses to achieve a comparable result.
+
+
+\section{Ethics Statement}
+
+Our research endeavors to build a cost-efficient pipeline in solving reasoning problems in the LLM era. The significance of this work holds the potential to benefit a diverse range of organizations, particularly those with limited financial resources such as local businesses, educational institutions, and non-profit organizations. By devising cost-effective solutions, we empower these resource-constrained entities to harness the reasoning ability of LLMs cheaply, thereby fostering fairness and inclusivity within the NLP community. This aligns with the broader goal of ensuring that advancements in NLP do not remain exclusive to a select few, but are accessible to a wider audience, regardless of their financial constraints.
+
+Moreover, for these industry giants, the cost savings facilitated by our findings can also be substantial, particularly when facing extremely large throughputs. By optimizing cost-efficiency, our research contributes to not only economic savings but also environmental sustainability by mitigating the carbon footprint associated with running large-scale computations.
+
+
+
+\section{Reproducibility Statement}
+
+Our pipeline is simple to implement and reproducible. 
+All of our implementations (including the complete prompt scripts, the code for training external verifiers, the code for approach evaluation, etc.
+
+
+
+\section{Acknowledgement}
+
+This project was supported by Microsoft. It was also partially supported by resources provided by the Office of Research Computing at George Mason University (URL: \url{https://orc.gmu.edu}) and funded in part by grants from the National Science Foundation (Awards Number 1625039 and 2018631). Murong and Ziyu appreciate the funding support from George Mason College of Engineering and Computing.
+
+
+
+
+

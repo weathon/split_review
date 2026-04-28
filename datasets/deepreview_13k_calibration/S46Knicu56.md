@@ -1,0 +1,143 @@
+# A Variational Framework for Estimating Continuous Treatment Effects with Measurement Error
+
+- Decision: Accept
+- Avg Score: 7.33
+- Scores: 6, 8, 8
+
+## Abstract
+Estimating treatment effects has numerous real-world applications in various fields, such as epidemiology and political science. While much attention has been devoted to addressing the challenge using fully observational data, there has been comparatively limited exploration of this issue in cases when the treatment is not directly observed. In this paper, we tackle this problem by developing a general variational framework, which is flexible to integrate with advanced neural network-based approaches, to identify the average dose-response function (ADRF) with the continuously valued error-contaminated treatment. Our approach begins with the formulation of a probabilistic data generation model, treating the unobserved treatment as a latent variable. In this model, we leverage a learnable density estimation neural network to derive its prior distribution conditioned on covariates. This module also doubles as a generalized propensity score estimator, effectively mitigating selection bias arising from observed confounding variables. Subsequently, we calculate the posterior distribution of the treatment, taking into account the observed measurement and outcome. To mitigate the impact of treatment error, we introduce a re-parametrized treatment value, replacing the error-affected one, to make more accurate predictions regarding the outcome. To demonstrate the adaptability of our framework, we incorporate two state-of-the-art ADRF estimation methods and rigorously assess its efficacy through extensive simulations and experiments using semi-synthetic data.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper proposes a continous treatment effect estimation where treatment is observed with some measurement noise. The proposed algorithm builds upon variational auto-encoders and aim to maximize the ELBO objective. The proposed algorithm is then compared with state-of-art algorithms in synntetic and semi-synthetic datasets.
+
+### Strengths
+1. The paper is very well-written, easy for any reader to follow very easily. The problem is very-well motivated in the introduction.
+2. To the best of my knowledge, the treatment measurement error is not investigated in the literature. This paper proposes a methodology to handle this case. 
+3. Using vational encoders in the treatment effect estimation is not a new idea, it is well-articulated in the paper.
+
+### Weaknesses
+1. I am not completely convinced about technical contribution of the paper. The treatment measurement error is the main contribution of the problem definition, but it is not clear what new challenges this brings. Is it a straightforward extension of the existing work ? Specifically, the paper does not adequately articulate the unique challenges posed by measurement error in the *treatment* variable, as opposed to measurement error in covariates or outcomes. The core issue seems to be that the treatment variable is used in both the propensity score estimation and the outcome prediction, and the paper does not clearly explain how this compounds the problem compared to standard measurement error scenarios. It is unclear if the proposed variational approach is simply a re-application of existing techniques or if it addresses specific issues arising from treatment error.
+2. I think one of the weakest section in the paper is the experiments. The proposed algorithm is only compared with state-of-art algorithms in synthetic and semi-synthetic datasets where both treatments and outcomes are synthtically-generated. Additionally, IHDP data has only ~700 samples. It would have been much stronger if the proposed algorithms are tested in real-world dataset with more samples. The synthetic data generation process is not sufficiently detailed, making it difficult to assess the generalizability of the results. The lack of real-world data limits the practical impact of the work, as the performance in synthetic settings may not translate to real-world scenarios where the data distributions are more complex and the nature of measurement error is unknown.
+
+### Questions
+1. What are the technical challenges that come with treatment measurement ? 
+2. What happens to performance of the algorithm if the treatments are measured  without an error ?
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a variational framework for estimating the average dose-response function (ADRF) in the presence of measurement error in the treatment variable. To do this, it formulates a probabilistic model treating the unobserved true treatment as a latent variable. This allows measurement error to be handled in a principled Bayesian way. To approximate the posterior, it uses a variational inference approach to avoid expensive MCMC methods. The method can leverage state-of-the-art neural networks for ADRF estimation in the error-free setting by integrating them into the variational framework. Extensive simulation studies and experiments on semi-synthetic datasets demonstrate the efficacy of the proposed framework compared to recent nonparametric methods.
+
+### Strengths
+## originality
+- The paper tackles the important problem of treatment effect estimation with measurement error, which has received comparatively limited attention.
+- The proposed method seems novel.
+
+## quality
+- The work is well motivated and the methodology technically sound.
+- Experiments are demonstrating the efficacy of the proposed methods sufficiently.
+
+## clarity
+- The paper is well written and easy to follow.
+
+## significance
+- Estimating treatment effects from observational data has many crucial real-world applications. Being able to handle measurement error robustly significantly expands the applicability of these methods. The flexible modeling framework could pave the way for practical use in areas like medicine, social sciences, and policy evaluation.
+
+### Weaknesses
+While overall quite strong, there are a few areas where the paper could potentially be improved:
+- VAE suffers from non-identifiability. Although beta VAE might help disentangling the factors of variations, it doesn’t provide a guarantee. This is a potential limitation that is not discussed. Specifically, the paper does not address the inherent challenges in disentangling the latent space, which could lead to unstable or unreliable estimates of the treatment effect. The lack of identifiability means that different latent representations can yield the same observed data likelihood, making it difficult to interpret the learned latent variables and their relationship to the true treatment.
+- Plots have very small fonts and proposed method is not marked (e.g. “ours”) making it difficult to read.
+
+
+### Questions
+(apologies for repeating some points from weaknesses)
+- Can you please comment / discuss on the non-identifiability of VAEs? Could identifiability improved by the use of some auxiliary information, similarly to https://proceedings.mlr.press/v108/khemakhem20a/khemakhem20a.pdf?
+- Plots are very small, please update the fonts to make it more readable. Also mark your method as "ours" to make sure the reader sees what they compare.
+- nitpick: Data generation model is usually called data generating process. Not sure if you should change to this, but worth mentioning it.
+- Figure 2. it's common to also add the parameters of the models in the plot (\theta_y, \theta_t, \phi). e.g. check also the original VAE paper.
+- Figure 3. What does MiM stands for?
+- Metrics: "we employ the widely recognized metric" - can you please provide citation?
+- "this metric quantifies the proximity of our predicted outcomes to the true potential outcomes when considering covariates and the corresponding treatment" -> from the definition of the metric this doesn't quantify the error for the corresponding treatment but for all possible treatments in T. Please update the text.
+- Figure 4. True response seems same between all plots, is this correct? So in that sense it's one simulation dataset but for different noise distributions? 
+- Table 1. Why APE is 0.0 +- 0.0? The model seem to have high AMSE error but no error (!) on APE. Would be curious to understand what happened there.
+- Appendix B.4 last sentence. Fix the citation (?)
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes a variational framework to estimate the causal effect of a continuous treatment in the presence of measurement error, with the unobserved true treatment as a latent variable to be learnt. Experiments on synthetic data demonstrate decent performance in some settings.
+
+### Strengths
+- Interesting setting not often considered in TEE literature (at least my knowledge of recent literature).
+- VI approach seems to make sense and pretty standard.
+- Well written, meme is nice as an illustration of the problem.
+
+### Weaknesses
+ - It's not really apparently where the measurement errors comes into play (more concretely I'm not sure the DAG makes sense to me). To take your meme example: Doctor prescribes S, which was prescribed due to X, and the resulting treatment as a result of the patient not adhering to the prescription is T. The resulting outcome is Y, with measurement error too. So wouldn't the DAG be: X->S | S+U->T | X + T + eps -> Y
+- Is ATTNet different from TransTEE, because the actual name from the paper.
+- The experimental results section is disappointing. On synthetic datasets, unless you have a high measurement (which I'm not sure if completely reasonable but regardless), the non-VI approaches perform basically on par. But semi-synthetic really shows the this method is ineffective: VI underperforms significantly. And only reason to use NN is when there is when there is high-dimensions, so not sure what the point of this method is then.
+
+### Questions
+Just a response to the above.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

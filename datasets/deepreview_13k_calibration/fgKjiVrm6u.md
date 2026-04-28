@@ -1,0 +1,185 @@
+# REFACTOR: Learning to Extract Theorems from Proofs
+
+- Decision: Accept
+- Avg Score: 7.25
+- Scores: 8, 8, 5, 8
+
+## Abstract
+Human mathematicians are often good at recognizing modular and reusable theorems that make complex mathematical results within reach. In this paper, we propose a novel method called theoREm-from-prooF extrACTOR (REFACTOR) for training neural networks to mimic this ability in formal mathematical theorem proving. We show on a set of unseen proofs, REFACTOR is able to extract $19.6\%$ of the theorems that humans would use to write the proofs. When applying the model to the existing Metamath library, REFACTOR extracted $16$ new theorems. With newly extracted theorems, we show that the existing proofs in the MetaMath database can be refactored. The new theorems are used very frequently after refactoring, with an average usage of $733.5$ times, and help shorten the proof lengths. Lastly, we demonstrate that the prover trained on the new-theorem refactored dataset proves more test theorems and outperforms state-of-the-art baselines by frequently leveraging a diverse set of newly extracted theorems.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a deep learning method for extracting new proofs from human proofs. The task is formulated as a binary node classification of the nodes in the proof trees and a graph neural network is trained for this classification. Experiments on Metamath demonstrate the effectiveness of this approach. 1923 novel theorems are extracted from set.mm and these new theorems could greatly shorten human proofs. These new proofs could also be used to train the theorem prover and the performance of the Holophrasm prover is improved from 557/2720 to 632/2720.
+
+### Strengths
+1 The problem of extracting sub-proofs as standalone theorems is relevant and important. It can help discover new lemmas from existing proofs and compress the formal proof corpora. 
+2 The GNN-based approach is technically sound. 
+3 Experiments demonstrate the usefulness of the newly extracted theorems (1) they can be used to shorten human proofs (2) they can be used to improve the performance of theorem proving.
+
+### Weaknesses
+Metamath is a relatively simple formal mathematical language and less commonly used for advancing theorem proving compared to other formal provers like Isabelle and Lean. Although the proposed method may be applied to other provers, the implementation and the results of this paper doesn't contribute much to the advance of ATP directly. The focus on Metamath, while understandable for initial experimentation, limits the immediate impact on more widely used and complex theorem proving environments. The lack of direct comparison with state-of-the-art methods in more established systems also makes it difficult to assess the true potential of this approach. For example, it is unclear how the extracted theorems would compare to those derived by tactics in Isabelle or Lean, which often involve more sophisticated reasoning and proof structures.
+
+### Questions
+N/A
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes a pipeline to train neural networks to extract reusable theorems from mathematical proofs. It uses a graph neural network to take in a proof tree and make node-level classifications. It non-trivially extracts correct unseen theorems that humans would use 19.6% of the time. These theorems are then incorporated into the library to help in generating shorter proofs and potentially enhance the efficiency of baseline theorem provers.
+
+More literature should be added in the related work section, for example, there is no related work mentioned after the year of 2021.
+The author provides a symbolic baseline to demonstrate that 19.6% is non-trivial. The approach described in the symbolic baseline is intuitive and a fair comparison. The result provides confidence that this is an interesting line of work.
+
+I believe the work is meaningful for automated proof simplification and generating better training dataset to improve baseline theorem prover performance. However, I’m concerned whether extracting “new theorems” from existing proofs is helpful to the automated theorem proving community, or the maths community in general.
+
+Given that the metamath library is one of the largest databases, it could be possible that the 19.6% is the best possible result for the current REFACTOR pipeline and architecture. Even though 19.6% is a non-trivial result, it would be meaningful if we know whether the results can be improved by expanding the theorems even more and generating more training data.
+
+### Strengths
+- This is a novel problem and the first application of GNN to this problem to the best of my knowledge, the idea of theorem expansion is quite intuitive. The result is novel and could be helpful for proof simplification and generating better proof dataset.
+
+- Potentially very impactful
+
+### Weaknesses
+The related work comparison can be improved.
+
+I’m concerned whether extracting “new theorems” from existing proofs is helpful to the automated theorem proving community, or the maths community in general.
+
+Given that the metamath library is one of the largest databases, it could be possible that the 19.6% is the best possible result for the current REFACTOR pipeline and architecture. Even though 19.6% is a non-trivial result, it would be meaningful if we know whether the results can be improved by expanding the theorems even more and generating more training data.
+
+### Questions
+Do you plan to apply it to other math libraries, e.g., LEAN? If so, can your technique be lifted to that setting without much effort. Please provide justification, if your answer is YES.
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+A scheme is proposed for learning to extract subtrees from proofs -- seen as computation trees -- that are expected to be useful elements to add to a library of theorems. The algorithm is trained on data created by unraveling function applications within human-written proofs and substituting the proof tree of the function being replaced, thus performing imitation learning on semi-synthetic data. The new theorems extracted in this way from a Metamath library are shown to yield shorter proofs (using proof-search algorithms applied to both the original and refactored collection of theorems).
+
+### Strengths
+- Good motivation and introductory examples. Main ideas are clearly explained.
+- Very interesting method of learning to compress by training on artificially unraveled function applications.
+
+### Weaknesses
+ - Framing and related work:
+  - It is claimed a few times that proof refactoring "mimics what human mathematicians do" or the like, but this is not backed up. Is it your intuition or do you have evidence?
+    - I am not convinced that compression of proofs is similar to human conjecture-making and definition-building behaviour. It certainly makes sense as a procedure for defining new abstractions, but it does not account for intrinsically motivated conjecture-making (guessing a theorem is true and then trying to prove it).
+  - Section 3 misses essential mathematical background to theorem proving. The equivalence of proofs and programs / computation trees is stated and assumed without further comment, but it is not a trivial concept. The Curry-Howard correspondence and how it applies to Metamath deserves more discussion. See or cite, e.g., [P. Wadler, "Propositions as types"] for historical overview.
+- Writing unclarities and bugs: 
+  - The example in Fig. 1 was hard to make sense of. (Note that the reviewer is familiar with Lean but not Metamath.) Can the last paragraph of section 3 explain it in plain(er) language, explaining what types of objects `ph`, `wffph`, etc. are and what the theorem means?
+  - Incorrect use of "connected component" (several times on p.4). It is used to mean "connected subgraph", when in fact "connected component" has a different and very well-established meaning in graph theory.
+  - Related, please also explain in a few words why connected subtree is not sufficient for validity. Note that issues related to bound variables would only be worse in more sophisticated proof systems -- this could be discussed as a limitation.
+  - Misc.: Please check your citations (`\citep`/`\citet`).
+- Evaluations are only on a relatively simple library and there isn't fair comparison to training-free compression schemes for extracting the new theorems.
+- Also see questions below.
+
+### Questions
+- The GNN model seems to output a binary logit at each node. How do you extract the subtree from the predictions? I could not find discussion of the exact procedure in the text. The code does an argmax scheme; did you try sampling or other approaches?
+  - Such a procedure seems to have an important limitation, which it can't produce a multimodal distribution over subtrees (which is a problem if the compressions on two different subtrees are mutually exclusive).
+- Regarding the evaluation:
+  - Could newly extracted theorems be equivalent to existing ones by symmetries? Does this affect the experimental claims?
+  - Do you know for certain that the "human-written" proofs were written each proof from scratch? How does it affect the claims if humans copied chunks between the proofs?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes to extract a sub-tree from a complete proof tree to obtain new theorems. Given a human-written proof, it constructs training samples by expanding the theorems nodes with their proof tree. Then, this paper trains a graph neural network to embed the proof tree and classify whether a node is an expanded node to extract nodes for forming a theorem.
+
+### Strengths
+The paper improves the MetaGen performance by training it with the extra extracted theorems.
+
+### Weaknesses
+The necessity of training a neural network to extract sub-proof is not validated and explained. One can easily traverse the proof tree and obtain multiple sub-proof as theorems. This simple method can also surpass the proposed method in lots of aspects. For example, if it extracts all sub-proof, it might obtain all human-defined rules instead of 19.6% of them and more valid theorems than 1923. The experiments do not have a comparison with such baselines and cannot validate the effectiveness of the proposed method.
+
+The paper does not give a detailed description in the main text of how to extract a theorem given the binary prediction results within a proof.
+
+### Questions
+- Why not fill some nodes with pre-defined rules to connect the positive nodes and obtain more valid theorems?
+
+- How does the theorem extracted from the validation set occur/support the proofs from the test set?
+
+- Do the positive and negative nodes balance in the training data?
+
+- Can simple rule-based extraction methods, such as byte-pair encoding(BPE), improve the performance of ATP?
+
+Post Rebuttal:
+The response addresses my concerns and I have raised my rating.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

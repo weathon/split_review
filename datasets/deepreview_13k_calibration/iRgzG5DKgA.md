@@ -1,0 +1,168 @@
+# Fair4Free: Generating High-fidelity Fair Synthetic Samples using Data-Free Distillation
+
+- Decision: Reject
+- Avg Score: 3.00
+- Scores: 3, 3, 3, 3
+
+## Abstract
+This work presents Fair4Free, a novel generative model to generate synthetic fair data using data-free distillation in the latent space. Fair4Free can work on the situation when the data is private or inaccessible.  In our approach, we first train a teacher model to create fair representation and then distil the knowledge to a student model (using a smaller architecture). The process of distilling the student model is data-free, i.e. the student model does not have access to the training dataset while distilling. After the distillation, we use the distilled model to generate fair synthetic samples. Our extensive experiments show that our synthetic samples outperform state-of-the-art models in all three criteria (fairness, utility and synthetic quality) with a performance increase of 5\% for fairness, 8\% for utility and 12\% in synthetic quality for both tabular and image datasets.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4
+
+### Summary
+The authors propose Fair4Free, a novel generative approach for generating high-fidelity synthetic fair data using knowledge distillation.
+Their proposed method consists of three stages: 1) train a VAE on the biased dataset to learn a fair representation, 2) use it as a teacher model and distill the fair representation to a student model, and 3) use the trained VAE decoder and student model to reconstruct high-fidelity fair synthetic samples. They show experiment results on tabular and image datasets.
+
+### Strengths
+* The paper addresses an important problem of generating synthetic fair data.
+* The experiments include a wide range of evaluation metrics to thoroughly evaluate the proposed method.
+
+### Weaknesses
+ * The contributions of this paper are unclear. Although the authors claim the method is *data-free*, it still relies on a biased dataset to train the teacher model in the first stage. Furthermore, the method combines the student encoder with the teacher decoder to generate synthetic samples. Then why not simply use the teacher model directly? What advantages are gained by distilling the teacher encoder into a smaller student encoder only to recombine it with the teacher decoder? The paper also lacks an ablation study to justify the design choices in the method.
+* Overall, the paper needs substantial improvement in writing quality and clarity. Implementation details are severely lacking, e.g., hyperparameters used for training the proposed and compared methods, details on synthetic data generation during evaluation, how the random forest model is trained, and explanation of the evaluation metrics (e.g., DPR, EOR).
+* The method demonstrates minimal performance gains over the compared methods across downstream tasks (Table 2,3).
+* They should additionally report FID for synthetic data quality.
+
+### Questions
+* The paper needs to improve the clarity of implementation details and evaluation protocols mentioned above.
+* The paper needs an ablation study to justify the design choices of the method.
+
+### Soundness
+1
+
+### Presentation
+1
+
+### Contribution
+1
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3
+
+### Summary
+Fair4Free introduces an innovative generative model designed to create fair synthetic data without accessing actual datasets. It leverages a technique called data-free distillation, where knowledge is transferred from a teacher model to a smaller student model using only noise as input. The approach is touted for its effectiveness in generating data that adheres to fairness, utility, and quality benchmarks, surpassing existing models.
+
+### Strengths
+1. Enhanced Privacy Protection: The model's ability to operate without real data makes it highly suitable for environments with strict privacy regulations or sensitive data restrictions.
+2.  By employing a smaller model architecture, Fair4Free minimizes the computational demands, making it feasible for deployment on less powerful devices, including edge devices.
+3. It consistently outperforms other models in generating synthetic data that scores highly on fairness, utility, and quality metrics, as validated by rigorous experimental evaluations.
+
+### Weaknesses
+1.  The model currently focuses on addressing bias with respect to single sensitive attributes, potentially overlooking complex bias scenarios involving multiple intersecting attributes.
+2. Scalability Concerns: While the model is efficient, scaling it to handle larger or more complex datasets without compromising performance remains a challenge.
+3. Can Fair4Free be adapted to efficiently manage multiple sensitive attributes to tackle intersectional biases more effectively?
+4. In terms of decision-making and predictive accuracy, how do the synthetic datasets generated by Fair4Free compare to those derived from traditional data generation methods?
+5. Adaptability to Data Shifts: What measures can be taken to enhance Fair4Free's robustness against dynamic changes in data distribution that are common in real-world settings?
+
+### Questions
+See weaknesses.
+
+### Soundness
+3
+
+### Presentation
+2
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3
+
+### Summary
+Fair4Free presents a novel approach to generating synthetic data that is fair and unbiased using data-free distillation. This method is particularly useful when access to training data is restricted due to privacy concerns. The process involves distilling knowledge from a pre-trained teacher model to a smaller student model without using real data, relying instead on noise input. The paper claims significant improvements over other models in terms of fairness, utility, and synthetic quality.
+
+### Strengths
+1.  The data-free approach allows the generation of fair data even when access to original datasets is restricted, addressing significant privacy concerns.
+2.  By using a smaller student model, Fair4Free reduces computational resources and enables potential deployment on edge devices.
+3.  The model demonstrates superior performance across fairness, utility, and synthetic quality metrics compared to state-of-the-art models.
+
+### Weaknesses
+1. Complexity and Overhead: While reducing computational costs via a smaller model, the initial setup of training and distilling between models can be complex and resource-intensive. The distillation process, involving a pre-trained teacher model and a student model, introduces a multi-stage training pipeline that may require careful hyperparameter tuning and significant computational resources, especially for large-scale datasets or complex models. This overhead needs to be thoroughly evaluated and compared against the benefits of the smaller student model.
+2.  How does the performance of synthetic samples generated by Fair4Free compare to non-synthetic data in terms of real-world utility and fairness? The paper needs to provide a more granular analysis of how the synthetic data performs in downstream tasks compared to the original data. It is not sufficient to only report aggregate metrics; a breakdown of performance across different subgroups and tasks is crucial to assess the practical utility of the generated data. For example, how does the model perform on edge cases or underrepresented groups?
+3. How robust is Fair4Free to shifts in data distributions that might occur in practical scenarios? The paper should investigate the model's sensitivity to changes in the underlying data distribution. Real-world data often exhibits non-stationarity, and it is important to understand how the model's performance degrades when the input data distribution deviates from the distribution used during training. This includes analyzing the impact of covariate shift and concept drift on the generated synthetic data.
+
+### Questions
+see weaknesses.
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+2
+
+### Summary
+This work proposes a generative model for fair synthetic data generation with data-free distillation. The proposed method involves first training a fair teacher model on the biased dataset and producing a fair representation, then distil using a student architecture. Finally, synthetic fair samples are reconstructed from the distilled fair representation. The authors apply the method on image and tabular data, and outperform all baseline methods.
+
+### Strengths
+1. The empirical results look promising as they outperform most baselines.
+2. The experiment is performed on both visual and tabular data 
+3. The proposed method is well presented and easy to understand
+
+### Weaknesses
+1. The teacher model trained in this paper is assumed to have fair representation. This involves using a regularized distance correlation minimization loss to weaken the connection between the sensitive and non-sensitive attributes. This reliance on a specifically trained teacher model with a fairness guarantee significantly limits the applicability of the proposed method. The method cannot leverage pre-trained large generative models without this fairness guarantee, which is a major drawback. It is unclear how the method would perform if the teacher model did not have this explicit fairness constraint during training.
+2. Experiment on visual data (i.e. CelebA and Colored-MNIST) has no quantitative benchmarking and comparison with baseline methods. The lack of quantitative metrics, such as Inception Score or Frechet Inception Distance (FID), makes it difficult to assess the quality of the generated images. Furthermore, a comparison with established generative models like EDM [1], even if not focused on fairness, is essential to understand the trade-off between fairness and generation quality. The absence of such comparisons weakens the experimental validation.
+3. The claim about data-free training is misleading. While the distillation process itself is data-free, the initial training of the teacher model requires a biased dataset and a specific fairness-aware loss function. This dependence on training data for the teacher model undermines the claim of a truly data-free approach. The method is not applicable in scenarios where the original training data is completely inaccessible or unknown.
+
+### Questions
+I'm a bit confused about the motivation for using data-free distillation. The authors claim that the method's benefit is that it can be applied when data is inaccessible; however, the teacher model required in the method is trained with a designed loss function to have a fair representation. 
+
+I assume the underlying assumption of this work is that the existing foundational generative models do not have the desired fairness property, so in reality, the original training data is still required to apply the proposed method. Then, my question is, why does data-free distillation matter in this case? Would it be easier to use a single model to learn how to generate fair data from scratch?
+
+As a non-practitioner in fairness, I would appreciate if the author could clarify if I misunderstood the setting or the motivation of the work.
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+2

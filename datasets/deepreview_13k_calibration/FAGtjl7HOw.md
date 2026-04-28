@@ -1,0 +1,172 @@
+# Explaining Kernel Clustering via Decision Trees
+
+- Decision: Accept
+- Avg Score: 7.00
+- Scores: 6, 8, 6, 8
+
+## Abstract
+Despite the growing popularity of explainable and interpretable machine learning, there is still surprisingly limited work on inherently interpretable clustering methods. Recently, there has been a surge of interest in explaining the classic k-means algorithm, leading to efficient algorithms that approximate k-means clusters using axis-aligned decision trees. However, interpretable variants of k-means have limited applicability in practice, where more flexible clustering methods are often needed to obtain useful partitions of the data. In this work, we investigate interpretable kernel clustering, and propose algorithms that construct decision trees to approximate the partitions induced by kernel k-means, a nonlinear extension of k-means. We further build on previous work on explainable k-means and demonstrate how a suitable choice of features allows preserving interpretability without sacrificing approximation guarantees on the interpretable model.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes to learn axis-aligned decision trees for kernel k-means clustering problems. Conceptually, the idea of the paper is quite similar to the work by Moshkovitz et al. (2020) but for kernel k-means clustering. First, the paper motivates for kernels that are separable over each dimension (interpretable feature maps), and theoretically shows that axis-aligned splits in the transformed feature space does not result in axis-aligned splits in the original space for the popular Gaussian kernel. By approximating kernels to achieve interpretable feature maps, the paper  then adapts existing explainable regular k-means algorithms (IMM and ExKMC) to handle the kernel k-means clustering problem. Experiments are performed on 5 datasets showing the advantage explainable kernel k-means over regular k-means.
+
+### Strengths
+1) As far as I know, this is the first paper addressing the problem of explainable kernel k-means clustering.
+2) The paper proposes interesting approximations to the kernel function to obtain interpretable feature maps.
+
+### Weaknesses
+1) The paper states "interpretable variants of k-means have limited applicability in practice", but as far as I know, kernel k-means is not a widely used clustering algorithm (unlike regular k-means, spectral clustering or DBSCAN). And the need for an interpetable version of it also seems to be low.
+2) The paper views the optimization problem of interpretable clustering in a two step approach: first fitting a kernel k-means and then using the greedy tree induction algorithm to fit the tree on the result of kernel k-means. But this seems to be suboptimal in that one should aim to jointly optimize the clustering objective along with the decision tree parameters. The paper does not discuss the potential drawbacks of this two-step approach, such as the possibility of the tree fitting to a suboptimal clustering solution.
+3) The paper completely discards the approach of fitting a tree on the kernel k-means clustering labels as a supervised problem. It cites the result in Moshkovitz et al. (2020, Section 3), where an unusual Toy 2d example shown to illustrate the bad behavior which rarely occurs in practice. Fitting a classification tree (such as CART or even better algorithms such as optimal MIO-based or alternating optimization-based) on the clustering labels should produce adequate results in practice. The paper does not provide any empirical evidence to support their claim that this approach is inadequate, especially given the practical success of tree-based classifiers.
+4) The theoretical bounds on the price of explainability seem to be quite high and not really helpful in practice. For example, does the bound of $O(dk^2)$ mean that say for MNIST the tree will do worse by (784 * 100) times than the unconstrained kernel k-means? What is the practical value of these asymptotic bounds? Experimental results seem to show that trees are doing within a constant factor the reference clustering. The paper should provide more discussion on the practical implications of these bounds and how they relate to the observed performance.
+
+### Questions
+1) How does the results (the price of explainability) compare with tranining a CART tree on the cluster assignments?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This manuscript extends the study of explainable $k$-means to the kernel $k$-means, also using decision trees as the "representation" of explanation but the node does not characterize axis-parallel threshold cuts anymore. In fact, the explainability is relaxed to be an interval or the complement of it. To address the issue of non-injectivity of cluster centers from the RKHS to $\mathbb{R}^d$, the decision is also made on the proposed surrogate feature maps instead of Euclidean space. Based on these new notions and the previous Iterative Mistake Minimization algorithm for vanilla Explainable Clustering, a kernel IMM algorithm is proposed for several kernels. __Most importantly__, a roughly $O(k^2)$ upper bound on the price of explainability holds for many kernels., when the dimension $d$ is small.
+
+### Strengths
+1. The paper is in general well-written, I had a good experience of reading.
+2. Due to the rush I unfortunately did not read all the proof, but by a glance I think the correctness is OK. I will be happy to come back to it if any concern is raised during the discussion.
+3. If this work is just combining kernelization with the decision tree framework, it is OK but not interesting enough. I like the relaxation of explainability to address this problem. More importantly, the authors give reason for doing this in Thm 1 & 2.
+4. It is good to show experimental results.
+
+### Weaknesses
+1. The work is refrained on kernel $k$-means only, which by itself is not a limitation. But note that the line of research on explainable clustering has coupled $k$-means and median together, and the proposed algorithms, even lower bounds are similar. The $k$-center objective is indeed studied separately. It is expected that some insights should be given on how this result sheds light to $k$-median, or $k$-center even better. However I am not able to find any discussion.
+2. No discussion on lower bound is involved.
+3. It is based on the previous two points, I think the scope of this paper can be wider.
+
+### Questions
+Minor:
+1. Missing related work on explainable clustering: Impossibility of Depth Reduction in Explainable Clustering
+2. Related work on other notions of EXC, up to you: Optimal interpretable clustering using oblique decision trees
+3. In the first work of explainable clustering, IMM also attains $O(k^2)$ upper bound but is later improved to $\tilde{O}(k)$ by balancing the mistakes with the size in the SODA paper. Have you tried this? Any thought if that would be helpful?
+4. Maybe I missed it, but if not, please explain rand index.
+5. Will the codes turn public?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This work aims to fill the gap in the literature on (inherently) interpretable clustering methods. Specifically, this work proposes algorithms to approximate kernel k-means methods. Similar approaches have been proposed before for classic k-means algorithms, however practice oftentimes requires more flexible clustering methods such as kernel k-means. The authors propose a variant of the interpretable clustering method Iterative Mistake Minimization (IMM), which is an algorithm that approximates a given k-means clustering by a decision tree with k leaves, where each leaf represents a cluster. The proposed algorithm (Kernel IMM) builds on IMM, and essentially constructs a decision tree to approximate the clusters induced by kernel k-means. Besides Kernel IMM they also present Kernel ExKMC and Kernel Expand, two methods where new leaves are added in a greedy approach to improve accuracy of the tree (potentially at a loss of interpretability). Performance of the approaches is evaluated on a few datasets.
+
+### Strengths
+The paper is well written and has a clear structure. The motivation of the proposed algorithm(s) is clear and the paper addresses a relevant and timely issue. The paper discusses central ideas in a concise manner, with elaborations in the appendix. The approach seems novel in a sense that it extends ideas from interpretable k-means to kernel k-means, which has not been done before. The chosen figures support the manuscript, and especially Figure 2 is a nice visualisation of the proposed method.
+
+### Weaknesses
+see the main weakness of this paper in the limited experimental results. It would be nice to see a bit more elaborate experiments. The authors claim that the resulting trees are interpretable, as decision trees are generally understood to be both globally and locally interpretable. However, even decision trees may become uninterpretable with too many leaves and/or too deep paths. Hence, it would be interesting to see the size of the trees. In Figure 4 (right) it can be seen that Kernel IMM performs (much) worse than kernel k-means, while Kernel ExKMC and Kernel Expand show a good performance compared to kernel k-means — however at what price of interpretability? To me, it would be interesting to see a bit more elaboration and analysis of the interpretability (and the trade-off). Presenting a sort of a case study on one of the datasets may be a possible option to show such results.
+
+Minor comments: 
+- why does (the reference to) appendix C appear before appendix B in the manuscript? They could be switched
+- the introduction may be shortened (especially 1st and 2nd paragraph) to allow for more space to report experimental results
+- it would be nice to include some references to works on (inherently) interpretable clustering methods that do not necessarily build on k-means (for example Carrizosa et al. (2023) or works on cluster description (e.g. Lawless & Günlük (2023))
+- contributions could be listed for conciseness 
+- 2x “of” in paragraph on explainable k-means
+
+### Questions
+Is it possible to compare to other works constructing interpretable models (not necessarily based on k-means or kernel k-means), for example in terms of accuracy or interpretability (nr. of rules, for example)? If not, how so?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper proposes an explainable kernel clustering algorithm. They consider the explainable clustering that uses a threshold decision tree to partition the data set. Their algorithm first computes a kernel k-means clustering on the data set. Then, the algorithm converts the kernel clustering into a (generalized) threshold decision tree. Each internal node of the threshold decision tree given by the algorithm is a threshold cut (or an interval cut with two thresholds) on a single feature of the original feature space.
+They also prove the upper bound on the worst-case price of explainability for kernel k-means clustering. They define the price of explainability for kernel k-means clustering as the ratio of the cost given by the decision tree and the cost of optimal kernel k-means clustering. They show that their kernel IMM algorithm achieves O(k^2) upper bound for additive kernels, O(dk^2) upper bound for interpretable Taylor kernels, and O(Cdk^2) for distance-based product kernels, where C depends on the dataset X and the kernel K.
+
+### Strengths
+1.	The paper is well-written and easy to follow. 
+
+2.	The paper proposed a new problem explainable kernel clustering and an algorithm for it. This problem generalized the explainable clustering problem proposed by Dasgupta et al (2020). The explainable clustering problem has been extensively studied in recent years. The explainable k-means and k-medians clustering generate a threshold decision tree clustering which is easy to understand and visualized by humans. In practice, the data set might not be well-clustered by k-means and k-medians clustering in the original feature space. The kernel method is widely used to map the original data into a well-clustered space. The algorithm utilizes kernel clustering to create an explainable clustering in the original feature space. The problem is well-motivated and interesting. 
+
+3.	They also provide theoretical analysis on the price of explainability for kernel k-means clustering. For several popular kernels, they show interesting upper bounds on the worst-case price of explainability.
+
+### Weaknesses
+1. Their kernel IMM algorithm is a direct generalization of the IMM algorithm proposed by Dasgupta et al (2020) to the kernel clustering. Although they compare the cost of the explainable clustering to the cost of optimal kernel k-means clustering, their upper bound loses a factor of d for interpretable Taylor kernels and distance-based product kernels. The dimension d might be very large in real-world data sets. 
+
+2. They consider the generalized threshold decision tree, in which each internal node can partition the space by an interval on a single feature. The interval cuts can be seen as two threshold cuts. Therefore, this generalized threshold decision tree can be converted to a regular threshold decision tree with more than k leaves. The previous works showed that expanding the threshold decision tree to more than k leaves can reduce the clustering cost. Thus it is unclear to me whether the improvement in the clustering cost in the experiments are due to the better kernel clustering or due to these generalized decision tree structure.
+
+### Questions
+1 Would this generalized threshold decision tree (with interval cut) significantly reduce the clustering cost since it partitions the space into more parts? It would be interesting to evaluate the effect of this tree structure change by converting it back to a regular threshold tree and comparing it with the expanded IMM with the same number of leaves.
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good

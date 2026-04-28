@@ -1,0 +1,185 @@
+# BayesDiff: Estimating Pixel-wise Uncertainty in Diffusion via Bayesian Inference
+
+- Decision: Accept
+- Avg Score: 6.50
+- Scores: 6, 6, 6, 8
+
+## Abstract
+Diffusion models have impressive image generation capability, but low-quality generations still exist, and their identification remains challenging due to the lack of a proper sample-wise metric. To address this, we propose \emph{BayesDiff}, a pixel-wise uncertainty estimator for generations from diffusion models based on Bayesian inference. In particular, we derive a novel uncertainty iteration principle to characterize the uncertainty dynamics in diffusion, and leverage the last-layer Laplace approximation for efficient Bayesian inference.
+The estimated pixel-wise uncertainty can not only be aggregated into a sample-wise metric to filter out low-fidelity images but also aids in augmenting successful generations and rectifying artifacts in failed generations in text-to-image tasks. Extensive experiments demonstrate the efficacy of BayesDiff and its promise for practical applications.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+Authors propose to obtain a Laplace approximation to the last layer of a diffusion model to filter out low-fidelity images.
+
+### Strengths
+**Originality.** The idea of obtaining Laplace approximations to the weights of neural networks is not new, neither is the idea of filtering out low-fidelity images.
+
+**Quality and clarity.** The paper is easy to follow.
+
+**Significance.** I do not find the proposed approach a theoretically sound approach, hence not significant.
+
+### Weaknesses
+ * Why not use the model likelihood to rule out low-fidelity images? The likelihood of diffusion models is tractable as done in [Song et al.](https://openreview.net/pdf/ef0eadbe07115b0853e964f17aa09d811cd490f1.pdf)
+
+* Despite authors' justification, I am not convinced that the posterior distribution over the weights of the last layer can be accurately approximated with a Gaussian distribution. This statement is as accurate as the statement that a Gaussian prior is a good prior for the weights of a neural network. Is that true? I suggest plotting per-weight histograms of the last layer of a trained diffusion model to see if they are Gaussian.
+
+* The whole notion of removing low-fidelity images and promoting generative models to create "good looking" images has been recently highly criticized due to this process biasing generative models. See [this paper](https://arxiv.org/pdf/2106.10270.pdf) and [this paper](https://arxiv.org/abs/2306.06130) and similar papers (in reference and citations).
+
+### Questions
+See weaknesses.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+Diffusion models are powerful generative models but it is not easy to output standard bayesian uncertainty statistics from them such as posterior predictive probability, or pixel-wise uncertainty etc. Knowing if there are some pixels in an image, or an entire image, can be very helpful in ensuring high quality in downstream tasks.
+
+This work uses the well known method of Laplacian approximation to estimate parameter uncertainty in the score network of an image diffusion model. For computational efficiency, and tractability in converting parameter uncertainty into sample uncertainty the authors use the well known approximation to only estimate the variance in the last linear layer of the neural network. Once the uncertainty update from a single application of the score network can be computed then the final uncertainty can be easily computed by deriving the update equation for different first-order and second order discrete time samplers.
+
+==== After rebuttal ======
+Thanks for the updates. No changes to rating. Best wishes.
+
+### Strengths
+The paper is reasonably novel and presents a methodology that practitioners may find useful. Specially the use of pixel-uncertainty in fixing the sample may be useful.
+
+### Weaknesses
+While the overall method is quite simple and the experiments show some potential for the method but the actual experiments are not clear/substantive enough. See questions section for more details.
+
+1. Section 4.2 shows that pixel wise uncertainty can be used to correct bad portions / artefacts in the original images. Many questions come to mind about this experiment. Were the bounding boxes for the artefacts determined automatically based on pixel uncertainty ? Even if they were identified manually ? How  often are the refined samples sampled using rejection sampling on pixel uncertainty score better than the original ? In other words are the examples in figure 8 cherry picked or representative of the pixel-wise uncertainty rejection sampling method ? 
+
+2. Figure 2 tries to demonstrate that despite skipping the "pixel-variance sum" statistic is able to separate out high uncertainty images from low uncertainty images. However at skipping=3 and skipping=4 the two clusters seem to be mixed quite a lot. Also it's not clear why the mean of the scores decreases for skipping=5 and skipping=6 when it was increasing monotonically from skipping=1 to 4.
+
+### Questions
+1. Section 4.2 shows that pixel wise uncertainty can be used to correct bad portions / artefacts in the original images. Many questions come to mind about this experiment. Were the bounding boxes for the artefacts determined automatically based on pixel uncertainty ? Even if they were identified manually ? How  often are the refined samples sampled using rejection sampling on pixel uncertainty score better than the original ? In other words are the examples in figure 8 cherry picked or representative of the pixel-wise uncertainty rejection sampling method ? 
+
+2. Figure 2 tries to demonstrate that despite skipping the "pixel-variance sum" statistic is able to separate out high uncertainty images from low uncertainty images. However at skipping=3 and skipping=4 the two clusters seem to be mixed quite a lot. Also it's not clear why the mean of the scores decreases for skipping=5 and skipping=6 when it was increasing monotonically from skipping=1 to 4.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes to use a last-layer Laplace approximation in diffusion models and derives how to propagate variance iteratively through the diffusion dynamics to obtain per-pixel uncertainty estimates. The experiments leverage these for filtering out low-fidelity samples, rectifying visual artifacts and visualization.
+
+Overall the method seems sensible, although I am unfortunately not too familiar with diffusion models, so may not be the best person to judge this. The evaluation seems to largely rely on subjective, qualitative analysis, and where it is quantitative the differences are mostly small and error bars missing. So all in all I would slightly lean towards rejection, but I am not strongly opinionated either way due to a lack of confidence.
+
+EDIT: In light of the rebuttal, I now lean towards acceptance.
+
+### Strengths
+* Overall the methodology seems sensible, utilizing the fact that diffusion models are probabilisitic to perform inference is quite a natural approach.
+* The paper is well structured and clear on what prior work it builds on.
+
+### Weaknesses
+ * I find it hard to tell whether the proposed method does anything meaningful. Most of the comparisons are rather qualitative, and where they are quantitative they are hard to interpret, e.g. it is quite difficult to decide what to make of Table 1. Many of the differences are quite small and without error bars it seems impossible to know whether those correspond to meaningful performance gains.
+* There are no baselines. I appreciate that there may not have been any prior work in this direction (although I would imagine that there would be some non-probabilistic filtering techniques. Perhaps from the literature on GANs?), however given that the iterative sampling process involves a Gaussian at every step, if I am understanding things correctly I would think that a deterministic diffusion model would also give us pixelwise variances that could be used as a baseline.
+* Alternatively, it might have been interesting to experiment with different covariance structures for the Laplace approximation to see if those make a difference.
+* I did not find the background section on diffusion models (2.1) particularly helpful as it relies on a lot of terminology on SDEs. The opening paragraph is good, perhaps something similar that briefly summarizes things from an algorithmic perspective (what kind of network are we typically training to predict what and w.r.t. what objective, what is being sampled, ...).
+
+### Questions
+* I would like to see error bars for (some of) the quantitative results.
+* Is there a strict need to use a Laplace approximation for inference? The likelihood is a Gaussian, so if you are only estimating uncertainty over the final layer weights, shouldn't the posterior be Gaussian as well? Or is this not the case due to the iterative sampling process?
+* Could the sampling variances be used to create a baseline with a deterministic diffusion model?
+
+Minor:
+* I think it would be helpful to complement Figure 2 with a plot of skipping intervals vs Spearman correlation with the no-skipping ranking.
+* For Figure 5, I would suggest using a different color palette (with different colors rather than differing shades) and distinct markers. It is unnecessarily difficult to match the lines and legends as is.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes to leverage epistemic uncertainty in the (reverse) sampling process of diffusion models. This is done by applying the last-layer Laplace approximation to the image-to-image neural network that approximates the score function. Using some approximations, this uncertainty gives rise to uncertainty in the image sample at each time step of the backward diffusion process. Applications like filtering low-quality samples and sample diversity enhancement are discussed.
+
+### Strengths
+I find the paper is well-written and easy to follow even for me, who is not very familiar with diffusion models. In any case, the proposed method is sound and most importantly, very practical---the authors noted that the overhead of their method is no more than 1x of the standard diffusion sampling. 
+
+I especially find the applications presented to be very interesting, illuminating, and again: practical. I emphasize the practicality of this paper since Bayesian neural networks are often quite impractical for large-scale problems like diffusion models.
+
+### Weaknesses
+1. Some details that might be useful for potential readers are glossed over. E.g. how is $\mathrm{diag}(\gamma_\theta^2(x_t, t))$ computed? What approximation of the Hessian is used? Specifically, the paper mentions applying the last-layer Laplace approximation, but does not specify whether a full or diagonal Hessian is used, which has significant implications for computational cost and accuracy. Furthermore, it is unclear how the variance $\gamma_\theta^2(x_t, t)$ is computed from the approximated Hessian, particularly given the high dimensionality of the output space in image generation tasks.
+2. Sec. 4.2 and 4.3 are a bit handwavy---it would be much better if the authors could make them more quantitative, like Sec. 4.1. Handpicked examples are not useful to instill confidence about the benefits of BayesDiff.  For example, in Section 4.2, it's not clear what criteria are used to identify 'flawed' samples, and how the resampled images are evaluated beyond visual inspection. Similarly, in Section 4.3, the diversity enhancement is not quantified with metrics such as FID or perceptual distance, making it difficult to assess the actual improvement.
+3. Some figures are quite hard to follow:
+    1. Fig. 2 is quite hard to understand. The caption is not descriptive at all and the colors are hard to see in print.
+    2. Fig. 3 & 4: need more spacing between "left" and "right" groups. I was really confused at first trying to parse what is "left" and what is "right".
+    3. Fig. 5: The colors are horrible (esp. in print), they're indistinguishable. It's better to use different markers or different linestyle instead.
+
+### Questions
+The last-layer Laplace approximation can still be very expensive for networks with high output dimensionality, e.g. in text or image generation. For example, if the image is $d \times d$, then the network has an output dim of $d^2$. Assuming the last-layer feature dim of $h$, this means the last-layer weight matrix is $d^2 \times h$ and so the Hessian is $hd^2 \times hd^2$. Then, to get the variance over outputs $\gamma^2(x, t)$, you need to multiply the Hessian with the last-layer Jacobian, which itself is large---$d^2 \times hd^2$. Can the authors elaborate on how BayesDiff overcomes this issue in practice?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+3 good

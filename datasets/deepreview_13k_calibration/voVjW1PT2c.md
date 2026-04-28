@@ -1,0 +1,141 @@
+# Guaranteed Out-Of-Distribution Detection with Diverse Auxiliary Set
+
+- Decision: Reject
+- Avg Score: 6.00
+- Scores: 5, 5, 8
+
+## Abstract
+Out-of-distribution (OOD) detection is crucial for ensuring reliable deployment of machine learning models in real-world scenarios. Recent advancements leverage auxiliary outliers to represent the unknown OOD data to regularize model during training, showing promising performance. However, detectors face challenges in effectively identifying OOD data that significantly deviate from the distribution of the auxiliary outliers, limiting their generalization capacity. In this work, we thoroughly examine this problem from the generalization perspective and demonstrate that a more diverse set of auxiliary outliers improves OOD detection. Constrained by limited access to auxiliary outliers and the high cost of data collection, we propose Provable Mixup Outlier (ProMix), a simple yet practical approach that utilizes mixup to enhance auxiliary outlier diversity. By training with these diverse outliers, our method achieves superior OOD detection. We also provide insightful theoretical analysis to verify that our method achieves better performance than prior works. Furthermore, we evaluate ProMix on standard benchmarks and demonstrate significant relative improvements of 14.2\% and 31.5\% (FPR95) on CIFAR-10 and CIFAR-100, respectively, compared to state-of-the-art methods. Our findings emphasize the importance of incorporating diverse auxiliary outliers during training and highlight ProMix as a promising solution to enhance model security in real-world applications. Compared with other methods, the proposed method achieves excellent performance on different metrics in almost all datasets.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This work aims to address the challenges in OOD detection, particularly the limitation of current detectors to generalize from the distribution of auxiliary outliers. The authors introduce Provable Mixup Outlier (ProMix), using Mixup to increase the diversity of auxiliary outliers, with insightful theoretical analysis, leading to enhanced OOD detection. Evaluations on benchmarks like CIFAR-10 and CIFAR-100 indicate improved performance over existing techniques.
+
+### Strengths
+1. The paper is well-structured, making it reader-friendly and easy to follow.
+
+2. The theoretical analysis constructed for Mixup is both enlightening and insightful.
+
+3. Extensive ablation studies were conducted, showcasing various experiment setups and results.
+
+### Weaknesses
+1, Novelty Concerns: Applying mixup for OOD detection is not new. Many other works have explored this concept previously [1][2][3].
+
+2. The minor modification the authors propose to the original Mixup (explicitly using the existing model and selecting Mixup outliers with lower OOD scores) lacks clarity in its effectiveness. There doesn't seem to be theoretical justification or ablation studies to validate the efficacy of the modification.
+
+3. The auxiliary dataset used for training is a downsampled version of ImageNet. Compared to the utilized ID datasets CIFAR-10 and CIFAR-100, its diversity seems significantly higher. Therefore, the OOD detection performance gains achieved with such an auxiliary dataset might not be wholly convincing, even though the methods authors compared against also adopt this approach.
+
+4. I’m a little concerned about the performance of Mixup on OOD detection for high-resolution datasets, such as those in [4], especially when using 224x224 ImageNet as the ID dataset.
+
+### Questions
+Please see Weaknesses above.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+Constrained by limited access to auxiliary outliers and the high cost of data collection, the authors propose Provable Mixup Outlier (ProMix), a simple yet practical approach that utilizes mixup to enhance auxiliary outlier diversity. By training with these diverse outliers, the proposed method achieves superior OOD detection. The authors also provide insightful theoretical analysis to verify that the proposed method achieves better performance than prior works.
+
+### Strengths
+1. The paper is written well and is easy to understand.
+2. The studied problem is very important.
+3. The results seem to outperform state-of-the-art.
+
+### Weaknesses
+1. The authors are suggested to be more careful and rigorous with the theoretical terms used in the paper, such as the "generalization risk" is not rigorous in theory.
+2. What are the assumptions made in theory? It is better to add more discussions on them and the validity of making the assumptions. 
+3. For theorem 2, did the authors consider the sample complexity of both the vanilla auxiliary outlier set and the diverse outlier set? The sample complexity and model complexity should play an important role in the bound during analysis for these two cases.
+4. For theorem 3, I am curious how well the h_mix compared with the predictor h_div. 
+5. It is still not intuitively making sense to me why does mixup can create diverse outlier examples. It will not change the data distribution much since it is only doing the interpolation work. What if the auxiliary outlier set is very constrained in the convex high-dimensional input space, would mixup increase the diversity of the outlier set significantly?
+6. If possible, the authors are encouraged to provide empirical evidence on large-scale benchmarks. The current setting does not seem to suggest the diversity will create a performance improvement significantly.
+
+### Questions
+see above
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The manuscript proposes a new method for improving out-of-distribution detection in the presence of a finite set of auxiliary negative samples. The manuscript bounds generalization error using empirical error, reducible error, and distribution shift error. The latter is caused by the finite auxiliary dataset which cannot represent all possible test outliers. Therefore, the manuscript proposes an augmentation technique based on mixup which increases the variety of auxiliary data.  In practice, negative training samples are a convex combination of different auxiliary negatives. During inference, 
+ OOD samples are detected based on the classification confidence of K+1st class.
+The proposed method achieves competitive results on relevant benchmarks for OOD detection.
+
+### Strengths
+S1. The method is well motivated by extensive and sound theoretical analysis. Proofs are mostly easy to follow and seem correct.
+
+S2. The proposed augmentation technique for auxiliary datasets yields competitive results.
+
+### Weaknesses
+W1. The presented method relies on anomaly score derived as classification confidence for K+1 class. Can the method work in more general settings with arbitrary anomaly scores (such as entropy or energy)? Demonstrating robustness to various anomaly scores would strengthen manuscript contributions. Specifically, the current approach might be overly reliant on the softmax output and may not generalize well to scenarios where the OOD separation is not well captured by a single class confidence. The paper should explore how the method performs when using alternative anomaly scoring functions that do not rely on the classification layer, such as those based on feature space distances or reconstruction errors.
+
+W2. Mixup-based augmentation techniques are already considered in [a]. The manuscript should clearly outline the differences. The current explanation lacks a detailed comparison of how the proposed mixup strategy differs from existing mixup techniques, particularly in the context of OOD detection. It is unclear whether the proposed method leverages mixup in a novel way or if it is a straightforward application of existing techniques. A more thorough analysis of the differences, including the specific mixup parameters and their impact on the results, is needed.
+
+W3. Missing related works which replace auxiliary negatives with properly trained generative models [b,c,d]. The manuscript should discuss how the proposed method compares to approaches that use generative models to create synthetic outliers. These methods often generate more realistic and diverse outliers, which could lead to better OOD detection performance. The paper should clarify why the proposed mixup-based approach is preferable or complementary to generative approaches, especially given the potential for generative models to better cover the space of possible outliers.
+
+### Questions
+Q1. The error caused by the finite auxiliary negative dataset which cannot cover all possible test outliers is termed distribution shift error.  I suggest renaming the distribution shift error to outlier coverage error.
+
+Q2. Should the first term of Eq. 13 have D_inlier instead of D_aux?
+
+Q3. Proof of Theorem 2, could you elaborate on the equality in the line above the Eq. 16? 
+
+Q4. Misspelled "Theorm 3" below Eq. 10 in the main text.
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+2 fair

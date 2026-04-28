@@ -1,0 +1,438 @@
+\title{VQGraph: Rethinking Graph Representation Space for Bridging GNNs and MLPs}
+
+\begin{abstract}
+GNN-to-MLP distillation aims to utilize knowledge distillation (KD) to learn computationally-efficient multi-layer perceptron (student MLP) on graph data by mimicking the output representations of teacher GNN. 
+Existing methods mainly make the MLP to mimic the GNN predictions over a few class labels.
+However, the class space may not be expressive enough for covering numerous diverse local graph structures, thus limiting the performance of knowledge transfer from GNN to MLP. 
+To address this issue, we propose to learn a new powerful graph representation space by directly labeling nodes' diverse local structures for GNN-to-MLP distillation.
+Specifically, we propose a variant of VQ-VAE \citep{van2017neural} to learn a structure-aware tokenizer on graph data that can encode each node's local substructure as a discrete code.
+The discrete codes constitute a \textit{codebook} as a new graph representation space that is able to identify different local graph structures of nodes with the corresponding code indices.
+Then, based on the learned codebook, we propose a new distillation target, namely \textit{soft code assignments}, to directly transfer the structural knowledge of each node from GNN to MLP. 
+The resulting framework \method achieves new state-of-the-art performance on GNN-to-MLP distillation in both transductive and inductive settings across seven graph datasets. We show that \method with better performance infers faster than GNNs by 828×, and also achieves accuracy improvement over GNNs and stand-alone MLPs by 3.90\% and 28.05\% on average, respectively
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec-intro}
+
+Graph Neural Networks (GNNs) \citep{yang2022omni, distance_encoding, deepwalk, gin, morris2019weisfeiler,yang2020dpgn,GCNII} have been widely used due to their effectiveness in dealing with non-Euclidean structured data, and have achieved remarkable performances in various graph-related tasks \citep{graphsage, gcn, gat}. Modern GNNs rely on message passing mechanism to learn node representations
+\citep{yang2020dpgn}. 
+GNNs have been especially important for recommender systems \citep{fan2019graph,he2020lightgcn,wu2022graph,xiao2023combining,zhang2024explicit}, fraud detection \citep{dou2020enhancing,liu2021pick,yang2023individual}, and information retrieval \citep{li2020learning,mao2020item}. Numerous works \citep{pei2020geom} focus on exploring more effective ways to leverage informative neighborhood structure for improving GNNs \citep{park2021graphens,zhu2021transfer,zhao2022stars,tang2022graph,lee2021neighborhood,chien2022node,abu2019mixhop}.
+
+\begin{figure*}[ht]
+\centering
+\includegraphics[width=0.94\linewidth]{image/figure1-intro.pdf}
+\caption{The t-SNE visualization of the learned graph representation space in two kinds of teacher GNNs: (a) previous SOTA ``class-based'' NOSMOG \citep{tian2023learning} and (b) our ``structure-based'' VQGraph. ``class-based'' denotes learning with class labels, and ``structure-based'' denotes learning with our local structure reconstruction. Our learned space is more compact. We here provide both class labels and our structure labels along with illustrative substructures for demonstration.}
+\vskip -0.2in
+\label{figure:intro}
+\end{figure*}
+
+It is challenging to scale GNNs to large-scale applications which are constrained by latency and require fast inference \citep{agl, graphdec, jia2020redundancy}, because message passing necessitates fetching topology and features of many neighbor nodes for inference on a target node, which is time-consuming and computation-intensive. 
+Multi-layer perceptrons (MLPs) are efficient alternatives to deploy on graphs that only depend on node feature without the need of explicit message passing \citep{glnn}. 
+Thus, recent methods use {\em knowledge distillation} \citep{hinton_kd,kg_on_graph_survey, kd_survey,yuan2020revisiting,zhou2021rethinking} to
+transfer the learned structural knowledge from GNNs to MLPs \citep{glnn, cold_brew, tian2023learning}, which build the statistical associations between node features and class labels by making the MLP mimic the (well-trained) GNN's predictions. Then only MLPs are deployed for inference, which can also perform well in real-world graphs. 
+
+Despite some progress, current GNN-to-MLP distillation methods have a common fundamental issue: their graph representation spaces of GNN are mainly learned by a few class labels, and the class space may not
+be expressive enough for covering numerous diverse local graph structures of nodes, limiting the distillation performance. We explain this problem by using t-SNE \citep{van2008visualizing} to visualize the graph representation space as in \cref{figure:intro}. We can observe that the graph representation space in previous teacher GNN is not expressive enough for identifying fine-grained local structural differences between nodes of the same class, which may limit the structural knowledge transfer from GNN to MLP.
+
+Here we introduce a new powerful graph representation space for bridging GNNs and MLPs by directly labeling diverse nodes' local structures. 
+Specifically, we propose a variant of VQ-VAE \citep{van2017neural} to learn a structure-aware tokenizer on graph data that can encode each node with its substructure as a discrete code. 
+The numerous codes constitute a \textit{codebook} as our new graph representation space that is able to identify different local neighborhood structures of nodes with the corresponding code indices.
+As demonstrated in \cref{figure:intro}, our learned representation space is more expressive and can identify subtle differences between nodes' local structures.
+Based on the learned codebook, we can effectively facilitate the structure-based distillation by maximizing the consistency of \textit{soft code assignments} between GNN and MLP models, given by the KL divergence between GNN predictions and MLP predictions over the discrete codes of the codebook.
+
+We highlight our main contributions as follows: \textbf{(i)} To the best of our knowledge, we for the first time directly learn to label nodes' local neighborhood structures to acquire a powerful node representation space (\textit{i.e.}, a \textit{codebook}) for bridging GNNs and MLPs.
+\textbf{(ii)} Based on the learned codebook, we utlize a new distillation target with \textit{soft code assignments} to effectively facilitate the structure-aware knowledge distillation. We further conduct both visualization and statistical analyses for better understanding with respect to our superior local and global structure awareness for GNN-to-MLP distillation. 
+\textbf{(iii)} Extensive experiments across seven datasets show \method can consistently outperform GNNs by \textbf{3.90\%} on average accuracy, while enjoying \textbf{828×} faster inference speed. Also \method outperforms MLPs and SOTA distillation method NOSMOG \citep{tian2023learning} by \textbf{28.05\% and 1.39\%} on average accuracy across datasets, respectively. 
+
+
+
+\section{Related Work}
+
+\textbf{Inference Acceleration for GNNs} Pruning \citep{gnn_prune} and quantizing GNN parameters \citep{gnn_quant2} have been studied for inference acceleration \citep{hardware1, precision_selection1,pruning2,quantization1}. Although these approaches accelerate GNN inference to a certain extent, they do not eliminate the neighbor-fetching latency. Graph-MLP \citep{graph_mlp} proposes to bypass GNN neighbor fetching by learning a computationally-efficient MLP model with a neighbor contrastive loss, but its paradigm is only transductive and can be not applied in the more practical inductive setting. Besides, some works try to speed up GNN in training stage from the perspective of node sampling \citep{zou2019layer, fastgcn}, which are complementary to our goal on inference acceleration.
+
+\textbf{Knowledge Distillation for GNNs} Existing GNN-based knowledge distillation methods try to distill teacher GNNs to smaller student GNNs (GNN-GNN distillation) or MLPs (GNN-to-MLP distillation). Regarding the GNN-GNN distillation, LSP \citep{yang2021distilling}, TinyGNN \citep{tinygnn_kdd20}, GFKD \citep{deng2021graphfree}, and GraphSAIL \citep{graphsail} conduct KD by enabling student GNN to maximally preserve local information that exists in teacher GNN.
+The student in CPF \citep{yang2021extract} is not a GNN, but it is still heavily graph-dependent as it uses LP \citep{zhu2002learning,huang2021combining}. Thus, these methods still require time-consuming neighbors fetching.
+To address these latency issues, recent works focus on GNN-to-MLP distillation that does not require message passing, as seen in \citep{graph_mlp, glnn, cold_brew,tian2023learning}. For example, recent sota methods GLNN \citep{glnn} and NOSMOG \citep{tian2023learning} train the student MLP with node features as inputs and class predictions from the teacher GNN as targets.
+However, class predictions over a few labels, as their distillation targets, can not sufficiently express structural knowledge of graph structures as discussed in \cref{sec-intro}.
+Hence, we for the first time propose to directly label nodes' local neighborhood structures to facilitate structure-aware knowledge distillation. 
+
+
+
+\section{Preliminaries}
+
+\paragraph{Notation and Graph Neural Networks} We denote a graph as $\gG = (\mathcal{V}, \mA)$, with $\mathcal{V}= \{\vv_1, \vv_2,\cdots, \vv_n\}$ represents all nodes, and $\mA$ denotes adjacency matrix, with $\emA_{i,j} = 1$ if node $\vv_i$ and node $\vv_j$ are connected, and 0 otherwise. 
+Let $N$ denote the total number of nodes. 
+$\mX\in\mathbb{R}^{N\times D}$ represents the node feature matrix with each raw being a $D$-dimensional node attribute $\vv$. 
+For node classification, the prediction targets are $\mY \in \R^{N \times K}$, where row $\vy_v$ is a $K$-dim one-hot vector for node $v$. For a given $\gG$, usually a small portion of nodes will be labeled, which we mark using superscript $^L$, i.e. $\mathcal{V}^L$, $\mX^L$ and $\mY^L$. The majority of nodes will be unlabeled, and we mark using the superscript $^U$, i.e. $\mathcal{V}^U$, $\mY^U$ and $\mY^U$. For a given node $\vv \in \mathcal{V}$, GNNs aggregate the messages from node neighbors $\mathcal N(\vv)$ to learn node embedding $\vh_{\vv} \in \R^{d_n}$ with dimension $d_n$. Specifically, the node embedding in $l$-th layer $\vh_{\vv}^{(l)}$ is learned by first aggregating (\agg) the neighbor embeddings and then updating (\upd) it with the embedding from the previous layer. The whole learning process can be denoted as: $\vh_{\vv}^{(l)} = \upd (\vh_{\vv}^{(l-1)}, \agg (\{\vh_{\vu}^{(l-1)}: \vu \in \mathcal N({\vv}) \}))$.
+
+\paragraph{Vector Quantized-Variational AutoEncoder (VQ-VAE) for Continuous Data} \label{sec:vanilla-vq-vae}
+The VQ-VAE model \citep{van2017neural} is originally proposed for modeling continuous data distribution, such as images, audio and video. It encodes observations into a sequence of discrete latent variables, and reconstructs the observations from these discrete variables. Both encoder and decoder use a shared codebook. More formally, the encoder is a non-linear mapping from the input space, $\vx$, to a vector $E(\vx)$. This vector is then quantized based on its distance to the prototype vectors (tokens) in the codebook $\ve_k, k \in 1 \ldots K$ such that each vector $E(\vx)$ is replaced by the index of the nearest code in the codebook, and is transmitted to the decoder: $\text{quantize}(E(\mathbf{x})) = \mathbf{e}_k,\text{where}\, k = \argmin_j ||E(\mathbf{x}) - \mathbf{e}_j||.$
+To learn these mappings, the gradient of the reconstruction error is then back-propagated through the decoder, and to the encoder using the straight-through gradient estimator \citep{bengio2013estimating}. 
+Besides reconstruction loss, VQ-VAE has two additional terms to align the token space of the codebook with the output of the encoder. 
+The \emph{codebook loss}, which only applies to the codebook variables, brings the selected code $\mathbf{e}$ close to the output of the encoder,  $E(\mathbf{x})$. The \emph{commitment loss}, which only applies to the encoder weights, encourages the output of the encoder to stay close to the chosen code to prevent it from fluctuating too frequently from one code vector to another. The overall objective is: 
+\begin{equation}\label{eq:loss}
+\mathcal{L}(\mathbf{x}, D(\mathbf{e}))  = ||\mathbf{x} - D(\mathbf{e})||_2^2 + ||\text{sg}[E(\mathbf{x})] - \mathbf{e}||_2^2 + \eta ||\text{sg}[\mathbf{e}] - E(\mathbf{x})||^2_2,
+\end{equation}
+\begin{figure*}[ht]
+\vskip -0.4in
+\centering
+\includegraphics[width=0.95\linewidth]{image/vqgraph1.pdf}
+\caption{The schematic diagram of \method, including graph tokenizer training (\textbf{Top}) and structure-aware code-based GNN-to-MLP Distillation (\textbf{Bottom}). }
+\vskip -0.2in
+\label{fig:vqgraph}
+\end{figure*}
+where $E$ is the encoder function and $D$ is the decoder function. The operator $\text{sg}$ refers to a stop-gradient operation that blocks gradients from flowing into its argument, and $\eta$ is a hyperparameter which controls the reluctance to change the code corresponding to the encoder output. In this paper, \textbf{we explore the potential of VQ-VAE for representing discrete graph-structured data}. 
+
+
+
+
+
+\section{\method}
+
+The critical insights of \method is learning an expressive graph representation space that directly labels nodes' diverse local neighborhood structures with different code indices for facilitating effective structure-aware GNN-to-MLP distillation. First, we learn a structure-aware graph tokenizer to encode the nodes with diverse local structures to corresponding discrete codes, and constitute a \textit{codebook} (\cref{sec-tokenizer}). Then we utilize the learned codebook for GNN-to-MLP distillation, and propose a tailored structure-aware distillation objective based on \textit{soft code assignmnets} (\cref{sec-distillation}).
+\subsection{Graph Tokenizer Training}
+\label{sec-tokenizer} 
+\paragraph{Labeling Nodes' Local Structure with Discrete Codes} Similar to the tokenization in NLP \citep{sennrich2016neural,wu2016google}, we tokenize the nodes with different neighborhood structures as discrete codes using a variant of VQ-VAE \citep{van2017neural}, \textit{i.e.}, a graph tokenizer that consists of a GNN encoder and a codebook. 
+More concretely, the nodes $\mathcal{V}= \{\vv_1, \vv_2,\cdots, \vv_n\}$  of a graph $\mathcal{G}$ are tokenized to
+$\mathcal{Z}= \{z_1, z_2,\cdots, z_n\}$ , where the codebook contains $M$ discrete
+codes. Firstly, the teacher GNN encoder encodes the nodes to nodes embeddings. Next,
+our graph tokenizer looks up the nearest neighbor code embedding in the codebook for each node embedding $\vh_i$.
+Let $\mE=[\ve_1, \ve_2, \cdots, \ve_M]\in \mathbb{R}^{M\times D}$ denote the codebook embeddings, which are randomly initialized and are then optimized in pretraining. The assigned code of i-th node is:
+\begin{equation} 
+ z_i = \text{argmin}_j  \|\vh_i - \ve_j\|_2, 
+\end{equation} 
+We feed the corresponding codebook embeddings
+$\{\ve_{z_1}, \ve_{z_2}, \cdots, \ve_{z_n}\}$ to the linear decoder ($p_{\psi}: \ve_{z_i}\rightarrow \hat{\vv}_i$) to reconstruct the input graph including both nodes attributes $\mX\in\mathbb{R}^{N\times D}$ and adjacency matrix $\mA\in\mathbb{R}^{N\times N}$ for an end-to-end  optimization of our graph tokenizer. 
+\paragraph{Graph Tokenizer Optimization}
+We adapt VQ-VAE (first term in \cref{eq:loss}) to fit our graph tokenization. 
+In addition, the categorical information is also critical for node representations, thus we integrate it into the optimization of our graph tokenizer: 
+\begin{small}
+\begin{equation}
+\begin{aligned}
+\mathcal{L}_{\normalsize{Rec}}&=\underbrace{\frac{1}{N}\sum_{i=1}^N\Big(1-\frac{{\vv_i}^T\hat{\vv}_i}{\|\vv_i\|\cdot\|\hat{\vv}_i\|}\Big)^{\gamma}}_{\text{\normalsize{node\ reconstruction}}}+\underbrace{\Bigg|\Bigg|\mA-\sigma(\hat{\mX}\cdot\hat{\mX}^T)\Bigg|\Bigg|^2_2}_{\text{\normalsize{edge\ reconstruction}}},\\
+\mathcal{L}_{\normalsize{Tokenizer}} &= \mathcal{L}_{Rec} + \mathcal{L}_{CE}(\vy_{\{\vv_i\}},\hat{\vy}_{\{\ve_{z_i}\}})+ \frac{1}{N}\sum_{i=1}^N\|\text{sg}[\vh_i]-\ve_{z_i}\|^2_2 + \frac{\eta}{N}\sum_{i=1}^N\|\text{sg}[\ve_{z_i}]-\vh_i\|^2_2,
+\label{eq:vq_loss}
+\end{aligned}
+\end{equation}
+\end{small}
+
+\noindent where $\hat{\vv}\in\mathbb{R}^{D}$ and $\hat{\mX}\in\mathbb{R}^{N\times D}$ denote the predicted node embedding and node embedding matrix, respectively. $\text{sg}[\cdot]$ stands for the stopgradient operator, and the flow of gradients is illustrated in \cref{fig:vqgraph}.
+$\mathcal{L}_{Rec}$ denotes the graph reconstruction loss, aiming to preserve node attributes by the first node reconstruction term with the scaled cosine error ($\gamma \geq 1$), and recover graph structures by the second topology reconstruction term. 
+$\mathcal{L}_{CE}$ is the cross-entropy loss between labels $\vy_{\{\vv_i\}}$ and the GNN predictions $\hat{\vy}_{\{\ve_{z_i}\}}$ that are based on the assigned codes $\{\ve_{z_i}\}$.
+In $\mathcal{L}_{Tokenizer}$, the third term is a VQ loss aiming to update the codebook embeddings and the forth term is a commitment loss that encourages the output of the GNN encoder to stay close to the chosen code embedding. $\eta$ is a hyper-parameter set to 0.25 in our experiments. 
+With the learned graph tokenizer, we acquire a powerful codebook that not only directly identifies local graph structures, but also preserves class information for node representations, facilitating later GNN-to-MLP distillation. 
+
+\paragraph{Clarifying Superiority over VQ-VAE and Graph AutoEncoders}  
+In contrast to vanilla VQ-VAE, we provide a new variant of VQ-VAE for modeling discrete graph data instead of continuous data, and utilize the learned codebook for distillation task instead of generation tasks. In contrast to traditional graph autoencoders \citep{kipf2016variational}, 
+our model does not suffer from large variance \citep{van2017neural}. And with our expressive latent codes, we can effectively avoid “posterior collapse” issue which has been problematic with many graph AE models that have a powerful
+decoder, often caused by latents being ignored. We provide experimental comparison to demonstrate our superiority in \cref{exp-ablation-contri}.
+\paragraph{Scaling to Large-Scale Graphs} 
+We have introduced the main pipeline of graph tokenizer training based on the entire graph input. Nevertheless, for large-scale industrial applications, one can not feed the whole graph due to the latency constraint \citep{fey2021gnnautoscale,bojchevski2020scaling,ying2018graph,chen2020scalable}. Numerous researches choose subgraph-wise sampling methods as a promising class of mini-batch training techniques \citep{chen2018fastgcn,chen2018stochastic,zeng2020graphsaint,huang2018adaptive,chiang2019cluster,zou2019layer,shi2023lmc}, implicitly covering the global context of graph structure through a number of stochastic re-sampling. We follow this technique to perform large-scale graph tokenizer training. For example, we adopt GraphSAGE \citep{graphsage} as teacher GNN, we samples the target nodes as a mini-batch $\mathcal{V}_{sample}$ and samples a fixed size set of neighbors for feature aggregation. We utilize the connections between the target nodes as the topology reconstruction target (the second term of $\mathcal{L}_{Rec}$ in \cref{eq:vq_loss}) for approximately learning global graph structural information.
+\subsection{Structure-Aware Code-Based GNN-to-MLP Distillation}
+\label{sec-distillation}
+After the graph tokenizer optimization, we obtain a pre-trained teacher GNN encoder and a set of codebook embeddings $\mE$. We hope to distill the structure knowledge node-by-node from the GNN to a student MLP based on the codebook. Next, we will introduce our tailored structure-aware GNN-to-MLP distillation with the \textit{soft code assignments} over the learned codebook.
+\paragraph{Aligning Soft Code Assignments Between GNN and MLP} Different from previous class-based distillation methods \citep{glnn,tian2023learning} that constrain on class predictions between GNN and MLP, we utilize a more expressive representation space of graph data, \textit{i.e.}, our structure-aware codebook, and propose code-based distillation to leverage more essential information of graph structures for bridging GNN and MLP. Formally, for each node $\vv_i$, we have its GNN representation $\vh_i^{\text{GNN}}\in \mathbb{R}^D$ and the MLP representation $\vh^{\text{MLP}}_i\in \mathbb{R}^D$. Then we respectively compare their node representations with all $M$ codes of the codebook embeddings $\mE\in \mathbb{R}^{M\times D}$ and obtain corresponding \textit{soft code assignments} $\vr^{\text{GNN}}_i\in \mathbb{R}^M$ and $\vr^{\text{MLP}}_i\in \mathbb{R}^M$:
+\begin{equation} 
+\label{eq:relation_module}
+    \vr^{\text{GNN}}_i=\text{COMP}(\vh^{\text{GNN}}_i, \mE), \quad \vr^{\text{MLP}}_i=\text{COMP}(\vh^{\text{MLP}}_i, \mE),
+\end{equation}
+where $\text{COMP}:[\mathbb{R}^D, \mathbb{R}^{M\times D}]\rightarrow \mathbb{R}^M$ can be arbitrary relation module for computing 1-\textit{vs}-$M$ code-wise relations, and such relations can be viewed as assignment possibilities. We use $L_2$ distance in our experiments (more studies in \cref{app-ablation-relation}). Kindly note that the codebook size $M$ can be large, especially for large-scale graphs, thus the soft code assignment of each node contains abundant 1-\textit{vs}-$M$ global structure-discriminative information. Therefore we choose the soft code assignment as the target for final distillation:
+\begin{equation} 
+\begin{aligned}
+\label{eq:token_distillation}
+    \mathcal{L}_{code\_distill} = \frac{1}{N}\sum_{i=1}^{N}\tau^2\ \text{KL}(\vp^{\text{GNN}}_i\ \| \ \vp^{\text{MLP}}_i)=\frac{1}{N}\sum_{i=1}^{N}\tau^2\ \vp^{\text{GNN}}_i\ \text{log}\ \frac{\vp^{\text{GNN}}_i}{\vp^{\text{MLP}}_i},
+\end{aligned}
+\end{equation}
+where KL refers to Kullback–Leibler divergence with:
+\begin{equation} 
+\begin{aligned}
+\label{eq:token_logits}
+    \vp^{\text{GNN}}_i = \text{Softmax}(\vr^{\text{GNN}}_i/\tau),\quad \vp^{\text{MLP}}_i = \text{Softmax}(\vr^{\text{MLP}}_i/\tau),
+\end{aligned}
+\end{equation}
+being the scaled code assignments, and $\tau$ is the temperature factor to control the softness. Kindly note that the code assignment is only used for optimizing the training, and we remove it for deploying the pure MLP model.
+In this way, \method is able to effectively distill both local neighborhood structural knowledge and global structure-discriminative ability from GNNs to MLPs, without increasing inference time. The overall training loss of \method is composed of
+classification loss $\mathcal{L}_{cls}$, traditional class-based distillation loss $\mathcal{L}_{class\_distill}$, and our code-based distillation loss, i.e.,
+\begin{equation} 
+\label{eq:overall_loss}
+    \mathcal{L}_{\method} =  \mathcal{L}_{cls} + \alpha \mathcal{L}_{class\_distill} + \beta \mathcal{L}_{code\_distill}.
+\end{equation}
+where $\alpha$ and $\beta$ are factors for balancing the losses. 
+
+
+\section{Experiments}
+
+\label{sec:exp}
+\paragraph{Datasets and Evaluation} 
+We use five widely used public benchmark datasets \citep{glnn, cpf_plp_ft} (\citseer{}, \pubmed{}, \cora{}, \acomputer{}, and \aphotos{}), and two large OGB datasets \citep{hu2020open} (\ogba{} and \ogbp) to evaluate the proposed model.  In our experiments, we report the mean and standard deviation of ten distinct runs with randomized seeds to ensure robustness and reliability of our findings. \textbf{We also extend our \method to heterophilic graphs and make performance improvement in \cref{app-heterophilic}}. We utilize accuracy to gauge model performance. More details are in \cref{app-datasets}.
+\paragraph{Model Architectures}
+For fair comparison, we adopt GraphSAGE with GCN aggregation as our teacher model (also as graph tokenizer) and use the same student MLP models for all evaluations following SOTA GLNN \citep{glnn} and NOSMOG \citep{tian2023learning}. The codebook size increases accordingly with dataset size (studied in \cref{exp-ablation}). For example, we set 2048 and 8192 for \cora{} and \aphotos{}, respectively. More model hyperparameters are detailed in \cref{app-model-hyper}. We investigate the influence of alternative teacher models, including GCN \citep{gcn}, GAT \citep{gat}, and APPNP \citep{appnp}, detailed in \cref{sec:different_teacher_gnn}.
+\paragraph{Transductive vs. Inductive} 
+We experiment in two separate settings, transductive (\tran) and inductive (\ind), for comprehensive evaluation. In both settings, we first pre-train our graph tokenizer to learn the codebook embeddings $\mE$ for code-based distillation. For the \tran setting, we train our models on the labeled graph $\gG$, along with the corresponding feature matrix $\mX^L$ and label vector $\mY^L$, before evaluating their performance on the unlabeled data $\mX^U$ and $\mY^U$. Soft labels, soft code assignments are generated for all nodes within the graph (i.e., $\vy^{soft}_{\vv}$, $\vr^{GNN}_{\vv}$, $\vr^{MLP}_{\vv}$ for $\vv \in \mathcal{V}$).
+As for \ind, we follow the methodology of prior work \citep{tian2023learning} in randomly selecting 20\% of the data for inductive evaluation. Specifically, we divide the unlabeled nodes $\mathcal{V}^U$ into two separate yet non-overlapping subsets, observed and inductive (i.e., $\mathcal{V}^U = \mathcal{V}^U_{obs} \sqcup \mathcal{V}^U_{ind}$), producing three distinct graphs, $\gG = \gG^L \sqcup \gG_{obs}^U \sqcup \gG_{ind}^U$, wherein there are no shared nodes. In training, the edges between $\gG^L \sqcup \gG_{obs}^U$ and $\gG_{ind}^U$ are removed, while they are leveraged during inference to transfer positional features via average operator \citep{graphsage}. Node features and labels are partitioned into three disjoint sets, \textit{i.e.}, $\mX = \mX^L \sqcup \mX_{obs}^U \sqcup \mX_{ind}^U$ and $\mY = \mY^L \sqcup \mY_{obs}^U \sqcup \mY_{ind}^U$. Soft labels and soft code assignments are generated for nodes within the labeled and observed subsets (i.e., $\vy^{soft}_{\vv}$, $\vr^{GNN}_{\vv}$, $\vr^{MLP}_{\vv}$ for $\vv \in \mathcal{V}^L \sqcup \mathcal{V}^U_{obs}$). We provide code and models in the supplementary material.
+
+\begin{table*}[ht]
+\center
+\small
+\caption{
+Node classification results under the standard setting, results show accuracy (higher is better). $\Delta_{GNN}$, $\Delta_{MLP}$, $\Delta_{NOSMOG}$ represents the difference between \method and GNN, MLP, NOSMOG, respectively. GLNN and NOSMOG are the SOTA GNN-to-MLP distillation methods.
+}
+\begin{adjustbox}{width=\columnwidth,center}
+\begin{tabular}{lllllllll}
+\toprule
+\multicolumn{1}{l}{Datasets} & \multicolumn{1}{l}{SAGE} & MLP & GLNN & NOSMOG & \textbf{\method} & $\Delta_{GNN}$ & $\Delta_{MLP}$ & $\Delta_{NOSMOG}$\\ \midrule
+\citseer & 70.49 $\pm$ 1.53 & 58.50 $\pm$ 1.86 & 71.22 $\pm$ 1.50 & 73.78 $\pm$ 1.54 & \textbf{76.08 $\pm$ 0.55} & $\uparrow$ 7.93\% & $\uparrow$ 30.05\% & $\uparrow$ 3.18\% \\
+\pubmed & 75.56 $\pm$ 2.06 & 68.39 $\pm$ 3.09 & 75.59 $\pm$ 2.46 & 77.34 $\pm$ 2.36 &\textbf{78.40 $\pm$ 1.71} & $\uparrow$ 3.76\% & $\uparrow$ 14.64\% & $\uparrow$ 1.37\% \\ 
+\cora & 80.64 $\pm$ 1.57 & 59.18 $\pm$ 1.60 & 80.26 $\pm$ 1.66 & 83.04
+$\pm$ 1.26 & \textbf{83.93 $\pm$ 0.87}& $\uparrow$ 4.08\% & $\uparrow$ 41.82\% & $\uparrow$ 1.07\% \\ 
+\acomputer & 82.82 $\pm$ 1.37 & 67.62 $\pm$ 2.21 & 82.71 $\pm$ 1.18 & 84.04 $\pm$ 1.01 &\textbf{85.17 $\pm$ 1.29} & $\uparrow$ 2.84\% & $\uparrow$ 25.95\% & $\uparrow$ 1.34\% \\
+\aphotos & 90.85 $\pm$ 0.87 & 77.29 $\pm$ 1.79 & 91.95 $\pm$ 1.04 &93.36 $\pm$ 0.69 &\textbf{94.21 $\pm$ 0.45} & $\uparrow$ 3.70\% & $\uparrow$ 21.89\% & $\uparrow$ 0.91\% \\
+\ogba & 70.73 $\pm$ 0.35 & 55.67 $\pm$ 0.24 & 63.75 $\pm$ 0.48 &71.65 $\pm$ 0.29 &\textbf{72.43 $\pm$ 0.20} & $\uparrow$ 2.40\% & $\uparrow$ 30.11\% & $\uparrow$ 0.93\% \\
+\ogbp & 77.17 $\pm$ 0.32 & 60.02 $\pm$ 0.10 & 63.71 $\pm$ 0.31 &78.45 $\pm$ 0.38 &\textbf{79.17 $\pm$ 0.21} & $\uparrow$ 2.59\% & $\uparrow$ 31.91\% & $\uparrow$ 0.92\% \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\label{tab:transductive}
+\end{table*}
+\subsection{Main Results}
+
+\paragraph{GNN-to-MLP Distillation} We compare \method to other state-of-the-art GNN-to-MLP distillation methods GLNN and NOSMOG with same experimental settings, and use distilled MLP models for evaluations. We first consider the standard transductive setting, enabling direct comparison with previously published literature \citep{glnn, ogb, cpf_plp_ft}. As depicted in \cref{tab:transductive}, \method outperforms all baselines including teacher GNN models across all datasets. Specifically, \method improves performance \textbf{by an average of 3.90\% compared to its teacher GNN}, highlighting its ability to capture superior structural information without relying on explicit graph structure input.
+Comparing \method to NOSMOG, our proposed model \textbf{achieves an average improvement of 1.39\%} across both small- and large-scale graph datasets. Further model analysis of \method is presented in \cref{exp-ablation}.
+
+\paragraph{Experiments in Inductive and Transductive Settings}
+To gain deeper insights into the effectiveness of \method, we conduct experiments in a realistic production ($prod$) scenario that involves both inductive ($ind$) and transductive ($tran$) settings across multiple datasets, as detailed in \cref{tab:inductive}. Our experimental results demonstrate that \method consistently achieves superior performance compared to the teacher model and baseline methods across all datasets and settings. 
+Specifically, our proposed method outperforms GNN across all datasets and settings with \textbf{an average improvement of 2.93\%}, demonstrating its superior efficacy of our learned code-based representation space in capturing graph structural information, even on large-scale datasets. Furthermore, when compared to MLP and NOSMOG, \method consistently achieves significant performance improvements, \textbf{with average gains of 25.81\% and 1.6\%}, respectively, across all datasets and settings. 
+
+\begin{table*}[t]
+\center
+\caption{Node classification results in a production scenario with both \textbf{inductive} and \textbf{transductive} settings. \ind indicates the results on $\mathcal{V}^U_{ind}$, \tran indicates the results on $\mathcal{V}^U_{tran}$, and \production indicates the interpolated production results of both $ind$ and $tran$. 
+}
+\begin{adjustbox}{width=\columnwidth,center}
+\begin{tabular}{llllllllll}
+\toprule
+
+{Datasets} & Eval & SAGE & MLP & GLNN & NOSMOG & \textbf{\method} & $\Delta_{GNN}$ & $\Delta_{MLP}$ & $\Delta_{NOSMOG}$ \\ \midrule
+\multirow{3}{*}{\citseer} & \production & 68.06 & 58.49 & 69.08 & 70.60& \textbf{73.76} & $\uparrow$ 8.37\% & $\uparrow$ 26.11\% & $\uparrow$ 5.80\% \\ 
+        & \ind & 69.14 $\pm$ 2.99 & 59.31 $\pm$ 4.56 & 68.48 $\pm$ 2.38 & 70.30 $\pm$ 2.30 & \textbf{72.93 $\pm$ 1.78} & $\uparrow$ 5.48\% & $\uparrow$ 22.96\% & $\uparrow$ 3.74\% \\
+        & \tran & 67.79 $\pm$ 2.80 & 58.29 $\pm$ 1.94 & 69.23 $\pm$ 2.39 & 70.67 $\pm$ 2.25& \textbf{74.59 $\pm$ 1.94} & $\uparrow$ 10.03\% & $\uparrow$ 27.96\% & $\uparrow$ 7.74\% \\ \midrule
+\multirow{3}{*}{\pubmed} & \production & 74.77 & 68.39 & 74.67 & 75.82& \textbf{76.92} & $\uparrow$ 2.86\% & $\uparrow$ 12.47\% & $\uparrow$ 1.45\% \\ 
+        & \ind & 75.07 $\pm$ 2.89 & 68.28 $\pm$ 3.25 & 74.52 $\pm$ 2.95 & 75.87 $\pm$ 3.32 & \textbf{76.71 $\pm$ 2.76}& $\uparrow$ 2.18\% & $\uparrow$ 12.35\% & $\uparrow$ 1.11\% \\
+        & \tran & 74.70 $\pm$ 2.33 & 68.42 $\pm$ 3.06 & 74.70 $\pm$ 2.75 & 75.80 $\pm$ 3.06 & \textbf{77.13 $\pm$ 3.01} & $\uparrow$ 3.25\% & $\uparrow$ 12.73\% & $\uparrow$ 1.75\% \\ \midrule
+\multirow{3}{*}{\cora} & \production & 79.53 & 59.18 & 77.82 & 81.02 & \textbf{81.68} & $\uparrow$ 2.70\% & $\uparrow$ 38.02\% & $\uparrow$ 0.81\% \\ 
+        & \ind & 81.03 $\pm$ 1.71 & 59.44 $\pm$ 3.36 & 73.21 $\pm$ 1.50 & 81.36 $\pm$ 1.53& \textbf{82.20 $\pm$ 1.32} & $\uparrow$ 1.44\% & $\uparrow$ 38.29\% & $\uparrow$ 1.03\% \\
+        & \tran & 79.16 $\pm$ 1.60 & 59.12 $\pm$ 1.49 & 78.97 $\pm$ 1.56 & 80.93 $\pm$ 1.65 & \textbf{81.15 $\pm$ 1.25} & $\uparrow$ 2.51\% & $\uparrow$ 37.26\% & $\uparrow$ 0.27\% \\ \midrule
+\multirow{3}{*}{\acomputer} & \production & 82.73 & 67.62 & 82.10 & 83.85& \textbf{84.16} & $\uparrow$ 1.73\% & $\uparrow$ 24.46\% & $\uparrow$ 0.37\% \\
+        & \ind & 82.83 $\pm$ 1.51 & 67.69 $\pm$ 2.20 & 80.27 $\pm$ 2.11 & 84.36 $\pm$ 1.57 & \textbf{85.73 $\pm$ 2.04} & $\uparrow$ 3.50\% & $\uparrow$ 26.65\% & $\uparrow$ 1.62\% \\
+        & \tran & 82.70 $\pm$ 1.34 & 67.60 $\pm$ 2.23 & 82.56 $\pm$ 1.80 & 83.72 $\pm$ 1.44 & \textbf{84.56 $\pm$ 1.81} & $\uparrow$ 2.25\% & $\uparrow$ 25.08\% & $\uparrow$ 1.00\% \\ \midrule
+\multirow{3}{*}{\aphotos} & \production & 90.45 & 77.29 & 91.34 & 92.47 & \textbf{93.05} & $\uparrow$ 2.87\% & $\uparrow$ 20.39\% & $\uparrow$ 0.62\% \\ 
+        & \ind & 90.56 $\pm$ 1.47 & 77.44 $\pm$ 1.50 & 89.50 $\pm$ 1.12 & 92.61 $\pm$ 1.09& \textbf{93.11 $\pm$ 0.89} & $\uparrow$ 2.82\% & $\uparrow$ 20.24\% & $\uparrow$ 0.54\% \\
+        & \tran & 90.42 $\pm$ 0.68 & 77.25 $\pm$ 1.90 & 91.80 $\pm$ 0.49 & 92.44 $\pm$ 0.51 & \textbf{92.96 $\pm$ 1.02} & $\uparrow$ 2.81\% & $\uparrow$ 20.34\% & $\uparrow$ 0.56\% \\ \midrule
+\multirow{3}{*}{\ogba} & \production & 70.69 & 55.35 & 63.50 & 70.90 & \textbf{71.43} & $\uparrow$ 1.05\% & $\uparrow$ 29.05\% & $\uparrow$ 0.75\% \\ 
+        & \ind & 70.69 $\pm$ 0.58 & 55.29 $\pm$ 0.63 & 59.04 $\pm$ 0.46 & 70.09 $\pm$ 0.55 & \textbf{70.86 $\pm$ 0.42} & $\uparrow$ 0.24\% & $\uparrow$ 28.16\% & $\uparrow$ 1.10\% \\
+        & \tran & 70.69 $\pm$ 0.39 & 55.36 $\pm$ 0.34 & 64.61 $\pm$ 0.15 & 71.10 $\pm$ 0.34& \textbf{72.03 $\pm$ 0.56} & $\uparrow$ 1.90\% & $\uparrow$ 30.11\% & $\uparrow$ 1.31\% \\ \midrule
+\multirow{3}{*}{\ogbp} & \production & 76.93 & 60.02 & 63.47 & 77.33& \textbf{77.93} & $\uparrow$ 1.30\% & $\uparrow$ 29.84\% & $\uparrow$ 0.77\% \\ 
+        & \ind & 77.23 $\pm$ 0.24 & 60.02 $\pm$ 0.09 & 63.38 $\pm$ 0.33 & 77.02 $\pm$ 0.19 & \textbf{77.50 $\pm$ 0.25} & $\uparrow$ 0.35\% & $\uparrow$ 29.12\% & $\uparrow$ 0.62\% \\
+        & \tran & 76.86 $\pm$ 0.27 & 60.02 $\pm$ 0.11 & 63.49 $\pm$ 0.31 & 77.41 $\pm$ 0.21& \textbf{78.36 $\pm$ 0.13} & $\uparrow$ 1.95\% & $\uparrow$ 30.56\% & $\uparrow$ 1.23\% \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\label{tab:inductive}
+\end{table*}
+\paragraph{Extending to Heterophilic Graphs}
+\label{app-heterophilic}
+In addition to homophilic graphs, we extend our proposed method to heterophilic graphs for further evaluation. We consider 2 heterophilic datasets, \texttt{Texas} and \texttt{Cornell}, realsed by \cite{DBLP:journals/corr/abs-2002-05287}.
+\texttt{Texas} and \texttt{Cornell} are web page datasets collected from computer science departments of various universities. In these datasets, nodes are web pages and edges represent hyperlinks between them. Bag-of-words representations are taken as nodes’ feature vectors. The task is to classify the web pages into ﬁve categories including student, project, course, staff and faculty. Basic statistics of the datasets are shown in \cref{tab:dataset2}. The Edge Hom. (\cite{zhu2020homophily}) is defined as the fraction of edges that connect nodes with the same label.
+We incorporate our structure-aware code embeddings with two state-of-the-art GNN models known for their efficacy on heterophilic graphs, namely ACMGCN (\cite{luan2022revisiting}) and GCNII (\cite{chen2020simple}), along with MLP. We compare with these baselines in \cref{tab:hetero_tasks}. The results of these experiments demonstrate that our graph VQ-VAE can generalize to different heterophilic GNN/MLP architectures and consistently improve their performances. 
+\begin{table*}[ht]
+\center
+\caption{Heterophilic Dataset Statistics.}
+\begin{tabular}{@{}llllll@{}}
+\toprule
+\multicolumn{1}{l}{Dataset} & \multicolumn{1}{l}{\# Nodes} & \# Edges & \# Features & \# Classes& \# Edge Hom. \\ \midrule
+\texttt{Texas} & 183 & 295 & 1,703 & 5  &0.11 \\ 
+\texttt{Cornell} & 183 & 280 & 1,703 & 5 &0.30  \\ 
+\bottomrule
+\end{tabular}
+\label{tab:dataset2}
+\end{table*} 
+
+\begin{table*}[ht]
+    \centering
+    \caption{{Results on Heterophilic Graphs. }}
+    \label{tab:hetero_tasks}
+    \begin{tabular}{l cc}
+    \toprule 
+         &
+         \textbf{Texas} &  
+         \textbf{Cornell} \\
+         \midrule
+        ACMGCN &
+        $86.49$ &
+        $84.05$ \\
+        ACMGCN with our Graph VQ-VAE &
+        $\textbf{87.03}$ &
+        $\textbf{84.59}$ \\ 
+        \midrule
+        MLP &
+        $75.68$ &
+        $76.38$ \\ 
+        MLP with our Graph VQ-VAE &
+        $\textbf{77.93}$ &
+        $\textbf{78.29}$ \\
+        \midrule
+        GCNII &
+        $76.73$ &
+        $76.49$ \\
+        GCNII with our Graph VQ-VAE &
+        $\textbf{79.04}$ &
+        $\textbf{78.29}$ \\
+        \bottomrule
+    \end{tabular}
+\end{table*}
+
+\subsection{Model Analysis}
+
+\paragraph{Trade-off between Performance and Inference Time}
+To demonstrate its efficiency and capacity of our \method, we visualize the trade-off between node classification accuracy and model inference time on \citseer ~dataset in \cref{figure:inference_time}.
+Our results indicate that achieves a highest accuracy of 76\% while maintaining a fast inference time of 1.45ms. Compared to the other models with similar inference time, \method significantly \textbf{outperforms NOSMOG and MLPs by 3.12\% and 30.05\%
+in average accuracy}, respectively.
+For those models having comparable performance with \method, they require a considerable amount of inference time, e.g., 2 layers GraphSAGE (SAGE-L2) needs 152.31ms and 3 layers GraphSAGE (SAGE-L3) needs 1201.28ms, making them unsuitable for real-world applications. This \textbf{makes \method 105× faster than SAGE-L2 and 828× faster than SAGE-L3}.
+Although increasing the hidden size of NOSMOG slightly improves its performance, NOSMOGw2 (2-times wider than NOSMOG) and NOSMOGw4 still perform worse than \method with more inference time, demonstrating the superior efficiency of our \method.
+
+\begin{figure*}[ht]
+\centering
+
+\begin{minipage}{.5\textwidth}
+  \centering
+  \includegraphics[width=.95\linewidth]{image/figure3.pdf}
+  \captionof{figure}{Accuracy vs. Inference Time.}
+  \label{figure:inference_time}
+\end{minipage}%
+\begin{minipage}{.5\textwidth}
+  \setlength{\abovecaptionskip}{0.2in}
+  \centering
+  \includegraphics[width=.95\linewidth]{image/tsne/tsne.pdf}
+  \captionof{figure}{t-SNE visualization of learned node representations, colors denotes different classes.}
+  
+  \label{tsne}
+\end{minipage}
+\end{figure*}
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.75\textwidth]{image/subgraph.pdf}
+    \captionof{figure}{The query node and 4 closest nodes in distilled MLP representation space with corresponding subgraphs.}
+    \label{figure:subgraph}
+\end{figure*}
+
+\paragraph{Compactness of Learned Node Representation Space}
+\label{para-space}
+
+We use t-SNE \citep{van2008visualizing} to visualize the node representation spaces of both teacher GNN and distilled student MLP models with different methods, and put the results in \cref{tsne}. 
+Our \method provides a better teacher GNN model than GLNN and NOSMOG, and the node representations of same classes have a more compact distribution. 
+The representations extracted by our distilled MLP model also have a more compact distribution. We attribute these to our expressive code-based representation space, providing more structure-aware representations for classifying nodes. Besides, our new code-based distillation strategy can effectively deliver both graph structural information and categorial information from GNN to MLP, guaranteeing the compactness of MLP's representation space.
+
+\paragraph{Consistency between Model Predictions and Global Graph Topology}
+\begin{wraptable}[13]{r}{0.555\textwidth}
+\centering
+\caption{
+The cut value. \method predictions are more consistent with the graph topology than GNN, MLP, GLNN and the state-of-the-art method NOSMOG.
+}
+\begin{adjustbox}{width=\linewidth,center}
+\begin{tabular}{lccccc@{}}
+\toprule
+\multicolumn{1}{l}{Datasets} & SAGE & MLP & GLNN & NOSMOG & \textbf{\method} \\ \midrule
+\citseer & 0.9535 & 0.8107 & 0.9447 & 0.9659 & \textbf{0.9786} \\ 
+\pubmed & 0.9597 & 0.9062 & 0.9298 & 0.9641 & \textbf{0.9883}\\
+\cora & 0.9385 & 0.7203 & 0.8908 & 0.9480 & \textbf{0.9684} \\ 
+\acomputer & 0.8951 & 0.6764 & 0.8579 & 0.9047 &  \textbf{0.9190}\\ 
+\aphotos & 0.9014 & 0.7099 & 0.9063 & 0.9084 & \textbf{0.9177}\\ 
+\ogba & 0.9052 & 0.7252 & 0.8126 & 0.9066 &
+\textbf{0.9162}\\ 
+\ogbp & 0.9400 & 0.7518 & 0.7657 & 0.9456 & \textbf{0.9571}
+\\ \midrule
+Average & 0.9276 & 0.7572 & 0.8725 & 0.9348 & \textbf{0.9493}\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\label{tab:min_cut}
+
+\end{wraptable} 
+Here we corroborate the superiority of \method over GNNs, MLPs, GLNN and NOSMOG in capturing global graph structural information, which is complementary to the above analysis on local structure awareness. 
+We use the cut value to effectively evaluate the alignment between model predictions and graph topology as \citep{glnn,tian2023learning} based on the approximation for the min-cut problem \citep{bianchi2019mincut}.
+The min-cut problem divides nodes $\mathcal{V}$ into $K$ disjoint subsets by removing the minimum number of edges. Correspondingly, the min-cut problem can be expressed as: $\max \frac{1}{K} \sum_{k = 1}^{K} (\mC^T_k \mA \mC_k)/(\mC^T_k \mD \mC_k)$, where $\mC$ is the node class assignment, $\mA$ is the adjacency matrix, and $\mD$ is the degree matrix. Therefore, cut value is defined as follows: $\mathcal{CV} = tr(\hat\mY^T \mA \hat\mY)/tr(\hat\mY^T \mD \hat\mY)$, where $\hat \mY$ is the model prediction output, and the cut value $\mathcal{CV}$ indicates the consistency between the model predictions and the graph topology. 
+We report the cut values for various models in the transductive setting in \cref{tab:min_cut}. The average $\mathcal{CV}$ achieved by \method is \textbf{0.9493}, while SAGE, GLNN, and NOSMOG have average $\mathcal{CV}$ values of 0.9276, 0.8725, and 0.9348, respectively. 
+We find \method obtains the highest cut value, indicating the superior global structure-capturing ability over GNN and SOTA GNN-to-MLP distillation methods. 
+\paragraph{Connection between Local Graph Structure and Learned Codebook}
+To better illustrate the connection between local graph structure and the codebook learned by our graph VQ-VAE, we conduct node-centered subgraph retrieval in the learned MLP representation spaces of NOSMOG and our \method.
+Specifically, we extract the representation with distilled MLP model for
+a query node in \citseer. We demonstrate 4 subgraphs centered at the nodes that are most similar to the query node representation with the cosine similarities in the whole graph in \cref{figure:subgraph}. 
+As can be observed, the identical token IDs yield similar substructures, indicating the representation similarities of \method
+are approximately aligned with the local subgraph similarities, which is denoted as
+graph edit distance (GED) \cite{ged1, ged2, ged3} and is one of the most popular graph matching methods. 
+In contrast, the representations extracted from NOSMOG fail to sufficiently model and reflect the structural similarities between subgraphs. 
+Hence, \method is
+necessary and effective for addressing structure-complex graph tasks. Moreover, we observe that \method can be aware of the minor neighborhood structural difference despite the nodes with the same class, demonstrating the more fine-grained expressiveness of our token-based distillation, which further helps with more accurate classification.
+
+
+\subsection{Ablation Study}
+\label{exp-ablation} 
+
+\textbf{Influence of the Codebook Size} We analyze the influence of the codebook size of our graph tokenizer. 
+From \cref{fig:acc}, we observe that changing codebook size can significantly influence the performance for our distilled MLP model. Too small a value can not have enough expressiveness for preserving graph structures while too large a value will lead to code redundancy impairing the performance. Morever, \method has different optimal codebook sizes for various datasets as in \cref{fig:codebook-max}. Another interesting observation is the graph with more nodes or edges tends to require a larger codebook size to achieve optimal distillation results. 
+In our VQGraph, the size of the codebook is mainly determined by the complexity of the graph data, considering both nodes and edges which produce different local substructures. Thus, our codebook size is still small compared to the exponential graph topological complexity, demonstrating the expressiveness of our codebook. Taking \cora \ as an example, our codebook size is 2048, but it contains 2485 nodes with an average degree about 4 which can theoretically result in $O({2485}^4)$ possible 1-hop substructure patterns. 
+\begin{figure*}[ht]
+    \centering
+    \hspace{-0.17in}
+    \subfigure[Accuracy vs. Codebook Size.\label{fig:acc}]{
+    \includegraphics[height=0.33\linewidth]{image/figure_codebook.pdf}
+    \setlength{\abovecaptionskip}{-1cm}}
+    \hfill
+    \subfigure[Optimal codebook size for various datasets.\label{fig:codebook-max}]{
+    {\includegraphics[height=0.33\linewidth]{image/figure_codebook_max.pdf}}}
+    \label{figure:ablation-codebooksize}
+    \caption{Influence of the codebook size.}
+\end{figure*}
+
+
+\paragraph{Contribution Analysis of \method} \label{exp-ablation-contri} We design experiments to make statistical analysis on the contributions of our \method. 
+The results are presented in \cref{tab:vq-teacher}, and we observe that compared to traditional class-based distillation, both \textit{Only-VQ} and \method promote the average accuracy, suggesting that both graph tokenizer and soft code assignments have vital impacts on final performance. Moreover, comparing \textit{AE+class-based} to \textit{class-based}, we find adding structure awareness slightly improves GNN-to-MLP distillation. Our designed graph VQ-VAE efficiently improves the GNN-to-MLP distillation results more significantly than classic graph (Variational)AE, because we directly learn numerous structure-aware codes to enrich the expressiveness of node representations. Our \textit{VQ+code-based} distillation (denoted as \method) substantially improves node classification performance over \textit{Only-VQ} across all datasets, demonstrating the superiority of our new structure-aware distillation targets over soft labels. Please refer to \cref{app-more-ablation} for more ablation studies.
+\begin{table*}[ht]
+\center
+\small
+\caption{\textit{Class-based} denotes only using soft labels for distillation (e.g., GLNN), \textit{AE+Class-based} denotes adding classic graph Auto-Encoder \citep{kipf2016variational} for structure awareness. \textit{Only-VQ} denotes using VQ for training teacher but using soft labels for distillation. $\Delta_{\text{Only-}\textsc{VQ}}$, $\Delta_{\method}$ represents the differences between Only-VQ, \method and \textit{Class-based}.
+}
+
+\begin{adjustbox}{width=\columnwidth,center}
+\begin{tabular}{lcccccll}
+\toprule
+\multicolumn{1}{l}{Datasets} & \multicolumn{1}{c}{GNN} & Class-based  & AE+Class-based  & \textbf{Only-VQ (ours)} & \textbf{\method (ours)} & $\Delta_{\text{Only-}\textsc{VQ}}$ & $\Delta_{\method}$\\ \midrule
+\citseer & 70.49 $\pm$ 1.53 & 71.22 $\pm$ 1.54 & 71.65 $\pm$ 0.69 & \textbf{74.96 $\pm$ 1.50}  & \textbf{76.08 $\pm$ 0.55} & $\uparrow$ 5.25\% & $\uparrow$ 6.82\% \\
+\pubmed & 75.56 $\pm$ 2.06  & 75.59 $\pm$ 2.46 & 76.56 $\pm$ 1.23 & \textbf{77.86 $\pm$ 2.46}&\textbf{78.40 $\pm$ 1.71} & $\uparrow$ 3.00\% & $\uparrow$ 3.71\% \\ 
+\cora & 80.64 $\pm$ 1.57 & 80.26 
+$\pm$ 1.66  & 81.11 
+$\pm$ 1.01 & \textbf{82.48 $\pm$ 0.46} & \textbf{83.93 $\pm$ 0.87}& $\uparrow$ 2.77\% & $\uparrow$ 4.57\% \\ 
+\acomputer & 82.82 $\pm$ 1.37  & 82.71 $\pm$ 1.18  & 83.01 $\pm$ 1.18 & \textbf{84.06 $\pm$ 1.18}&\textbf{85.17 $\pm$ 1.29} & $\uparrow$ 1.63\%  & $\uparrow$ 2.97\% \\
+\aphotos & 90.85 $\pm$ 0.87  & 91.95 $\pm$ 1.04 &92.06 $\pm$ 0.69& \textbf{93.86 $\pm$ 1.04}  &\textbf{94.21 $\pm$ 0.45} & $\uparrow$ 2.08\% & $\uparrow$ 2.45\% \\
+\ogba & 70.73 $\pm$ 0.35 & 63.75 $\pm$ 0.48 &70.10 $\pm$ 1.02 & \textbf{70.75 $\pm$ 0.48}  &\textbf{72.43 $\pm$ 0.20} & $\uparrow$ 10.98\% & $\uparrow$ 13.61\% \\
+\ogbp & 77.17 $\pm$ 0.32 & 67.71 $\pm$ 0.31 &77.65 $\pm$ 0.98 & \textbf{78.71 $\pm$ 0.31}  &\textbf{79.17 $\pm$ 0.21} & $\uparrow$ 16.25\% & $\uparrow$ 16.93\% \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\label{tab:vq-teacher}
+\end{table*}
+
+
+
+
+
+\section{Conclusion}
+
+In this paper, we improve the expressiveness of existing graph representation space by directly labeling nodes' diverse local structures with a codebook, and utilizing the codebook for facilitating structure-aware GNN-to-MLP distillation. Extensive experiments on seven datasets demonstrate that our \method can significantly improve GNNs by \textbf{3.90\%}, MLPs by
+\textbf{28.05\%}, and the state-of-the-art GNN-to-MLP distillation method by \textbf{1.39\%} on average accuracy, while maintaining a fast inference speed of \textbf{828×} compared to GNNs. 
+Furthermore, we present additional visualization and statistical analyses as well as ablation studies to demonstrate the superiority of the proposed model.
+
+
+

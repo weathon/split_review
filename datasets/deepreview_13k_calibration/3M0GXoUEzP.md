@@ -1,0 +1,210 @@
+# CrIBo: Self-Supervised Learning via Cross-Image Object-Level Bootstrapping
+
+- Decision: Accept
+- Avg Score: 5.75
+- Scores: 1, 8, 6, 8
+
+## Abstract
+Leveraging nearest neighbor retrieval for self-supervised representation learning has proven beneficial with object-centric images. However, this approach faces limitations when applied to scene-centric datasets, where multiple objects within an image are only implicitly captured in the global representation. Such global bootstrapping can lead to undesirable entanglement of object representations. Furthermore, even object-centric datasets stand to benefit from a finer-grained bootstrapping approach. In response to these challenges, we introduce a novel \textbf{Cr}oss-\textbf{I}mage Object-Level \textbf{Bo}otstrapping method tailored to enhance dense visual representation learning. By employing object-level nearest neighbor bootstrapping throughout the training, CrIBo emerges as a notably strong and adequate candidate for in-context learning, leveraging nearest neighbor retrieval at test time. CrIBo shows state-of-the-art performance on the latter task while being highly competitive in more standard downstream segmentation tasks.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+1
+
+### Rating Number
+1
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The authors propose a shift in paradigm for self-supervised learning (SSL) methods; most SSL methods consider global (image-level) representations and are trained on object-centric datasets but the majority existing real-world images are instead composed of multiple objects (scene-centric). Their proposal is to add to the traditional cross-view consistency with cross-view object-level consistency and cross-image object-level consistency, approaching every image as a collection of objects that may also be present in other images. They show state-of-the-art performance on dense nearest neighbors retrieval and segmentation with a linear head and have SoTA-comparable performance when fine-tuned for segmentation.
+
+### Strengths
+- The manuscript is easy to follow and compelling to read. Preliminaries are helpful and the organization of the design into three steps is easy to follow.
+- The authors present a direct improvement on the method of Hummingbird with a more general framework for scene-centric SSL
+- The method is the SoTA on dense nearest neighbors retrieval without any fine-tuning steps
+- Empirical evidence shows that each addition was beneficial to the final performance; I have found the B.2 and B.4 experiments to be particularly beneficial to support the implementation of the cycle consistency criterium, one of the "riskier"/less intuitive ideas from the paper.
+
+### Weaknesses
+ - While most of the paper is easy to follow, the section on cycle-consistency matching (3.2.2) is particularly convoluted; on a similar note, Figure 3 is not very intuitive on a first glance and it is hard to determine "who is being compared to whom" to determine consistency.
+- Experiments on linear segmentation fail to comment on direct backbone comparisons; this is important since it seems that the model is only better than TimeT (Salehi et al., 2023) -- a ViT-S/16 model when using a larger ViT-B/16 backbone; this is probably due to the larger training set used but still deserves a mention.
+- Opinion: I disagree that the fine-tuning regime is suboptimal for comparing SSL models since this is the regime that is going to be used by partitioners when enough training data is available; I also do not think lower/comparable performance in one of the downstream tasks detracts from the manuscript.
+
+Extra notes:
+- Table 6 has swapped headers (dataset and epochs)
+
+### Questions
+1. Given that a lot of the design comes from DINO, did the authors make use of the large-crop/small-crop protocol for teacher and student respectively? 
+2. On a similar note, DINO benefits considerably from using smaller patch sizes (S/8, B/8, ...); did you experiment with this setup?
+3. A global representation is also trained but not used in any of the downstream tasks, what do the authors know of the usefulness of this representation? Is it comparable to object-centric SSL representations?
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+4 excellent
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper works on self-supervised learning from scene-centric images, and locates in between the use of object-level contrastive learning and cross-image nearest neighbours. Compared with prior related work Hummingbird, it proceeds on object regions discovered by the network online instead of pixels, enabling strong representations for both in-context learning evaluation and traditional evaluations (linear probing & fine-tuning). A novel cycle-consistency strategy, which requires NN's another view to be of consistent semantic with another view's NN, creates positive pairs with reasonable variation, and helps improve representation. Experiment results are supportive.
+
+### Strengths
+*Originality*: The core idea of this paper is novel and original. Though the overall framework still fits in common practices of object-level contrastive learning, the integration of nearest neighbours and the design of cycle consistency are elegant and useful.
+
+*Quality*: The proposed method is well-motivated and extensively evaluated. Its relationship to prior works on different topics is also clearly discussed. I also like the discussions on over-clustering and how it helps scene-centric learning (compositionality), which provided some new insight.
+
+*Clarity*: The delivery is very clear and easy to understand, I did not find issues in understanding.
+
+*Significance*: This work is inspiring and could be helpful for both in-context scene understanding and representation learning.
+
+### Weaknesses
+ - (minor) It would be beneficial to include a detailed comparison of the GPU memory and time costs during both the pre-training and in-context inference stages. This would allow for a more thorough understanding of the method's practical applicability and resource requirements, especially when compared to existing methods. Specifically, it would be helpful to see a breakdown of the computational cost associated with the object-level nearest neighbor search and the cycle-consistency strategy, as these are core components of the proposed approach.
+- (minor) The comparison of scene-centric learning is primarily focused on ViT-based architectures. A more comprehensive analysis would involve a discussion and comparison with other closely related works on this topic, such as ORL, SlotCon, and COMUS. For example, the visualizations in Fig. 3, which show model-discovered compositional concepts, bear a resemblance to those found in SlotCon. It would be valuable to explore whether the in-context learning evaluation could be applied to these prior works to provide a more complete picture of the relative performance and capabilities of different approaches in this domain.
+
+### Questions
+Typo: "Finetuning with Segmnenter" -> segmenter (page 14)
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This work introduces Cross-Image Object-Level Bootstrapping (CrIBo), a self-supervised visual representation pre-training approach that enforces object-level representation consistency across different images. Different from existing self-supervised pre-training strategies that only considers image-level representation consistency or cross-view object-level representation consistency, this work also aligns representations of semantically similar objects from different images. By introducing this cross-image object-level self-supervision, CrIBo pre-trains Vision Transformers (ViT) with improved visual representation quality, as demonstrated by the semantic segmentation experiments in various settings, including nearest neighbor retrieval, linear probing, and fine-tuning.
+
+### Strengths
+- For the first time, this method introduces representation consistency of semantically similar objects from different images into self-supervised pre-training. This would be helpful for performing pre-training on image datasets of complex scenes.
+
+- By leveraging the proposed cycle-consistency condition, trivial matchings between objects can be avoided and the visual encoder is enforced to learn more abstract semantic representations. This design can be helpful for future self-supervised pre-training approaches.
+
+- The writing and figure illustrations are clear. I enjoyed reading this paper.
+
+### Weaknesses
+ - Inadequate experiments: The experiments only consider the semantic segmentation task, which is just one example of object-centric visual recognition tasks. It is strongly suggested to show the generalizability of CrIBO to object detection, instance segmentation, panoptic segmentation, etc. The lack of these evaluations makes it difficult to assess the true scope of the learned representations and whether they are broadly applicable beyond pixel-level classification.
+
+- Efficiency comparison: Since CrIBO introduces additional operations like clustering and NN retrieval, it is suggested to compare CrIBO and previous methods in terms of the training efficiency. For example, time per epoch may be listed in Table 1. The absence of such a comparison makes it unclear whether the performance gains justify the added computational cost.
+
+- Fixed-$K$ clustering: The clustering algorithm (Sec 3.2.1), which comes from a previous work CrOC, is adopted here to identify $K$ objects and $K$ object-level representations in each view. My concern with this clustering algorithm (and other similar methods like K-means as in ODIN [1]) is that it always generates a fixed number of objects per image, regardless of the contents in the image under consideration. One simple image may contain less than $K$ objects; another complex scene may consist of much more than $K$ objects. Thus, it may be complicated to decide an optimal $K$ for a given pre-training dataset. Furthermore, even though an optimal $K$ is found, it can be sub-optimal for some images in the dataset. Would it be possible to improve over such fixed-$K$ clustering algorithms? This limitation could lead to either under-segmentation of complex scenes or over-segmentation of simpler ones, potentially affecting the quality of the learned representations.
+
+- Early-stage training signals: As introduced in Sec 3.2.2, a cycle-consistency criterion is applied to decide whether a pair of object representations is adopted in training. I would assume that at the early training stage, the representations are nearly random since the visual encoder is just initialized. Therefore, there may be only few or even zero object pairs that can pass the test. If I understand Figure 5 correctly, it supports this assumption. Would this phenomenon significantly reduce the available training signals and slow down the early-stage learning?
+
+### Questions
+- Sec 3.1: In the description of object representation, what does “aggregating” exactly mean? Average pooling?
+
+- Sec 3.2.2: When the memory bank is full, are the oldest samples replaced? Or is there a more sophisticated replacement strategy?
+
+- Table 3: In this fine-tuning experiment, CrIBo pre-trained ViT-B underperforms ViT-S. This trend is different from previous experiments. Why?
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The authors propose a self-supervised cross-image object-level bootstrapping method for dense visual representation learning. Specifically, the authors first use clustering algorithms to cluster dense features to obtain object features. Afterwards, the authors use object features from one view to retrieve object-level nearest neighbors from the memory bank, and then enforce consistency between each retrieved neighbor and its corresponding object feature from another view. Extensive experiments on multiple dense downstream tasks demonstrate the superiority of the proposed cross-image object-level learning paradigm.
+
+### Strengths
+-	The paper is well-motivated. The authors focus on two kinds of self-supervision in SSL: (i) cross-image self-supervision, and (ii) object-level self-supervision. Compared with cross-view self-supervision, cross-image self-supervision can provide more natural and diverse inter-image invariance. Compared with image-level self-supervision, object-level self-supervision is finer-grained and more suitable for scene-centric datasets. Based on this motivation, the authors extend existing cross-image SSL from the image level to the object level.
+
+-	The paper is generally well-written and easy to follow.
+
+-	The authors conduct extensive experiments and demonstrate promising results on various dense downstream tasks.
+
+### Weaknesses
+- The authors claim that CrIBo is the first SSL approach that explicitly enforces cross-image consistency at the object/object-part level. However, some prior SSL works (e.g., [1]) have already performed cross-image SSL at the object/object-part level. Specifically, [1] enforces cross-image object-level consistency with KNN-retrieved cross-image object-instance pairs. The main difference is that [1] uses region proposal algorithms to produce region-level object features, whereas CrIBo uses clustering algorithms to produce pixel-level object features. Therefore, I suggest the authors discuss the differences with [1] and modify the claim accordingly.
+
+- For cross-image self-supervision, there are several closely related works (e.g., [2, 3, 4]) that should also be discussed in Sec. 2.
+
+- It seems that CrIBo does not perform very well in the fine-tuning evaluation. For example, as shown in Table 3, CrIBo performs worse than MAE when pre-trained on IN1K. Using a larger ViT-B/16 backbone even degrades the performance. Could the authors provide some explanations on this?
+
+- The authors use the clustering algorithm in [5]. Could the authors provide the justification on this? What if other clustering algorithms (e.g., k-means) are used? Since the quality of object representations depends on the clustering algorithms, an ablation study on different clustering algorithms would be an interesting experiment to explore.
+
+- It seems that CrIBo tends to induce heavy computational costs. A computational cost comparison (e.g., training time, GPU memory) with previous methods is preferred.
+
+### Questions
+I have some additional questions and suggestions:
+
+-	The authors use the clustering algorithm to group dense features in the feature space to obtain object representations. What if using some heuristic algorithms (e.g., Multiscale Combinatorial Grouping [6]) to directly produce object masks on the input images first and then obtaining the corresponding object representations in the feature space (like what is done in DetCon [7]). Will the grouping in the feature space be better than the grouping in the image space? Furthermore, the authors may also want to consider using ground-truth object masks (e.g., mask annotations from COCO) to replace the clustering algorithm to see whether the supervised object annotations are the upper bound of the proposed method or the unsupervised grouping could even exceed the supervised counterpart. These experiments can add more insights to the paper.
+
+-	According to Table 4, using a large memory bank size tends to improve the performance. What if using a memory bank size larger than 25k? Given the current ablation results, it seems that the performance does not saturate and may be further improved with a larger memory bank size.
+
+-	Apart from ViT, is CrIBo applicable to other backbone architectures (e.g., CNN)?
+
+
+**References:**
+
+[1] Unsupervised Object-Level Representation Learning from Scene Images. In NeurIPS, 2021.
+
+[2] Local Aggregation for Unsupervised Learning of Visual Embeddings. In ICCV, 2019.
+
+[3] Delving into Inter-Image Invariance for Unsupervised Visual Representations. In IJCV, 2022.
+
+[4] Mine Your Own View: Self-Supervised Learning Through Across-Sample Prediction. In arXiv, 2021.
+
+[5] CrOC: Cross-View Online Clustering for Dense Visual Representation Learning. In CVPR, 2023.
+
+[6] Multiscale Combinatorial Grouping. In CVPR, 2014.
+
+[7] Efficient Visual Pretraining with Contrastive Detection. In ICCV, 2021.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

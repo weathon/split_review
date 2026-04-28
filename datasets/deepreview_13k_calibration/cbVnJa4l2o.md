@@ -1,0 +1,203 @@
+# LLM+A: Grounding Large Language Models in Physical World with Affordance Prompting
+
+- Decision: Reject
+- Avg Score: 4.00
+- Scores: 5, 3, 3, 5
+
+## Abstract
+While large language models (LLMs) are successful in completing various language processing tasks, they easily fail to interact with the physical world properly such as generating control sequences. We find that the main reason is that LLMs are not grounded in the physical world. Existing LLM-based approaches circumvent this problem by relying on additional pre-defined skills or pre-trained sub-policies, making it hard to adapt to new tasks. In contrast, we aim to address this problem and explore the possibility to prompt pre-trained LLMs to accomplish a series of robotic manipulation tasks in a training-free paradigm. Accordingly, we propose a framework called LLM+A(ffordance), where the LLM serves as both the sub-task planner (that generates high-level plans) and the motion controller (that generates low-level control sequences). To ground these plans and control sequences on the physical world, we develop the \textit{affordance prompting} technique that stimulates the LLM to 1) predict the consequences of generated plans and 2) generate affordance values for relevant objects. Empirically, we evaluate the effectiveness of LLM+A in various robotic manipulation tasks with natural language instructions and demonstrate that our approach substantially improves the performance by enhancing the feasibility of generated plans and control.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This works uses LLMs to generate plans that solve language-conditioned table top problems taking advantage of “affordances” prompting. The focus is very relevant for the robotics community and the benchmark is nicely selected. However, sometimes the explanation of the methods can be improved and the accuracy obtained is not in line with the claims of how affordances improve the planning.
+
+### Strengths
+-	Very good understanding of the challenges of LLMs solutions for robotics.
+-	Introducing affordances into LLMs solution may increase generalization
+-	Good selection of benchmarks.
+
+### Weaknesses
+ - The description of the Motion Controller could be improved as it is different in the experiments.
+- The work is relegating too much emphasis on affordance prompting, but this prompting is overengineered. For instance, Pick&place example does not shows enough the advantage of affordance prompting.
+- Results accuracy is very low comparing to other LLMs methods to solve planning.
+
+
+**Focus**
+
+I personally think that the focus is perfectly well framed in robotics and is going straight to the point to why affordances are needed. However, the example used for explaining why current methods do not work: “It may move directly right and then push the block” is not enough demonstrated with SOTA algorithms and maybe too biased by comparing with ReAct. For instance,  Driess et al. PALM-E  and interactive language can solve these type of table top problems.
+
+**State of the art**
+
+Previous works on affordances and tools: this could be improved. Examples:
+
+Jamone, L., Ugur, E., Cangelosi, A., Fadiga, L., Bernardino, A., Piater, J., & Santos-Victor, J. (2016). Affordances in psychology, neuroscience, and robotics: A survey. IEEE Transactions on Cognitive and Developmental Systems, 10(1), 4-25.
+
+Fang, K., Zhu, Y., Garg, A., Kurenkov, A., Mehta, V., Fei-Fei, L., & Savarese, S. (2020). Learning task-oriented grasping for tool manipulation from simulated self-supervision. The International Journal of Robotics Research, 39(2-3), 202-216.
+Besides, what is the difference between authors approach and other LLMs table top like Interactive Language: Talking to Robots in Real Time or non-pure LLM solutions like CLIPort solution.
+
+**Methods**
+
+It is not totally clear for me, who is setting the object parts and how the affordance values are being generated. As this is totally different in the pushing and the pick&place experiments. Also it is not clear how the position control is generated (what is the size of the vector?, is it restricted?)
+
+**Results**
+
+It was not clear why the accuracy is so low despite the reasoning power of the LLM and assuming that the affordance prompting is helping out. In “language table” results are ~95% accuracy.
+
+### Questions
+Further comments:
+
+Training-free means zero-shot? As the LLMs are trained.
+
+ “Affordances” prompting is interesting but is not totally solving the problem, maybe learning non-language dynamics could be a key point for the low-level control. Otherwise LLMs, will always stay in the high-level planning.
+
+Should be affordances as goal-conditioned values generalized non-goal-conditioned effects?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The authors present a training-free grounded LLM approach for Embodied AI called LLM+A(ffordance). It leverages LLM as both the sub-task planner (that generates high-level plans) and the motion controller (that generates low-level control sequences). To ground these plans and control sequences on the physical world, they develop the affordance prompting technique that stimulates the LLM to 1) predict the consequences of generated plans and 2) generate affordance values for relevant objects. Empirical evaluation is shown on robotic manipulation tasks.
+
+### Strengths
+1. The paper is generally well-written and easy to follow.
+2. The work tackles a very challenging and useful problem for the embodied AI community -- handling high-level and low-level planning jointly with a single foundational model.
+
+### Weaknesses
+1. Limited technical contribution: this work comes off as an empirical evaluation of certain style of prompt engineering for robotic manipulation. Other than the fact that some prompt worked for a small set of robotic manipulation tasks, I am not sure what I learnt from this paper.
+2. Limited evaluation: 
+ -  Furthermore, the evaluation tasks are too simple. Unclear how affordance prompting would scale to more complex or more real world tasks, for instance manipulation in cluttered settings or situations with partial observability.
+ - Unclear how well LLM+A will do without a really strong llm such as GPT4. The use of GPT4 also makes it a computationally slow framework for online deployment. To that end, it would be good for the authors to report execution time/time to solve for their evaluation tasks. I encourage authors to also do real-world evaluation to really put the runtime in perspective. Lastly, I'd also like to see LLM+A performance with other opensource models like Llama2 or Vicuna.
+- Also unclear if the results are reproducible given GPT4's changing capabilities over time: https://arxiv.org/pdf/2307.09009.pdf I therefore encourage authors to consider open source alternatives, at the least time-stamp their GPT4 evaluations. 
+3. Baselines: It is also unclear how the authors chose the baselines they compare with. They do not provide a rationale on their selection of baselines. Instead they simply choose some subset of llm prompt based approaches. Was the goal to just compare their prompt style? Why not also compare with Palm-e, RT-2, GATO, VIMA to show that their training-free prompt-based approach works better than these others that required additional data for training? Even if the goal is to compare prompt-based approaches, many others come to mind such as text2motion: https://sites.google.com/stanford.edu/text2motion 
+4. Limited analysis: Given that the tasks were evaluated in sim, I would have liked a more detailed failure analysis, for instance assuming perfect vision information. Authors explain that Block2Block has low success rate because of the need to reason about interaction with other blocks. But then shouldnt this be the case with SeparateBlock task as well? Also, what about Block2Position task? The success rates in Block2Position task also seem low (42%).
+
+### Questions
+- Why not give examples to naive llm baseline given that it needs to output coordinates in specific format too, just like LLM+A?
+- Do all other baselines also use GPT4? This isnt mentioned anywhere in the paper, but I assumed this was the case. Please clarify.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper provides a prompt framework to let LLM solve robotics tasks w/o any training. The main innovation is that it forces the LLM to output affordance that is a constraint to make sure the control is within the set of feasible actions to follow the task instruction. Experimental results show that it is better than code as policies and ReAct for the tasks included in this paper.
+
+### Strengths
+The idea of constraining the LLM to output action according to affordance is interesting.
+
+### Weaknesses
+1. The paper title claims physical world, however, in the evaluation, it only considers simulation tasks on table top (2D). Physical world robotics interaction is much more complicated than simulation and will absolutely break the assumption of this paper. In my point of view, the technique proposed in this paper only applies to a very limited setup. Basically, given some 2D points (target positions) how to use robot arm (source positions) to reach it and generate some trajectories. In contrary, techniques such as code as policies is general and can extend to physical world.
+
+2. The technique proposed by this paper may highly depend on the choice of LLM. Ablations w/ different LLMs is required to show generality.
+
+3. In SayCan paper, there is an "open source environment" section. Looks like the tasks are similar. It will be interesting to see the comparison w/ SayCan.
+
+### Questions
+Is the policy able to re-try if the first trial fails?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+(1) This paper studied language-conditioned robotic manipulation tasks using large models, proposing LLM+A framework that can decompose language instructions into sub-tasks.
+
+(2) Generated robot control sequences and extended to heterogeneous tasks and demonstrated potential of LLMs in planning and motion control simultaneously
+
+(3) Provided training-free paradigm for utilizing LLMs in robotic tasks, addressing dataset bottleneck and Affirmed the importance of affordance prompting for grounding sub-tasks in physical world. Experiments proved the effectiveness of LLM+A
+Planned future optimizations for time efficiency and application to complex robotics tasks
+
+### Strengths
+(1) This work integrate LLMs into robot planning and reasoning. It leverages recent advancements in LLMs and it utilizes LLMs as high-level sub-task planners and low-level motion controllers in robotic tasks.
+
+(2) Several challenges are mentioned and addressed, including identifying the pre-trained skills and sub-policies, and generalizing unseen envs and diverse scenes.
+
+(3) While introducing LLM + A framework, this work enhanced robotic manipulation tasks by grounding LLMs in the physical world, improving motion plans by considering affordance knowledge.
+
+### Weaknesses
+ (1) [Limited Generalization]: The experiment of this study depends on the simplified tasks, such as pushing cubes and put cubes. These objects are rather simple with regular shapes. This is crucial to discretize the actions. However,  the experiments may not cover all possible scenarios with more complex envs and irregular daily objects, leading to potential limitations in the model's applicability outside the tested conditions. The discretization of actions, while simplifying the control problem, may not translate well to continuous action spaces required for more complex manipulation tasks. The reliance on simple geometric primitives for object representation also limits the system's ability to handle objects with intricate shapes or articulated parts.
+
+(2) [Affordance Predictions Accuracy] The accuracy of affordance predictions from LLMs could be a potential weakness. If the affordance values are inaccurately predicted, it might lead to sub-optimal or erroneous robotic actions. Variability of landscapes, backgrounds, and language descriptions predicting affordances across different objects or environments could impact the overall performance. The current approach does not explicitly model uncertainty in affordance predictions, which could lead to brittle performance in noisy or ambiguous environments. Furthermore, the method's reliance on bounding box detections may not capture the fine-grained affordance information needed for precise manipulation, especially when dealing with complex object geometries or occlusions.
+
+Overall, the experiments might lack certain real-world complexities, such as dynamic and unpredictable environments. For example, the Owl-vit vision grounding module only predicts the bounding box. Which is not ideal for most of the cases in real-world applications. The lack of consideration for dynamic changes in the environment, such as moving obstacles or changes in lighting conditions, further limits the practical applicability of the proposed method. The bounding box representation also fails to capture the full spatial extent and orientation of objects, which is crucial for many real-world manipulation tasks.
+
+### Questions
+(1) What is the inference speed of the planning? Prompting GPT-4 takes some time to response compared with other simpler models e.g. from Ros integration. 
+
+(2) Why not implement SAM based vision detection modules for more accurate detection and generalize the tasks into more complex scenarios.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

@@ -1,0 +1,380 @@
+\title{Bi-Factorial Preference Optimization: Balancing Safety-Helpfulness in Language Models}
+
+\begin{abstract}
+
+Fine-tuning large language models (LLMs)  on human preferences, typically through reinforcement learning from human feedback (RLHF), has proven successful in enhancing their capabilities.  However, ensuring the safety of LLMs during the fine-tuning remains a critical concern, and mitigating the potential conflicts in  safety and helpfulness  is costly in RLHF.  To address this issue, we propose a supervised learning framework called \textit{{\oursfull} ({\ours})}, which re-parameterizes a joint RLHF objective of both safety and helpfulness into a single supervised learning objective. In the supervised optimization, a labeling function is used to capture global preferences ranking to balance both safety and helpfulness. To  evaluate \textit{{\ours}}, we  develop a benchmark  including comprehensive discriminative and generative tasks for helpfulness and harmlessness. The results indicate that our method significantly outperforms existing approaches in both safety and helpfulness. Moreover, \textit{{\ours}} eliminates the need for human prompting and annotation in LLM fine-tuning while achieving the same level of safety as methods that heavily rely on human labor, with less than 10\% of the computational resources. The training recipes and models will be released.
+
+\textcolor{red}{Warning: This paper contains offensive or harmful content.}
+
+\end{abstract}
+
+\section{Introduction}
+
+ 
+
+Fine-tuning the  large language models (LLMs) on human preferences, also known as model alignment,   has been shown to greatly enhance their text generation abilities~\cite{ouyang2022training,askell2021general,gpt4}. When prompted with well-formatted instructions, these models can generate helpful responses for various tasks like scientific questions answering~\cite{ singhal2023large}, creative writing~\cite{yuan2022wordcraft}, coding~\cite{chen2021evaluating,guo2024deepseek}, and planning~\cite{wang2023voyager,valmeekam2023planning}.   
+However, with this instruction following ability, the models can also be prompted to generate harmful content, such as sexist or racist comments, suggestions for  committing crimes, or  sensitive medical advice~\cite{bender2021dangers,weidinger2021ethical,zou2023universal}. Therefore, it is crucial to ensure that LLMs are  both helpful and safe~\cite{ouyang2022training,askell2021general, bai2022training}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figure/qualitative.pdf}
+    \caption{ Four models are trained with different data sources and algorithms. 
+    Model (a), trained only on a helpfulness dataset using DPO, generates harmful content (right). Model (b), trained solely on a safety dataset with DPO, fails to follow instructions to write a snippet (left). Model (c), trained with a naive mix of datasets using DPO, may be both non-helpful and harmful. Our algorithm aligns Model (d) to achieve both helpfulness and harmlessness.}
+    \label{fig:qualitative}
+\end{figure}
+
+The challenge of improving both safety and helpfulness of LLMs arises from the inherent tension between these two objectives~\cite{bai2022training,llama2,qi2023fine}. A perfectly safe model may refuse to answer even non-harmful questions (\cref{fig:qualitative}-left, b), while a highly helpful model (\cref{fig:qualitative}-right, a) may compromise safety. 
+Additionally, training a model on a  mix of data annotated with different preference objectives can lead to issues, as shown with  model (c) in \cref{fig:qualitative}, where the model refuses to generate code (left) yet still produces harmful content (right).
+
+To resolve this problem, recent studies propose to train separate reward models tailored to each objective, safety and helpfulness, and optimize LLMs via multi-objective RLHF, which aggregates  reward scores over all objectives~\cite{bai2022training,llama2,dai2024safe,murule}. However,  developing a safety reward model requires a  sufficient number of unsafe responses specific to the model being trained, which is both labor-intensive and computationally demanding~\cite{llama2,murule}. In contrast, supervised optimization, built upon re-parameterizing the RL objective into supervised loss, is more efficient in fine-tuning LLMs on human preferences~\cite{dpo,ipo,gpo}. However, current work typically focuses on re-parameterizing single reward RLHF objective within the supervised learning framework, and extending this re-parameterization to the multi-reward case is not straightforward~\cite{zhou2023beyond}.
+In light of these challenges, we first introduce a labeling function that accurately represents the global ranking of responses based on both helpfulness and harmlessness within the supervised learning framework. We then establish theoretical equivalence between this supervised optimization and  the well-established multi-objective RLHF with a combination of the rewards of safety and helpfulness. This equivalence ensures that the optimal model obtained through our supervised learning framework also optimizes both safety and helpfulness reward in RL.  We denote this framework as {\oursfull} ({\ours}).
+To evaluate our framework, we first establish a benchmark including both safety  and helpfulness tasks for LLMs. Using this benchmark, we demonstrate that {\ours} effectively develops highly safe LLMs while preserving their helpfulness. Our approach relies only on publicly available datasets, and achieves results comparable to those of methods requiring extensive human labeling efforts. Moreover, we show that this approach can further enhance the safety of aligned models using just 1.5K red teaming prompts, entirely eliminating the need for human annotation. 
+Our contributions are summarized as:
+\begin{itemize}[label=\textbullet, leftmargin=*, topsep=0pt, itemsep=1pt]
+    \item We re-parameterize the multi-reward RLHF objective, that balances safety and helpfulness, into a single supervised learning objective. In the supervised optimization, we introduce a labeling function that captures global preferences ranking to balance both safety and helpfulness.
+    \item We establish a safety evaluation protocol that includes extensive discriminative and generative tasks, and we perform evaluations on open-sourced LLMs.
+    \item Using our algorithm, we efficiently improve the harmlessness  of open-sourced models by 15\% with a public dataset and by 13\% with only 1.5K red teaming data, all while preserving helpfulness. Our method achieves safety scores comparable to those of labor-intensive methods without requiring human prompting or annotations.
+\end{itemize}
+
+
+\section{Preliminary}
+
+
+\textbf{Notation and Terminology. }
+Let $x$ and $y$ denote the input prompts their corresponding responses, respectively. 
+For any two responses, $y,y'$ generated from a prompt $x$,  a binary preference label \( I(y \succ y'|x)\) is provided by a human annotator  to whether \(y\) is preferred over \(y'\).
+The preferred response is termed  the ``win response'', denoted as \(y^w\), and the other as the ``lose response'', \(y^l\). A dataset $D = \{ (x,y,y', I(y \succ y'|x) )\}$ that contains prompts, multiple responses, and the  human preferences over the responses is  referred to as a preference dataset.
+
+Following prior art \cite{ipo}, we define the ground-truth preference $p^*$ between two responses $y, y'$  as the \textit{expected} preference label across a broad group of human annotators, \ie, $p^*(y\succ y'|x) = \mathbb{E}\big[I(y\succ y'|x)\big]$. The ground-truth  score of a single response $y$ is then the expected value of its paired preferences with all other responses, \ie, $p^*(y|x) = \mathbb{E}_{y'} \big[p^*(y\succ y'|x)\big]$.
+
+\textbf{RLHF.} 
+RLHF typically  consists of two phases~\cite{stiennon2020learning,zheng2023secrets}:  supervised reward learning and policy optimization through reinforcement learning (RL). The training of the reward model $r_\phi$, parameterized by $\phi$, is framed by Bradley-Terry (BT) modeling~\cite{bradley1952rank}, which employs the logistic loss to maximize the  distance between the output reward scores of win and lose responses,
+\begin{equation}\label{eq:rewardlearning} \footnotesize
+    \mathcal{L}_r(\phi) = -\mathbb{E}_{(x, y^w, y^l) \sim D} \big[ \log \sigma(r_{\phi}(x, y^w) - r_{\phi}(x, y^l)) \big],
+\end{equation}
+where $\sigma$ is a sigmoid function, and $D$ is a preference dataset. 
+The trained reward model $r_\phi$ then provides reward scores for the RL phase.  The language model $\pi_\theta$,  or policy in the RL phase, is optimized with the objective of maximizing the KL-regularized reward~\cite{schulman2017proximal}, \ie,
+\begin{equation}\label{eq:rlhf}\footnotesize
+    \max_{\pi_\theta} \mathbb{E}_{x \sim D, y \sim \pi_\theta (y|x)} \big[ r_\phi (x, y)  - \tau \text{KL} \left[ \pi_\theta (y | x) || \pi_{\text{ref}} (y | x) \right] \big],
+\end{equation}
+where $\tau$ is a  penalty coefficient for the KL divergence term, which prevents  the policy $\pi_\theta$ from significantly deviating from a reference policy $\pi_{\text{ref}}$.  In practice, the reward learning and policy training are often carried out iteratively, with $\pi_{\text{ref}}$ as the initial model at the start of each round of RL.
+
+\textbf{Multi-objective RLHF.} In multi-objective RLHF, \cref{eq:rlhf} is extended to include multiple reward functions, each corresponding to a specific objective~\cite{llama2,dai2024safe,zhou2023beyond,chakraborty2024maxminrlhf,wang2024arithmetic}, 
+\begin{equation}\footnotesize\label{eq:multiobjective}
+    \max_{\pi_\theta} \mathbb{E}_{x \sim D, y \sim \pi_\theta (y|x)} \big[ g(r_{\phi_1}(x, y), \dots, r_{\phi_n}(x, y) ) - \tau \text{KL} \left[ \pi_\theta (y | x) || \pi_{\text{ref}} (y | x) \right] \big]  \big],
+\end{equation}
+where $r_{\phi_1}, \dots, r_{\phi_n}$ are reward models, each trained separately, and $g: \mathbb{R}^n \to \mathbb{R}$ is a function that combines the reward scores from multiple reward models. 
+
+\textbf{Direct Preference Optimization (DPO)}.  DPO~\cite{dpo} reveals that the reward $r$ can be re-parameterized in terms of the policy $\pi$, allowing the policy to be optimized through supervised reward learning:
+\begin{equation}\label{eq:dpoloss}\footnotesize
+    \min_\theta -\mathbb{E}_{(x,y^w,y^l) \sim D} \Big[ \log \sigma \big( \tau \log \frac{\pi_\theta(y^w | x)}{\pi_{\text{ref}}(y^w | x)} - \tau \log \frac{\pi_\theta(y^l | x)}{\pi_{\text{ref}}(y^l | x)} \big) \Big]. 
+ \end{equation}
+ Notably, the data points $x, y^w,y^l$  in this objective are not necessarily generated from  $\pi_\theta$ while it is updated; instead, they can instead be drawn from a public preference dataset $D$. 
+
+\textbf{Generalization of DPO.}
+Later work~\cite{ipo, gpo} further reveals that  a single reward $r$ and the optimal solution $\pi^*$ of RLHF in \cref{eq:rlhf} are related by the equation
+$
+\pi^{*}(y|x)\propto \pi_{\text{ref}}(y|x)  \exp\big(\tau^{-1} r(y|x)\big).
+$
+When comparing two responses,  $y^w$ and $y^l$, this relationship yields:
+\begin{equation} \label{eq:optimal} \footnotesize
+    h_{\pi^*}(y^w,y^l):= \log \Big( \frac{{\pi^*}(y^w|x) \pi_\text{ref}(y^l|x)}{{\pi^*}(y^l|x) \pi_\text{ref}(y^w|x)} \Big) = \tau^{-1}\big(r(y^w|x) - r(y^l|x)\big)
+\end{equation}
+Given that this equation holds for the optimal policy $\pi^*$, we can directly minimize the difference of the two sides of \cref{eq:optimal} with a supervised loss $\mathcal{L}$
+\begin{equation}\label{eq:supervised_loss}\footnotesize
+    \min_{\theta} \mathbb{E}_{(x,y^w,y^l) \sim D} \Big[ \mathcal{L} \big( h_{\pi_\theta}(y^w,y^l), \tau^{-1} g_I( y^w,y^l|x )\big)\Big], 
+\end{equation}
+where $g_I: \mathbb{R}^2 \to \mathbb{R}$ is a real-valued label function that approximates the value $r(y^w|x) - r(y^l|x)$. The optimal policy obtained by \cref{eq:supervised_loss}  is then equivalent to that of \cref{eq:rlhf}.    
+
+\textbf{Notation Modification.} 
+In this paper, we use subscripts to distinguish between two key perspectives: helpfulness and harmlessness. The preference label for helpfulness between two responses is denoted as 
+ \(\Ih(y \succ y'|x)\), and the safety label for a response \(y\) is denoted as 
+  \(\Is(y|x)\).
+  We introduce the notation $y^{hw} = y$ if $\Ih(y \succ y'|x) = 1$, \ie, $y^{hw}$ is the more helpful response, and $y^{hl}$ is the less helpful response, regardless of  safety. Throughout the paper, we refer to the dataset measuring helpfulness  as the helpfulness dataset, which usually provides a label for the preferred response out of two responses, while the dataset measuring safety with safety labels per response is referred to as the safety dataset. Please refer  to \cref{tab:notation} for a summary of the notation.
+
+
+\section{{\ours}
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[t]{0.4\textwidth}
+        \includegraphics[width=\textwidth]{figure/globalrank.pdf}
+        \caption{Global preference ranking of different responses.}\label{fig:globalrank}
+    \end{minipage} \hfill
+    \begin{minipage}[t]{0.57\textwidth}
+        \includegraphics[width=\textwidth]{figure/pairwiserank.pdf}
+        \caption{Pair-wise preference of responses $y^{hw}, y^{hl}$ with different safety label, and the  label values.}\label{fig:pairwiserank}
+    \end{minipage}
+\end{figure}
+In this section, we aim to extend the supervised learning framework in \cref{eq:supervised_loss} to improve both safety and helpfulness in LLM alignment. Naively, we could combine the helpfulness and safety datasets, treating   safer response in safety dataset and more helpful response in the helpfulness dataset as the win response $y^w$ in \cref{eq:supervised_loss}. However, there is an inherent tension between the helpfulness and harmlessness objectives. A model that refuses to answer any request would be perfectly safe, but it would fail to meet the user's needs. Conversely, a highly responsive model that attempts to address all requests, including potentially harmful ones, may compromise safety in favor of helpfulness~\cite{nadeau2024benchmarking}. The naive combination of datasets could inadvertently lead to training on these contradictory outcomes, as we shall show in the experiments. 
+On the other hand, previous work~\cite{llama2,dai2024safe} has developed successful multi-objective RLHF methods to resolve this tension, with the objective
+\begin{equation}\label{eq:hs_multiobjectiverl}\footnotesize
+    \max_{\pi_\theta} \mathbb{E}_{x \sim D, y \sim \pi_\theta (y|x)} \big[ g(y|x) - \tau \text{KL} \left[ \pi_\theta (y | x) || \pi_{\text{ref}} (y | x) \right] \big]  ,
+\end{equation}
+where $g(x,y)= g(r_\text{help}(x, y) , r_\text{safe}(x, y))$ is a function that combines the helpfulness reward  $r_\text{help}(x, y)$ and safety reward $r_\text{safe}(x, y)$. Therefore,  re-parameterizing \cref{eq:hs_multiobjectiverl} to a supervised objective leads to an efficient and effective alignment method. The target objective is:
+\begin{equation}\footnotesize\label{eq:supervised_loss_safe}
+    \min_{\theta} \mathbb{E}_{(x,y^{hw},y^{hl}) \sim D} \Big[ \mathcal{L} \big( h_\pi(y^{hw},y^{hl}), \tau^{-1} g_I( y^{hw},y^{hl}|x )\big)\Big], 
+\end{equation}
+where $y^{hw}$ and $y^{hl}$ are the more helpful and less helpful responses. Similarly to \cref{eq:supervised_loss}, $g_I$ is the label function that leverages the safety labels  $\Is(y^{hw}), \Is(y^{hl})$  to approximate the value $g(y^{hw}|x) -g( y^{hl}|x))$, where $g$ is the global reward function in \cref{eq:hs_multiobjectiverl}. 
+
+In \cref{sec:tension}, we first develop an empirical labeling function $g_I$ that accurately represents the global reward of  responses based on both helpfulness and harmlessness. We then establish the theoretical equivalence between \cref{eq:supervised_loss_safe} with this $g_I$ and \cref{eq:hs_multiobjectiverl} in \cref{sec:equivalence}. Next, we present the algorithm in \cref{sec:algorithm} and provide a sample illustration in  \cref{sec:illustrative}.
+
+
+
+\subsection{Empirical Labeling function}\label{sec:tension}
+In previous single-reward optimization methods~\cite{dpo,ipo,gpo},  \(g_I(y^w, y^l|x)\) in \cref{eq:supervised_loss} is typically  a positive constant. However, in our case, \(g_I(y^{hw}, y^{hl}|x)\), which approximates the global reward disparity between the more helpful response and the less helpful response, \ie, $g(y^{hw}|x) -g( y^{hl}|x)$,  should vary depending on the safety of $y^{hw}$ and $y^{hl}$. For example, in  \cref{fig:globalrank}, response (a)  is more helpful than   response (b), and the global reward disparity between (a) and (b) should be positive since both are safe. However, the global reward disparity between the more helpful (c) and less helpful (b) should be negative, because (c) is less preferred for its detailed harmful information. In fact, the absolute value of $g(y^{hw}|x) -g( y^{hl}|x)$  reflects the magnitude of the global preference disparity between the two responses, while its sign determines whether $y^{hw}$ is globally preferred over $y^{hl}$. 
+
+To assign label values across various $y^{hw}, y^{hl}$ pairs,  we first globally rank the responses as illustrated in \cref{fig:globalrank}. Our guiding principle is a general \textit{preference for safe responses, prioritizing helpfulness only if the responses is safe}. We desire the helpful and safe responses like (a) in \cref{fig:globalrank}, followed by the acceptable non-helpful but safe responses like (b). We remain neutral toward the harmful but unhelpful responses like (c), and we  hate the harmful yet exhaustive (helpful) responses like (d).
+
+Given two responses $y^{hw}, y^{hl}$, assuming we have their relative helpfulness ranking, there are four classes of pairs based on their safety, illustrated in \cref{fig:pairwiserank}.
+For \circled{1} and \circled{2}, we prefer the safe and more helpful \(y^{hw}\) than the other response, so the signs of the labels should be positive. Similarly, the signs of  \circled{3} and \circled{4} should be negative. The preference gap for \circled{1} (Desired vs. Neutral) is larger than for \circled{2}, thus the magnitude of the labels should be greater  in \circled{1}. Likewise, the magnitude of labels of \circled{4} should be greater than that of \circled{3}. Consequently, the label value of the four class of pairs should be ordered as \circled{1}, \circled{2}, \circled{3}, and \circled{4}. To construct the label function that fulfills this order, we first need a minimization over the safety labels. To ensure a positive label for \circled{2}, we require a larger scalar weighting the safety of  \(y^{hw}\) compared to that of \(y^{hl}\). We hypothesize the following form for the label function $g_I$:
+\begin{equation}\label{eq:hpgiwl}\footnotesize
+    g_I(y^{hw}, y^{hl}) = B_3(B_1 \Is(y^{hw}|x) -  \Is(y^{hl}|x) + B_2). 
+\end{equation}
+In this equation, 
+\(B_1\)  is positive scalar that weights the safety of $y^{hw}$.   $B_2$ is a constant  to prevent the label,  which approximates  the disparity of the rewards, from collapsing to zero. $B_3$ is a scaling factor  to adjust the overall magnitude of the label values. For instance, let $B_1 = 3, B_2=-2\alpha, B_3=0.5$, \cref{fig:pairwiserank}-right illustrates  label values of different pairs.
+
+ 
+
+\subsection{Theoretically Equivalent Reward} \label{sec:equivalence}
+
+In this section, we show that the supervised optimization problem in \cref{eq:supervised_loss_safe}, with specific labeling function in \cref{eq:hpgiwl}, is theoretically equivalent to the multi-objective RLHF in \cref{eq:hs_multiobjectiverl} with a particular reward function. 
+Previous studies~\cite{llama2,dai2024safe} in aligning LLMs for both safety and helpfulness have shown that the global reward function can be effectively approximated by a bilinear combination of the two sub-rewards; see \cref{appen:baselines} for more details. We hypothesize the global reward function as follows:
+\begin{equation}\label{eq:desiredreward}\footnotesize
+    g(y) = (\ps(y | x)  + A_1)(\ph(y \succ \pi| x)  + A_2),
+\end{equation}
+where  \(A_1, A_2\) are two constants that prevent the reward from being nullified by zero values, and $\ph, \ps \in [0,1]$ are the ground-truth helpful and safety preferences of response $y$. 
+Let
+$A_1=E_s, A_2=\frac{1}{2}, B_1=3, B_2=0, B_3=\frac{1}{2}$, we have the reward function $g$ and labeling function $g_I$ as follows: 
+\begin{align}\label{eq:g}\footnotesize
+    &g(y) = (\ps(y|x) + E_s)(\ph(y \succ \pi |x )+\frac{1}{2}),\\
+    &g_I(y^{hw}, y^{hl})  = \frac{3}{2}\Is(y^{hw}) - \frac{1}{2}\Is(y^{hl}), \label{eq:gi}
+\end{align}
+where \( E_s = \mathbb{E}_{y \sim \pi} \big[\ps(y|x)\big] \) represent the ground truth average safety of responses given prompt $x$. 
+The following theorems reveal the theoretical equivalence. 
+
+\begin{theorem}[Azar~\etal~\cite{ipo}]\label{thm:unique}
+    The optimization problem in \cref{eq:hs_multiobjectiverl} has a solution $\pi^*$ with the format
+    \[\footnotesize
+        \pi^*(y|x) = \frac{\pi_\text{ref}(y|x)\exp\left(\tau^{-1} g(y|x) \right)}{\sum_{y'}\pi_\text{ref}(y'|x)\exp\left(\tau^{-1} g(y'|x) \right)}, 
+    \]
+    and $\pi^*(y)$ is the unique solution to the following optimization problem
+    \begin{equation} \label{eq:expectdirect}\footnotesize
+        \min_{\pi_\theta} \mathbb{E}_{x\sim D, y,y' \sim \pi_\theta} \left[ h_\pi(y,y') - \frac{g(y|x) - g(y'|x)}{\tau}\right]^2.
+    \end{equation}
+\end{theorem}
+
+\begin{theorem}\label{thm:equivalence}
+    The optimization problem in \cref{eq:expectdirect} and \cref{eq:supervised_loss_safe} are equivalent under the proposed $g$ and $g_I$ function.
+\end{theorem}
+With \cref{thm:unique}, we can obtain the optimal \( \pi^* \) by solving the supervised optimization problem in \cref{eq:expectdirect}. The proof of this theorem is  in \cref{appensec:proofunique}. However, the optimization problem in \cref{eq:expectdirect} remains challenging because the function \( g(y) \) involves the ground-truth preference \( p^* \), which requires estimation by a large group of annotators.   To address this,  \cref{thm:equivalence} shows it is equivalent to solve the supervised optimization problem in \cref{eq:supervised_loss_safe} with the proposed $g_I$ to obtain the optimal \( \pi^* \).
+The proof of this equivalence  is provided in  \cref{appensec:proofequivalence}. We further discuss the general equivalence with different constants $A_1, A_2, B_1, B_2, B_3$ in \cref{appensec:proofconstants}.
+
+The proposed supervised optimization problem in \cref{eq:supervised_loss_safe} and labeling function $g_I$ in \cref{eq:gi} also possess several properties that offer flexibility when constructing algorithms. These properties are discussed in the following proposition and in \cref{appensec:discussproperty}.
+
+\begin{proposition}\label{prop:shift}
+    \cref{thm:unique} and \cref{thm:equivalence} 
+    hold under the shift of the preference values in $g$ and $g_I$, \ie,
+    \[\footnotesize
+    \begin{split}
+        &g(y) = (\ps(y|x) +p_1 + E_s)(\ph(y \succ \pi |x )+p_2+\frac{1}{2}), \\
+        &g_I(y^{hw}, y^{hl})  = \frac{3}{2}(\Is(y^{hw})+p_1) - \frac{1}{2}(\Is(y^{hl})+p_2),
+    \end{split}
+    \]
+where $p_1, p_2$ are constants.
+\end{proposition}
+This property allows us to adjust the preference labels of the responses. Proof of the proposition is provided in \cref{appensec:discussproperty}.
+In practice, we further apply a shift of the safety label value $\alpha$ as
+\begin{equation}\label{eq:giwl}\footnotesize
+    g_I(y^{hw}, y^{hl}) =  \frac{3}{2}\Is(y^w) - \frac{1}{2}\Is(y^l) - \alpha.
+\end{equation}
+The factor $\alpha$ is useful when set to negative values to distinguish unsafe samples, i.e., to make the value of case \circled{3} in \cref{fig:pairwiserank}, \ie, both responses are not safe,  deviate from 0.
+
+\subsection{Algorithm} \label{sec:algorithm}
+\begin{figure}[t]\centering
+  \begin{minipage}[t]{0.56\textwidth}
+    \includegraphics[width=\linewidth]{figure/illustrative.pdf}
+    \caption{Action probabilities over steps during the policy optimization using DPO, IPO,  and our {\ours} in synthetic dataset. Only ours can recover the desired ranking. }\label{fig:illustrative}
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.39\textwidth} 
+    \includegraphics[width=\linewidth]{figure/openmodelresults.pdf}
+    \caption{Helpfulness and harmlessness of open sourced models. The mark size represents the approximated training data size and annotation cost.}
+      \label{tab:openmodel}
+  \end{minipage}
+  \end{figure}
+
+With  discussions in the previous sections,  the loss function in the  optimization problem in \cref{eq:supervised_loss_safe} can be expressed as 
+\begin{equation}\label{eq:wlobjective}\small
+    \mathcal{L}_\text{\ours}(\theta) = \mathbb{E}_{(x, y^{hw}, y^{hl})\sim D} \left(\log \Big( \frac{{\pi_\theta}(y^w|x) \pi_\text{ref}(y^l|x)}{{\pi_\theta}(y^l|x) \pi_\text{ref}(y^w|x)} \Big)- \frac{\frac{3}{2}\Is(y^{hw}) - \frac{1}{2}\Is(y^{hl}) - \alpha}{\tau} \right)^2.
+\end{equation}
+In practice, we directly use the above supervised loss to fine-tune the LLMs for both helpfulness and harmlessness. 
+\( y^w \) and \( y^l \) can be sampled from a public preference dataset $D$ instead of being self-generated~\cite{dpo}. The safety labels  $\Is(y^{hw}), \Is(y^{hl})$ are  either provided in the dataset or obtained by a safety classifier.  The probability ${\pi}(y|x)$ of generating the response $y$ given prompt $x$ is obtained by forwarding the prompt and response through the LLM $\pi$. $\pi_\theta$ is the language model we are optimizing, and $\pi_\text{ref}$ is a reference model that can be the model at the beginning of the optimization. 
+We further employ two techniques to balance safety and helpfulness. First, we only unfreeze the selected layers \(\theta'\) in the policy \(\pi_\theta\) to avoid catastrophic forgetting, as described in \cite{zhang2023overcoming}. Second, we implement buffered training in line 5 of \cref{alg}, where we sample batches of the same size from the safety dataset and the helpful dataset, inspired by \cite{chaudhry2019a}. The overall algorithm is summarized in \cref{alg}.
+ 
+\subsection{Illustrative Examples}\label{sec:illustrative}
+
+Following ~\cite{ipo}, we conduct illustrative experiments on a synthetic dataset to demonstrate that our  method can accurately recover the global preference using  paired preferences. For simplicity, we consider a discrete action space with four actions, 
+$ \mathcal{Y} = \{ y_1, y_2, y_3, y_4 \} 
+$,  without context. 
+We define the safety labels and helpfulness ranking as 
+\[
+\begin{split}
+  &\text{Safety: } \Is(y_1) = 1, \Is(y_2) = 0,  \Is(y_3) = 1, \Is(y_4) = 0,  \\
+  &\text{Helpfulness: }  y_1 \succ y_2 \succ y_3 \succ y_4.
+\end{split}
+\]
+Consequently, our proposed global preference, as in \cref{fig:pairwiserank}, is \( y_1 \succ y_3 \succ y_4 \succ y_2 \).
+We consider the policy \( \pi_\theta (y_i) = \text{softmax}(\theta)_i \), where \( \theta \in \mathbb{R}^4 \) and \( i=1,2,3,4 \). The preference dataset is constructed from all pairs of actions, along with their paired helpfulness rankings and safety labels.  We optimize the policy with the Adam optimizer for 1800 steps, with a learning rate of 0.01, batch size of 32 sampled with replacement, \(\tau=1\), and \(\alpha = 0.5\). We compare the supervised optimization objective proposed in \cref{eq:wlobjective} as well as DPO~\cite{dpo} and IPO~\cite{ipo}, where we take the more helpful response is taken as the win response.  Each method is tested with five repeat experiments, and we plot the average learning curves in \cref{fig:illustrative}.  
+For all $\tau$, we observe  that  only with our proposed method does  $\pi(y_i)$, \ie, the probability of generating action $y_i$, converges to the desired ranking, \( y_1 \succ y_3 \succ y_4 \succ y_2 \).  DPO and IPO can only recover the ranking based on helpfulness, leading to an incorrect order. While IPO helps prevent the policy from being deterministic, our method retains this beneficial property while also achieving the correct ranking.
+
+
+\section{Experiment}
+
+
+
+
+\subsection{Evaluation Setup}\label{benchmark}
+
+\begin{table}[t]\centering\tiny
+      \caption{Results of fine-tuning pre-trained model, Mistral, with various methods. Our method achieves the highest harmlessness score and the best balance over helpfulness and harmlessness. }
+  \label{tab:comparison}
+  \resizebox{\linewidth}{!}{
+  \begin{tabular}{lcccc}
+  \toprule
+       &Helpfulness&  \multicolumn{3}{c}{Harmlessness}\\\cmidrule{2-5}
+       &Alpaca$(\uparrow)$&  Disc. $(\uparrow)$&  Gen. $(\uparrow)$&  Savg. $(\uparrow)$\\\midrule
+        DPO-H  (Zephyr)&10.99&  59.05&  62.94&  60.99\\
+       DPO-S &4.34& 56.42  &  \textbf{96.91}&  76.66\\
+        DPO&\textbf{14.71}& 58.35&  39.71&  49.03\\
+       IPO&13.15& 58.41&  89.76&  74.09\\
+        MORL&10.83&  58.54&   64.88&  61.71\\
+{\ours} (ours)& 13.33& \textbf{59.09}& 95.24&\textbf{77.16}\\\bottomrule
+  \end{tabular}}
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.47\textwidth}\tiny
+      \caption{Results of further fine-tuning the aligned Zephyr model with red teaming data. Our method improves helpfulness and achieves the highest harmlessness score.}\label{tab:redteam}\resizebox{\linewidth}{!}{
+    \begin{tabular}{lcccc}
+        \toprule
+    \multirow{2}{*}{Model} & Helpfulness & \multicolumn{3}{c}{Harmlessness} \\\cmidrule{2-5}
+     & Alpaca & Disc. & Gen. & Savg. \\\midrule
+    Zephyr-7b-beta & 10.99&  59.05&  62.94&  60.99\\
+    \,\,\,\, + DPO &  13.07&  59.28& 74.39& 66.83\\
+    \,\,\,\, + IPO &  13.07& \textbf{ 59.32}& 72.82& 66.07\\
+    \,\,\,\, + MORL &  13.07&  58.57& 65.02& 61.80\\
+    \,\,\,\, + {\ours} &  \textbf{14.41}&  59.02&  \textbf{88.79}& \textbf{73.90}\\\bottomrule
+    \end{tabular}}
+  \end{minipage}
+\end{table}
+\textbf{Harmlessness Benchmark.}
+To evaluate the harmlessness, we first construct a benchmark including both discriminative tasks and generative tasks based on previous benchmarks~\cite{srivastava2023beyond, eval-harness, tedeschi2024alert,zou2023universal}. The discriminative tasks measure the models' recognition of multiple safety topics, including 
+\begin{itemize}[leftmargin=*, topsep=0pt, itemsep=0pt]
+    \item Bias: CrowS-Pairs~\cite{nangia-etal-2020-crows}, BBQ~\cite{parrish2022bbq}, WinoGrande~\cite{sakaguchi2021winogrande}.
+    \item Ethics: ETHICS~\cite{hendrycks2021aligning}, Moral Permissibility~\cite{srivastava2023beyond, hernandez2021scaling,lourie2021scruples,thomson2019killing}, Simple Ethics Questions~\cite{hendrycks2021aligning,lourie2021scruples}. 
+    \item Toxicity: ToxicGen~\cite{hartvigsen2022toxigen}, BigBench HHH Alignment~\cite{srivastava2023beyond}
+\end{itemize}
+In the generative tasks, we prompt the models to generate harmful content using the  prompt dataset, AdvBench~\cite{zou2023universal}, Real Toxicity Prompts~\cite{gehman2020realtoxicityprompts}, ALERT~\cite{tedeschi2024alert}, and adversarial harmful prompt dataset ALERT Adversarial~\cite{tedeschi2024alert}. We report percentage of harmless responses based on the safety classifier HarmBench-Llama2-13B-Chat~\cite{mazeika2024harmbench}. Details of  the benchmark can be found in \cref{appen:benchmark}. We apply this benchmark to  publicly available 7B-level models that have shown strong helpfulness scores in previous studies \cite{eval-harness,dubois2024alpacafarm}, and present the performance in \cref{tab:openmodel} and in \cref{appen:fullresults}. 
+\textbf{Overall Evaluation Metrics. } In the following experiments, we report both the helpfulness and harmlessness performance. Helpfulness is measured using AlpacaEval 2.0 (Alpaca)~\cite{dubois2024length,alpaca_eval,dubois2024alpacafarm}. Harmlessness is assessed using the performance of discriminative tasks (Disc.), generative tasks (Gen.) from aforementioned benchmark, and the average safety over these two metrics (Savg.).
+\subsection{Alignment with {\ours} Objective}\label{sec:experiment}
+From the evaluation on the open model in \cref{tab:openmodel}, we observe that Zephyr-7b-beta~\cite{zephyr}, an open-sourced model fine-tuned over Mistral-7B-v0.1~\cite{jiang2023mistral} with DPO algorithm~\cite{dpo}, exhibits  a low score in harmlessness, particularly in generative tasks. In this section, we apply the {\ours} algorithm to finetune the same base model Mistral-7B-v0.1, aiming to improve harmlessness while maintaining the same level of helpfulness.
+
+\textbf{Training Details. }  Our training process consists of two stages: supervised fine-tuning and {\ours} optimization. The supervised fine-tuned model is used as the reference model \(\pi_\text{ref}\) in the {\ours} stage. We set \(\tau = 0.01\), \(\alpha = -0.5\), and selected layer $\theta'$ as the second MLP layers in each transformer block. All other hyperparameters remain the same as in the original Zephyr training~\cite{zephyr}.
+
+\textbf{Dataset Details.} 
+In the supervised fine-tuning stage, we follow previous work~\cite{zephyr,dai2024safe} to use a mix of helpfulness data  from UltraChat~\cite{ding2023enhancing} and  safety data from PKU-SafeRLHF~\cite{dai2024safe}. In the {\ours} stage, 
+we use 30K helpfulness data from UltraFeedback~\cite{cui2023ultrafeedback} and 30K safety data from PKU-SafeRLHF.  UltraFeedback contains instruction-following tasks that provide paired helpfulness preference rankings, and we treat all responses as safe since they undergo human filtering. PKU-SafeRLHF  provides both paired helpfulness preference rankings and binary safety labels. Details are in \cref{appen:fullresults}. 
+
+\textbf{Baselines.} We first compare our method to the supervised method DPO~\cite{dpo} using different datasets., which directly leads to the Zephyr-7b-beta model, only uses the helpfulness dataset, UltraChat.  DPO-S only uses the safety dataset, PKU-SafeRLHF. We also compare our method to existing approaches, DPO~\cite{dpo}, IPO~\cite{ipo}, and MORL~\cite{rame2023rewardedsoups}, when using a naive mix of the helpfulness and safety datasets. 
+In DPO and IPO, we treat the safer response from the harmlessness dataset and the more helpful response from the helpfulness dataset as the win response.  MORL,  representing the line of multi-objective reinforcement learning methods using PPO optimization~\cite{llama2,dai2024safe,rame2023rewardedsoups,dong2023steerlm,wang2024arithmetic}, requires reward models. Following~\cite{wang2024arithmetic},  we use a single highly-ranked~\cite{RewardBench}, publicly available reward model, ArmoRM-Llama3-8B-v0.1~\cite{ArmoRM}, to provide reward scores for both helpfulness and harmlessness. Refer to \cref{appen:baselines} for more details. All methods use the same pre-trained model. 
+
+\textbf{Results and Comparisons. }
+The results are presented in \cref{tab:comparison}.
+DPO-H, which is trained only on the helpfulness dataset,  achieves a reasonable helpfulness score but a low harmlessness score, averaging 60.99\%.  Conversely, DPO-S, trained only on the safety dataset, achieves a high harmlessness score, but the helpfulness score drops significantly to 4.34\%. 
+
+Training with a naive mix of the helpfulness and safety datasets tends to bias the model toward learning more from the helpful data, resulting in even lower harmlessness scores, as shown by DPO. This aligns with previous findings that the mix ratio of helpfulness and harmlessness data is difficult to control, and training often focuses on a single perspective~\cite{llama2,bai2022training}.  
+In comparison to these supervised methods, {\ours} achieves the highest average harmlessness score of 77.16\% and significantly improves the generative tasks score from  39.71\% to 95.24\%.
+
+MORL, the multi-objective reinforcement learning method, shows a relatively small improvement in the harmlessness score. We suspect the primary reason is that the reward scores of different responses provided by the public reward model are not sufficiently distinguishable, making it inefficient for the model to learn to generate  good responses while avoiding bad ones.  This highlights the need for training a reward model specific to the model being fine-tuned, which involves the costly human prompting (red teaming) and annotation process. 
+
+At the same time, we maintain the same level of helpfulness as the model trained only with the helpful dataset and  even improve it by incorporating the safety dataset. Full results are in \cref{appen:fullresults}.
+
+\begin{table}[t]\centering\scriptsize
+      \caption{Efficiency comparison of our method to previous PPO-based safety alignment methods.}\label{tab:efficiency}
+    \begin{tabular}{lccccc}
+    \toprule
+    Method & \makecell{Data \\Size} & \makecell{Red\\Teaming}& Iteration &  Alpaca&Savg. \\\midrule
+    Beaver &   300K  & $\checkmark$  & 3 & 1.00&71.80\\
+    Llama2 &  1M & $\checkmark$  & 6 &  7.60&73.80\\
+    {\ours} & 30K  & - & 1& 13.33&77.16\\\bottomrule
+    \end{tabular}
+  \end{minipage}\hfill
+      \caption{Ablation study on the shifting factor and buffer training}\label{tab:ablation}
+    \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    \multirow{2}{*}{Model} & Helpfulness & \multicolumn{3}{c}{Harmlessness} \\ \cmidrule(l){2-5} 
+     & Alpaca  & Disc. & Gen. & Savg. \\ \midrule
+    {\ours} &  13.33&  59.09&  \textbf{0.95}&  0.77\\
+    {\ours}, $\alpha = 0$ &  12.76&  0.62&  0.93&  0.77\\
+    {\ours}, $\alpha = 0$, - buffer&  \textbf{15.59}&  \textbf{0.62}&  0.89&  0.75\\ \bottomrule
+    \end{tabular}
+  \end{minipage}
+\end{table}
+
+\textbf{Comparison against Previous Safety Alignment Methods.} 
+We compare our method with two successful open-source safety alignment methods: Beaver~\cite{dai2024safe} and Llama2~\cite{llama2}. We present statistics on the data size used for RLHF, the need for the red teaming process, and the number of training iterations in \cref{tab:efficiency}. Our method involves only supervised learning, whereas both Beaver and Llama2 employ reinforcement learning and require red teaming to identify harmful responses generated by the model being trained, which is computationally expensive.
+Moreover, our approach requires only one iteration of training with {\ours} objective  with just 30K data points, while Beaver and Llama2 conduct multiple iterations of reward learning and reinforcement learning with much larger datasets. 
+Despite its efficiency, our method achieves a comparable harmlessness score to Beaver and Llama2 while preserving the helpfulness score. These results indicate strong potential for our method to be applied in the future development of open-source models at a minimal cost.
+
+\subsection{Improve Pre-aligned Models with Red Teaming Data} \label{sec:expredteam}
+
+
+In this section, we apply our method as an additional safety alignment stage for existing pre-aligned models with  a few thousand red teaming data. We compare our method with DPO~\cite{dpo}, IPO~\cite{ipo}, MORL~\cite{rame2023rewardedsoups} as in \cref{sec:experiment}. 
+
+\textbf{Data Preparation.}    
+We first use 9K harmful prompts from the PKU-SafeRLHF dataset~\cite{dai2024safe} and have the Zephyr-7b-beta~\cite{zephyr} model generate two responses for each prompt. We then use the HarmBench-Llama2-13B-Chat~\cite{mazeika2024harmbench} classifier to determine whether the generated responses are harmful. For prompts that result in harmful responses, we use  PairRM~\cite{llm-blender-2023} to rank the responses in terms of helpfulness. This process results in 1.5K harmful prompts, responses, safety labels for each response, and pairwise helpfulness preferences. 
+
+\textbf{Results.}
+\cref{tab:redteam} shows the results. Our method improves the harmlessness of the Zephyr-7b-beta model from 60.99\% to 73.90\%, while preserving the helpfulness. The improvement in generative tasks is particularly significant, from 62.94\% to 88.79\%.
+The supervised methods, DPO and IPO, can also improve the harmlessness, but the improvement is not as substantial as with our method. When fine-tuning the model with MORL using specific prompts where the model initially struggled as in this experiment, the performance gain is still marginal, though larger than when using general data, as in \cref{tab:comparison}. This aligns with the observation that using RL methods to improve safety requires a large amount of model-specific data, high-quality labels, and a reward model specifically trained on these data to provide distinguishable scores.
+In contrast, {\ours} achieves similar goals without the need for large amounts of helpfulness data mixed with red teaming data. Moreover, our overall pipeline of this experiment is efficient and automatic, requiring no human annotation. 
+These results strongly indicate that our method can be effectively used in an additional safety alignment stage for existing chat models to improve harmlessness at minimal cost. Full results are in \cref{appen:fullresults}. 
+
+ 
+\subsection{Ablations}
+We validate the technical design of our algorithm in \cref{tab:ablation}, showing that the shift parameter \(\alpha\) and buffered training are effective in improving harmlessness. 
+
+In the {\ours} \(\alpha = 0\) experiment, we set the shift parameter \(\alpha\) to 0. The results indicate that, as illustrated in \cref{sec:illustrative}, the shift parameter \(\alpha\) is useful in distinguishing unsafe data, and thus improves performance on generative tasks in harmlessness slightly.
+In the {\ours} - w/o buffer experiment, we do not balance examples from the safety dataset and the helpful dataset, but instead mix the two datasets and randomly sample data from them. The lower harmlessness performance  provides the evidence that buffered training helps mitigate the tension between helpfulness and harmlessness. Full results are provided in \cref{appen:fullresults}.
+
+
+\section{Related Work}
+
+
+
+\textbf{Alignment with Diverse Preferences. } Traditional language model alignment methods~\cite{christiano2017deep, stiennon2020learning,  hendrycks2021aligning} typically use a single reward or unified preference model.However, recent work suggests that human preferences are diverse and cannot be adequately represented by a single reward model.  To address this, Chakraborty~\etal~\cite{chakraborty2024maxminrlhf} propose learning a mixture distribution for the reward using the EM algorithm, which they then apply in their MaxMin RLHF approach.  Other research~\cite{dong2023steerlm, rame2023rewardedsoups,wang2024arithmetic} explores training  multi-objective reward models for the alignment stage. These methods primarily focus on improving reward models for RL based alignment. The most closely related work of supervised alignment methods is by Zhou~\etal~\cite{zhou2023beyond}, who, despite advocating for direct policy optimization, still rely on training reward models. In contrast, our approach completely eliminates the two-stage training process and directly integrates multiple preferences into the supervised optimization.
+
+\textbf{Safety Alignment.} Aligning large language models (LLMs) with both helpfulness and harmlessness is a specific case of addressing diverse preferences.  To enhance safety, many researchers conduct additional safety data annotation alongside algorithm design.    Llama2~\cite{llama2} utilizes substantial amounts of human-labeled safety data and combines safety and helpfulness rewards by utilizing the safety reward as a threshold function for the helpfulness reward.  \cite{dai2024safe,ji2024beavertails} engage in red teaming to gather extensive safety data and frame safety alignment as a conditioned Markov Decision Process (MDP) problem. Mu~\etal~\cite{murule} propose a rule-based reward as a complement for the common reward to improve the safety, which, although data-efficient, still requires human annotation and reward learning.  
+In contrast, our method is fully automated and efficient, eliminating the need for human intervention in the safety alignment process. 
+On the other hand, \cite{huang2024catastrophic} propose generation-aware alignment, which improves the safety over different generation configurations.  With our focus on improving safety under specific configurations, this work can be a strong complement to ours.
+
+\textbf{Safety Evaluation.} Supervised benchmarks, such as OpenLLM~\cite{eval-harness} and BigBench~\cite{srivastava2023beyond}, include datasets related to various aspects of safety, such as toxicity, truthfulness, morality, and social bias.  Adversarial attack research~\cite{zou2023universal} and red teaming efforts~\cite{ji2024beavertails,mazeika2024harmbench} provide valuable toxic prompts to assess if models can generate harmless content in response to these prompts.
+To identify if the output content contains harmful information, some studies~\cite{bai2022training,llama2} rely on human annotators, while others employ AI models like GPT-4~\cite{wang2024decodingtrust}. \cite{mazeika2024harmbench} offer fine-tuned Llama2 models to as harmful content classifier, offering an efficient alternative to GPT-4 in model-based evaluation.
+
+
+
+\section{Limitations and Discussion}
+
+
+In this paper, we propose a novel supervised optimization method, \oursfull{} (\ours), to balance the safety and helpfulness during the alignment of LLMs. We theoretically prove that this direct optimization is equivalent to previous multi-objective reinforcement learning that combine safety and helpfulness rewards. With {\ours}, we outperform existing methods in terms of safety and helpfulness in both fine-tuning the pre-trained LLMs and pre-aligned models. 
+Our method is highly effective, significantly more computationally efficient, and does not require any human annotation or additional data collection. 
+
+Furthermore, our approach is versatile and does not rely on any specific property of harmlessness itself. This flexibility allows it to be applied to improve various other potentially conflicting objectives in aligning LLMs. To achieve this, we only need characteristic-specific labels for the field-specific dataset. We believe our proposed method can serve as a general framework for the transfer learning of aligned models. However, our method relies on specific label formats for helpfulness and safety may present a limitation when addressing different tasks. Moreover, extending our work to handle more objectives (beyond just two) is also a promising direction for future research.
+
+
+\subsection*{ACKNOWLEDGEMENTS}
+This work is supported by the KAUST Competitive Research Grant (URF/1/4648-01-01), KAUST Baseline Fund (BAS/1/1685-01-01), and a UKRI grant Turing AI Fellowship (EP/W002981/1). AB has received funding from the Amazon Research Awards. We also thank the Royal Academy of Engineering and FiveAI.
+
+
+
+
+
+

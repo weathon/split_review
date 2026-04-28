@@ -1,0 +1,223 @@
+# Diffusion Models for Tabular Data Imputation and Synthetic Data Generation
+
+- Decision: Reject
+- Avg Score: 5.75
+- Scores: 6, 5, 6, 6
+
+## Abstract
+Data imputation and data generation have important applications for many domains, like healthcare and finance, where incomplete or missing data can hinder accurate analysis and decision-making. 
+    	Diffusion models have emerged as powerful generative models capable of capturing complex data distributions across various data modalities such as image, audio, and time series data. Recently, they have been also adapted to generate tabular data. In this paper, we propose a diffusion model for tabular data that introduces three key enhancements: (1) a conditioning attention mechanism, (2) an encoder-decoder transformer as the denoising network, and (3) dynamic masking.
+    	The conditioning attention mechanism is designed to improve the model's ability to capture the relationship between the condition and synthetic data. The transformer layers help model interactions within the condition (encoder) or synthetic data (decoder), while dynamic masking enables our model to efficiently handle both missing data imputation and synthetic data generation tasks within a unified framework.
+    	We conduct a comprehensive evaluation by comparing the performance of diffusion models with transformer conditioning against state-of-the-art techniques, such as Variational Autoencoders, Generative Adversarial Networks and Diffusion Models, on benchmark datasets. 
+    	Our evaluation focuses on the assessment of the generated samples with respect to three important criteria, namely: (1) Machine Learning efficiency, (2) statistical similarity, and (3) privacy risk mitigation. For the task of data imputation, 
+    	we consider the efficiency of the generated samples across different levels of missing features\footnote{Source code will be made available upon acceptance of the manuscript}.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The paper tackles the problem of imputation and generation in a single framework utilizing diffusion model with an additional transformer architecture. Experiments are shown on a widerange of datasets as well as competing models to highlights the benefits of the proposed approach.
+
+### Strengths
+Overall:
+The paper is easy to read and the contribution is simple but effective. The experiments cover a wide range of datasets though not algorithms.
+
+Pros:
+
+(i) The paper extends TabDDPM to TabGenDDPM utilizing the transformer architecture which has been wildly succesful in other generative settings. The experiments confirm the benefits of the proposed approach. The additional benefit of covering both imputation and generation in the same framework enables a wide range of usecases in real-world settings.
+(ii) Experiments cover around 10 datasets with varying number of rows and feature sizes and in almost all cases the proposed method is the best and sometimes by a big margin.
+
+### Weaknesses
+Cons:
+
+(a) Some of the other competing methods like AIM, CTAB-GAN+ and others are not compared in the paper. 
+(b) The number of features in the datasets are few. HELOC has the highest with only 21 features and it is unclear how this framework performs when the feature set is large.
+
+### Questions
+(1) What is the running time of the proposed approach and how does it compare with the other state-of-the-art algorithms?
+(2) How does it perform when the feature set is large and/or the number of samples is small? 
+(3) How does it work in augmentation tasks where the training is a mix of real + synthetic and testing on real?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The paper proposes a transformer conditioning architecture design on TabDDPM for data imputation and data generation tasks. They conduct experiments on eight datasets under machine learning utility, statistical similarity, and privacy risk.
+
+### Strengths
+The experimental comparisons are good. The author conducts TabGenDDPM on eight datasets under three evaluation criteria.
+
+### Weaknesses
+1. The overall contribution of this paper is limited.
+
+All of the content except the transformer conditioning architecture is already known. The architecture design is heuristic, which has no theoretical guarantees of the performance. Moreover, they build upon Variance Preserving (VP) SDE (e.g., DDPM or TabDDPM in tabular data). The author does not mention wether their method work for Variance Exploding (VE) SDE (e.g, Score-based generative model, StaSy [1] in tabular data).
+[1]: Kim, J., Lee, C.E., & Park, N. STaSy: Score-based Tabular data Synthesis. ICLR 2023.
+
+2. Overclaiming the contribution of transformer conditioning architecture.
+
+* Diffusion model can work on imputation together with generation (conditional generation) without the proposed transformer conditioning architecture. There are well studied in the literature [1,2].
+
+[1]: Tashiro, Y., Song, J., Song, Y., & Ermon, S. CSDI: Conditional Score-based Diffusion Models for Probabilistic Time Series Imputation. NIPS 2021.
+
+[2]: Ouyang, Y., Xie, L., Li, C., & Cheng, G. (2023). MissDiff: Training Diffusion Models on Tabular Data with Missing Values. ArXiv, abs/2307.00467.
+
+3. The effectiveness of the proposed method is not well supported.
+* : The standard evaluation of imputation performance is the mean squared error of imputed value against oracle value instead of the efficiency criterion used in paragraph "Machine Learning efficiency - Data imputation". Otherwise, it faces the problem of "when the generative model needs to fill in the most significant feature or a feature that has a minimal impact on XGBoost output" mentioned in the paper. If the authors adopt the traditional evaluation on this task, many design in this paragraph will not be needed.
+
+* : To evaluate the performance of TabGenDDPM on imputation task, it should be compared with other imputation methods, e.g., [3,4], rather than only compared with TabDDPM.
+
+[3]: Yoon, J., Jordon, J., & Schaar, M.V. GAIN: Missing Data Imputation using Generative Adversarial Nets. ICML 2018.
+
+[4]: Mattei, P., & Frellsen, J. MIWAE: Deep Generative Modelling and Imputation of Incomplete Data Sets. ICML 2019.
+
+
+* : The author should compare with other diffusion based model on tabular data, e.g., StaSy [1]. Also, some discussion and experimental results of whether transformer conditioning can  be developed on Variance Exploding (VE) SDE.
+
+* : The of illumination the experimental setup should be clarify. Currently, it brings some confusion.
+- The baseline in Figure 3 stands for which method? In my point of view, it is not the methods mentioned in section 5.2.
+- The Table 4 is confusion. In my point of view, three different evaluation criteria have different properties, i.e., the smaller the correlation is, the better the performance is, which is different with privacy risk. Why the authors use Up arrow/Down arrow beside the name of the dataset. It is also not clear why the authors only report the experimental results on six datasets rather than eight datasets in Table 2.
+- It would be helpful to have the performance on each dataset for Table 3 in appendix.
+
+4. Minor
+
+The paper has many typos, e.g., 
+- adding period for the caption of Table 1, 3, 4 and Figure 3; 
+- what is the meaning of "4+2" and "2(4+40)" in Table 1; 
+- "in this situation, the generative model can employ the no-missing values to condition the missing data generation." is hard to understand.
+
+### Questions
+Please see Weaknesses Part.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper propose an improvement of TabDDPM model through the addition of tree improvements:
+- 1. The categorical columns are encoded via an Embedding layer instead of a one-hot and the numeric columns are encoded through a linear layer. This allows an uniform encoding of the columns into the same dimension independently of their type.
+- 2. The MLP denoiser of TabDDPM is replaced by a transformer architecture.
+- 3. A BERT-like attention masking system is then used to train the model for dynamic conditioning and missing data imputation
+
+After quick introduction and related work sections, a background is given about ddpm and multinomial diffusion algorithms.
+Then the specificities of the model are presented.
+The experiment section compare two variants of the model against TVAE, CTGAN and vanilla TabDDPM (all with optimized hyper-parameters) on 7 datasets through ML-efficacy and DCR privacy risk. Another statistical similarity metric is proposed as well.
+The two variants considered are trained with full data (TabGenDDPM I) and with masked data (TabGenDDPM II).
+For ML-efficacy TabGenDDPM I is shown to outperform the other models on 6 out of the 7 selected datasets. For data imputation TabGenDDPM is also shown to outperform a customized version of TabDDPM.
+On the other hand, the privacy risk is reported to be slightly higher than with TabDDPM.
+
+### Strengths
+- The proposed architecture is a natural improvement from TabDDPM and according to the experiments, it seems to really improve the model in term of ML-efficacy
+- The paper is clear and well written with several illustrations
+- The privacy risk is considered
+
+### Weaknesses
+ - The proposed architecture is mostly a derivative work from TabDDPM
+- The proposed diffusion algorithms are a bit outdated now, especially on the discrete side since works like:
+Austin et al. "Structured Denoising Diffusion Models in Discrete State-Spaces" NeurIPS 2021, or Campbell et al. "A Continuous Time Framework for Discrete Denoising Models" NeurIPS 2022.
+It is worth noting that "mask" systems are also studied in (Austin et al. 2021).
+- No ablation study to validate the separately different changes from TabDDPM (eg. category embedding vs one-hot)
+- No simple "non-deep" baseline model (like SMOTE) in the experiment.
+- The code seems not to be open source
+
+### Questions
+- The hyper-parameter space of TabDDPM seems modified in your experiment (e.g. no batch size 4096 and no learning rate) Why ?
+- With the masking system it is possible to condition on any feature. Why keep a specific treatment for the target value ?
+- The statistical similarity metric is not usual and do not permits an easy comparison with other papers, why not use "sdmetrics" library to provide other metrics (notably C2ST detection metrics) ?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The authors introduce a we a novel adaptation to TabDDPM diffusion model, incorporating a transformer (compared to MLP for TabDDPM) and unique masking mechanism to condition the reverse diffusion process. This encoder-decoder structure, allows for introducing columnar embedding and enables data imputation as well as data conditioning. Empirical results seem to support the new model, with better ML utlity at the cost of higher risk of privacy breach.
+
+### Strengths
+- Well written paper, with clear figures, no grammatical issues, and good flow
+- Empirical results can be directly compared to previous baselines
+- Novelty is clear and well explained
+- Datasets and baselines are appropriate for the evaluation task
+
+### Weaknesses
+ - It would be nice to see a few more plots of the feature distribution rather than a simple distribution difference score
+- Analysis of method on the same 15 datasets as the reference TabDDPM paper would be useful
+- Further ablations / discussions showing the imputation would also add to the paper. For example, why is the performance worse with  TabGenDDPM I vs II?
+
+### Questions
+- For ML efficiency, the original TabDDPM paper demonstrate multiple examples where the generated data is able to achieve better performance over the baseline. However, this behavior is not seen here?
+- Is it possible to conditionally generate diverse synthetic data by conditioning on an outcome feature? E.g. death event or housing price?
+- Does this model faithfully generate data that captures low-domain clusters / phenotypes in the original data space?
+- Why does the best performance switch for TabGenDDPM I and II in the cardio dataset?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

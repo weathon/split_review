@@ -1,0 +1,425 @@
+\title{ReMasker: Imputing Tabular Data with Masked Autoencoding}
+
+\begin{abstract}
+
+We present \model, a new method of imputing missing values in tabular data by extending the masked autoencoding framework. %conduct a pilot study of exploring transformers in the task of tabular data imputation. 
+Compared with prior work, \model is both {\em simple} -- besides the missing values (\mie, naturally masked), we randomly ``re-mask'' another set of values, optimize the autoencoder by reconstructing this re-masked set, and apply the trained model to predict the missing values; and {\em effective} -- with extensive evaluation on benchmark datasets, we show that \model performs on par with or outperforms state-of-the-art methods in terms of both imputation fidelity and utility under various missingness settings, while its performance advantage often increases with the ratio of missing data. We further explore theoretical justification for its effectiveness, showing that \model tends to learn  missingness-invariant representations of tabular data. Our findings indicate that masked modeling represents a promising direction for further research on tabular data imputation. The code is publicly available
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Missing values are ubiquitous in real-world tabular data due to various reasons during data
+collection, processing, storage, or transmission. It is often desirable to know the most likely values of missing data before performing downstream tasks ({\em e.g.,} classification or synthesis). To this end, intensive research has been dedicated to developing imputation methods (``imputers'') that estimate missing values based on observed data~\cite{gain,hyperimpute,miracle,missforest,miwae}. Yet, imputing missing values in tabular data with high fidelity and utility remains an open problem, due to challenges including the intricate correlation across different features, the variety of missingness scenarios, and the scarce amount of available data with respect to the number of missing values.
+
+The state-of-the-art imputers can be categorized as either {\em discriminative} or {\em generative}. The discriminative imputers, such as MissForest~\cite{missforest}, MICE~\cite{mice}, and MIRACLE~\cite{miracle}, impute missing values by modeling their conditional distributions on the basis of other values. In practice, these methods are often hindered by the requirement of specifying the proper functional forms of conditional distributions and adding the set of appropriate regularizers. The generative imputers, such as GAIN~\cite{gain}, MIWAE~\cite{miwae}, GAMIN~\cite{gamin}, and HI-VAE~\cite{hivae}, estimate the joint distributions of all the features by leveraging the capacity of deep generative models and impute missing values by querying the trained models. Empirically, GAN-based methods often require a large amount of training data and suffer the difficulties of adversarial training~\cite{gan}, while VAE-based methods often face the limitations of training through variational bounds~\cite{vae-understanding}. \rev{Further, some of these methods either require complete data during training or operate on the assumptions of specific missingness patterns.}
+
+In this paper, we present \model, a novel method that extends the masked autoencoding (MAE) framework~\cite{bert,mae} to imputing missing values of tabular data. The idea of \model is simple: Besides the missing values in the given dataset (\mie, naturally masked), we randomly select and ``re-mask'' another set of values, optimize the autoencoder with the objective of reconstructing this re-masked set, and then apply the trained autoencoder to predict the missing values. 
+Compared with the prior work, \model enjoys the following desiderata: \mct{i} it is instantiated with Transformer~\cite{transformer} as its backbone, of which the self-attention mechanism is able to capture the intricate inter-feature correlation~\cite{tabtransformer}; \mct{ii} without specific assumptions about the missingness mechanisms, it is applicable to various scenarios even if complete data is unavailable; and \mct{iii} as the re-masking approach naturally accounts for missing values and encourages learning high-level representations beyond low-level statistics, \model works effectively even under a high ratio of missing data (\meg, 0.7). 
+
+With extensive evaluation on 12 benchmark datasets under various missingness scenarios, we show that \model \rev{performs on par with or outperforms} 13 popular methods in terms of both imputation fidelity and utility, while its performance advantage often increases with the ratio of missing data. We further explore the theoretical explanation for its effectiveness. We find that \model encourages learning {\em missingness-invariant} representations of tabular data, which are insensitive to missing values. Our findings indicate that, besides its success in the language and vision domains, masked modeling also represents a promising direction for future research on tabular data imputation. 
+
+    
+
+
+    
+    
+    
+
+
+\section{Related Work}
+
+\label{sec:literature}
+
+
+
+{\bf  Tabular data imputation.} The existing imputation methods can be roughly categorized as either discriminative or generative. The discriminative methods~\cite{missforest,mice,miracle} often specify a univariable model for each feature conditional on all others and perform cyclic regression over each target variable until convergence. Recent work has also explored adaptively selecting and configuring multiple discriminative imputers~\cite{hyperimpute}. The generative methods either implicitly train imputers as generators within the GAN framework~\cite{gain,gamin} or explicitly train deep latent-variable models to approximate the joint distributions of all  features~\cite{miwae,hivae}. There are also imputers based on representative-value (\meg, mean) substitution~\cite{mean}, EM optimization~\cite{em}, matrix completion~\cite{softimpute}, or optimal transport~\cite{sinkhole}.
+
+{\bf Transformer.} Transformer has emerged as a dominating design~\cite{transformer} in the language domain, in which multi-head self-attention and MLP layers are stacked to capture both short- and long-term correlations between words. Recent work has explored the use of Transformer in the vision domain by treating each image as a grid of visual words~\cite{vit}. For instance, it has been integrated into image generation models~\cite{transgan,styleswin,gat}, achieving performance comparable to CNN-based models.
+
+{\bf Masked autoencoding.} Autoencoding is a classical method for learning representation in a self-supervised manner~\cite{dae,context-encoder}: an encoder maps an input to its representation and a decoder reconstructs the original input. Meanwhile, masked modeling is originally proposed as a pre-training method in the language domain: by holding out a proportion of a word sequence, it trains the model to predict the masked words~\cite{bert,gpt}. Recent work has combined autoencoding and masked modeling in vision tasks~\cite{vit,beit}. Particularly, the seminal MAE~\cite{mae} represents the state of the art in self-supervised pre-training on the ImageNet-1K benchmark. 
+
+\rev{The work is also related to that models missing data by adapting existing model architectures~\cite{mixconv}}. 
+To our best knowledge, this represents the first work to explore the masked autoencoding method with Transformer in the task of tabular data imputation.
+
+
+
+
+\section{\model}
+
+\label{sec:system}
+
+Next, we present \model, an extremely simple yet effective method for imputing missing values of tabular data. We begin by formalizing the imputation problem.
+\subsection{Problem Formalization}
+
+{\bf Incomplete data.} To model tabular data with $d$ features, we consider a $d$-dimensional random variable $\rvx \triangleq (\rx_1, \ldots, \rx_d) \in \gX_1 \times \ldots \times \gX_d$, where $\gX_i$ is either continuous or categorical for $i \in \{1, \ldots, d\}$. The observational access to $\rvx$ is mediated by an mask variable $\rvm \triangleq (\rrm_1, \ldots, \rrm_d) \in \{0, 1\}^d$, which indicates the missing values of $\rvx$, such that $\rx_i$ is accessible only if $\rrm_i = 1$. In other words, we observe $\rvx$ in its incomplete form $\tilde{\rvx} \triangleq  (\tilde{\rx}_1, \ldots, \tilde{\rx}_d)$ with 
+\begin{equation}
+    \tilde{\rx}_i \triangleq \left\{
+    \begin{array}{cc}
+     \rx_i & \text{if }\rrm_i =1 \\
+     *   & \text{if }\rrm_i = 0
+    \end{array}
+    \right.\quad (i \in \{1, \ldots, d\})
+\end{equation}
+where $*$ denotes the unobserved value.
+
+{\bf Missingness mechanisms.}
+Missing values occur due to various reasons. To simulate different scenarios, following the prior work~\cite{gain,hyperimpute}, we consider three missingness mechanisms: MCAR (``missing completely at random'') -- the missingness does not depend on the data, which indicates that $\forall \rvm, \rvx, \rvx'$, $p(\rvm | \rvx) = p(\rvm | \rvx')$; MAR (``missing at random'') -- the missingness depends on the observed values, which indicates that $\forall \rvm, \rvx, \rvx'$, if the observed values of $\rvx$ and $\rvx'$ are the same, then $p(\rvm | \rvx) = p(\rvm | \rvx')$; and MNAR (``missing not at random'') -- the missingness depends on the missing values as well, which is the case if the definitions of MCAR and MAR do not hold. In general, it is impossible to identify the missingness distribution of MNAR without domain-specific assumptions or constraints~\cite{nmar}.  
+
+{\bf Imputation task.} In this task, we are given an incomplete dataset $\gD \triangleq \{ (\tilde{\rvx}^{(i)}, \rvm^{(i)})\}_{i=1}^n$,\footnote{Without ambiguity, we omit the superscript $i$ in the following notations.} which consists of $n$ i.i.d. realizations of $\tilde{\rvx}$ and $\rvm$. The goal is to recover the missing values of each input $\tilde{\rvx}$ by generating an imputed version $\hat{\rvx}  \triangleq  (\hat{\rx}_1, \ldots, \hat{\rx}_d)$ such that
+\begin{equation}
+    \hat{\rx}_i \triangleq \left\{
+    \begin{array}{cc}
+     \tilde{\rx}_i & \text{if } \rrm_i = 1 \\
+     \bar{\rx}_i  & \text{if } \rrm_i = 0
+    \end{array}
+    \right. \quad  (i \in \{1, \ldots, d\})
+\end{equation}
+where $\bar{\rx}_i$ is the imputed value. Note that the imputation task here does not concern with optimizing data for concrete downstream tasks (e.g., training regression or generative models); such settings motivate concerns fundamentally entangled
+with each downstream task and often require optimizing the end objectives. Here, we focus solely on the imputation task itself.
+\begin{figure*}
+    \centering
+    \includegraphics[width=0.85\textwidth]{tat/figures/ame.pdf}
+\caption{Overall framework of \model. During the fitting stage, for each input, in addition to its missing values, another subset of values (re-masked values) is randomly selected and masked out. The encoder is applied to the remaining values to generate its embedding, which is padded with mask tokens and processed by the decoder to re-construct the re-masked values. During the imputation stage, the optimized model is applied to predict the missing values.}
+    \label{fig:ame}
+\end{figure*}
+
+\subsection{Design of \model}
+
+The \model imputer extends the MAE framework~\cite{vit,beit,mae} that reconstructs masked components based on observed components. As illustrated in Figure\mref{fig:ame}, \model comprises an encoder that maps the observed values to their representations and a decoder that reconstructs the masked values from the latent representations. However, unlike conventional MAE, as the data in the imputation task is inherently incomplete ({\em i.e.}, naturally masked), we employ a ``re-masking'' approach that explicitly accounts for this incompleteness in applying masking and reconstruction. At a high level, \model works in two phases: {\em fitting} -- it optimizes the model with respect to the given dataset, and {\em imputation} -- it applies the trained model to predict the missing values of the dataset. 
+
+{\bf Re-masking.} In the fitting phase, for each input $\tilde{\rvx}$, in addition to its missing values, we also randomly select and mask out another subset ({\em e.g.}, 25\%) of $\tilde{\rvx}$'s values. Formally, letting $\rvm$ be $\tilde{\rvx}$'s mask, we define another mask vector $\rvm' \in \{0, 1\}^d$, which is randomly sampled without replacement, following a uniform distribution. Apparently, $\rvm$ and $\rvm'$ entail three subsets: 
+\begin{equation}
+    \gI_\mathrm{mask} = \{i | \rrm_i = 0\}, \quad
+    \gI_\mathrm{remask} = \{i | \rrm_i = 1  \wedge \rrm_i' = 0\}, \quad 
+    \gI_\mathrm{unmask} = \{i | \rrm_i = 1  \wedge \rrm_i' = 1\}
+\end{equation}
+Let $\tilde{\rvx}_{\overline{\rvm}}$, $\tilde{\rvx}_{\rvm \wedge \overline{\rvm'}}$, and $\tilde{\rvx}_{\rvm \wedge \rvm'}$ respectively be the masked, re-masked, and unmasked values. With a sufficient number of re-masked values, in addition to the missing values, we create a challenging task that encourages the model to learn missingness-invariant representations (more details in \msec{sec:discussion}). Note that in the imputation phase, we do not apply re-masking.
+
+{\bf Encoder.} The encoder embeds each value using an encoding function and processes the resulting embeddings through a sequence of Transformer blocks. In implementation, we apply linear encoding function to each value $x$: $\mathsf{enc}(x) = \rvw x  + \rvb$, where $\rvw$ and $\rvb$ are learnable parameters.\footnote{
+We have explored other encoding functions including periodic activation function~\cite{encoding}, which observes a slight decrease (\meg, $\sim 0.01$ RMSE) in imputation performance.} We also add positional encoding to $x$'s embedding to force the model to memorize $x$'s position in the input (\meg, the $k$-th feature): 
+$\mathsf{pe}(k, 2i) = \sin (k/10000^{2i/d} )$,
+where $k$ and $i$ respectively denote $x$'s position in the input and the dimension of the embedding, and $d$ is the embedding width.
+Note that the encoder is only applied to the observed values: in the fitting phase, it operates on the observed values after re-masking (\mie, the unmasked set $\gI_\mathrm{unmask}$); in the imputation phase, it operates on the non-missing values (\mie, the union of re-masked and unmasked sets $\gI_\mathrm{unmask} \cup \gI_\mathrm{remask}$), as illustrated in Figure\mref{fig:ame}.
+
+{\bf Decoder.} The \model decoder is instantiated as a sequence of Transformer blocks followed by an MLP layer. Different from the encoder, the decoder operates on the embeddings of both observed and masked values. Following~\cite{bert,mae}, we use a shared, learnable mask token as the initial embedding of each masked value. The decoder first adds positional encoding to the embeddings of all the values (observed and masked), processes the embeddings through a sequence of Transformer blocks, and finally applies linear projection to map the embeddings to scalar values as the predictions. Similar to~\cite{mae}, we use an asymmetric design with a deep encoder and a shallow decoder (\meg, 8 versus 4 blocks), which often suffices to re-construct the masked values. \rev{Conventional MAE focuses on representation learning and uses the decoder only in the training phase. In \model, the decoder is required to re-construct the missing values and is thus used in both fitting and imputation phases.} 
+
+{\bf Reconstruction loss.} Recall that the \model decoder predicts the value for each input feature. We define the reconstruction loss functions as the mean square error (MSE) between the reconstructed and original values on \mct{i} the re-masked set $\gI_\mathrm{remask}$ and \mct{ii} unmasked set $\gI_\mathrm{unmask}$. We empirically experiment with different reconstruction loss functions (\meg, only the re-masked set or both re-masked and unmasked sets).
+
+ Putting everything together, Algorithm~\ref{alg:remasker} sketches the implementation of \model. 
+
+\begin{algorithm}[!t]
+\caption{\model}\label{alg:remasker}
+\textbf{Input:} $\gD = \{ (\tilde{\rvx}^{(i)}, \rvm^{(i)})\}_{i=1}^n$: incomplete dataset; $\mathsf{remask}$: re-masking function; $f_\theta$, $d_\vartheta$: encoder and decoder; max\_epoch: training epochs; $\ell$: reconstruction loss \\
+\textbf{Output:} $\hat{\gD} = \{ (\hat{\rvx}^{(i)}\}_{i=1}^n$: imputed dataset
+
+\begin{algorithmic}[1]
+\While{max\_epoch is not reached} \Comment{// fitting phase}
+\For{$(\tilde{\rvx}, \rvm) \in \gD$}
+\State $\tilde{\rvx}_{\rvm \wedge \overline{\rvm'}}, \tilde{\rvx}_{\rvm \wedge \rvm'} \gets   \mathsf{remask}(\tilde{\rvx}, \rvm)$; \Comment{// remasking}
+\State $\rvz \gets f_\theta(\tilde{\rvx}_{\rvm \wedge \rvm'})$; \Comment{// encoding unmasked values}
+\State pad $\rvz$ with mask tokens;
+\EndFor
+\State update $\theta$, $\vartheta$ by $\nabla \ell(d_\vartheta(\{\rvz\}), \{\tilde{\rvx}_{\rvm \wedge \overline{\rvm'}}\})$; \Comment{// minimizing reconstruction loss}
+\EndWhile
+
+\For{$(\tilde{\rvx}, \rvm) \in \gD$} \Comment{// imputation phase}
+\State $\rvz \gets f_\theta(\tilde{\rvx}_\rvm)$; \Comment{// encoding observed values}
+\State pad $\rvz$ with mask tokens \;
+\State $\bar{\rvx}_{\overline{\rvm}} \gets d_\vartheta(\rvz)$;   \Comment{// predicting missing values}
+\State $\hat{\rvx} \gets  \tilde{\rvx}_\rvm \cup \bar{\rvx}_{\overline{\rvm}}$;
+\EndFor
+\State \textbf{return} $\hat{\gD} = \{\hat{\rvx} \} $.
+\end{algorithmic}
+\end{algorithm}
+
+
+
+ 
+
+
+
+
+
+
+\section{Evaluation}
+
+\label{sec:eval}
+
+We evaluate the empirical performance of \model in various scenarios using benchmark datasets. Our experiments are designed to answer the following key questions: \mct{i} {\em Does \model work?}  -- We compare \model with a variety of state-of-the-art imputers in terms of imputation quality. \mct{ii} {\em How does it work?} -- We conduct an ablation study to assess the contribution of each component of \model to its performance. \mct{iii} {\em What is the best way of using \model?} -- We explore the use of \model as a standalone imputer as well as one component of an ensemble imputer to understand its best practice.
+
+{\bf Datasets.} For reproducibility and comparability, similar to the prior work~\cite{gain,hyperimpute}, we use 12 real-world datasets from the UCI Machine Learning repository~\cite{Dua:2019} %\footnote{UCI Machine Learning Repository: \url{https://archive.ics.uci.edu/ml/datasets.php}} 
+{\bf Missing mechanisms.} We consider three missingness mechanisms. In MCAR, the mask vector of each input is realized following a Bernoulli random variable with a fixed mean. In MAR, with a random subset of features fixed to be observable, the remaining features are masked using a logistic model. In MNAR, the input features of MAR are further masked following a Bernoulli random variable with a fixed mean. We use the HyperImpute~\cite{hyperimpute} to simulate the above missing mechanisms.
+
+{\bf Baselines.} We compare \model with 13 state-of-the-art imputation methods: HyperImpute~\cite{hyperimpute}, a hybrid imputer that performs iterative imputation with automatic model selection; MIWAE~\cite{miwae}, an autoencoder model that fits missing data by optimizing a variational bound; EM~\cite{em}, an iterative imputer based on expectation-maximization optimization; GAIN~\cite{gain}, a generative adversarial imputation network that trains the discriminator to classify the generator's output in an element-wise manner; ICE, an iterative imputer based on regularized linear regression; MICE, an ICE-like, iterative imputer based on Bayesian ridge regression; MIRACLE~\cite{miracle}, an iterative imputer that refines the imputation of a baseline by simultaneously modeling the missingness generating mechanism; MissForest~\cite{missforest}, an iterative imputer based on random forests; 
+Mean~\cite{mean}, Median, and Frequent, which impute missing values using column-wise unconditional mean, median, and the most frequent values, respectively; Sinkhorn~\cite{sinkhole}, an imputer trained through the optimal transport metrics of Sinkhorn divergences; and SoftImpute~\cite{softimpute}, which performs imputation through soft-thresholded singular value decomposition.
+
+{\bf Metrics.} For each imputation method, we evaluate the imputation fidelity and utility by comparing its imputed data with the ground-truth data. In terms of fidelity, we mainly use two metrics: root mean square error (RMSE) to measure how the individual imputed values match the ground-truth data, and the Wasserstein distance (WD) to measure how the imputed distribution matches the ground-truth distribution. In terms of utility, we use area under the receiver operating characteristic curve (AUROC) as the metric on applicable datasets (\mie, ones associated with classification tasks). In the case of multi-class classification, we use the one versus rest (OvR) setting. To be fair, we use logistic regression as the predictive model across all the cases.
+
+\begin{figure*}[!ht]
+    \centering
+    \includegraphics[width=\textwidth]{tat/figures/general_overview_MAR_0.3.pdf}
+    \caption{Overall performance of \model and baseline imputers on 12 benchmark datasets under MAR with 0.3 missingness ratio. The results are shown as the mean and standard deviation of RMSE, WD, and AUROC scores (AUROC is only applicable to datasets with classification tasks). Note that \model outperforms all the baseline imputers under at least one metric across all the datasets.}
+    \label{fig:overall}
+\end{figure*}
+
+\begin{figure*}[!ht]
+    \centering
+    \includegraphics[width=\textwidth]{tat/figures/error_by_all_grouped_MAR.pdf}
+    \caption{Sensitivity analysis of \model on the {\tt letter} dataset under the MAR setting. The scores are measured with respect to (a) the dataset size, (b) the number of features, and (c) the missingness ratio. The default setting is as follows: dataset size = 20,000, number of features = 16, and missingness ratio = 0.3.}
+    \label{fig:sensitivity}
+\end{figure*}
+
+
+
+
+\subsection{Overall Performance}
+
+We evaluate \model and baseline imputers on the benchmark datasets under the MAR setting with 0.3 missingness ratio, with results summarized in Figure~\ref{fig:overall}. Observe that \model consistently outperforms all the baselines in terms of both fidelity (measured by RMSE and WD) and utility (measured by AUROC) across all the datasets. Recall that the benchmark datasets are collected from a variety of domains with highly varying characteristics ({\it cf.} Table~\ref{tab:dataset}): the dataset size varies from 308 to 20,060, while the number of features ranges from 7 to 57. Its superior performance across all the datasets demonstrates that \model effectively models the intricate correlation among different features, even if the amount of available data is scarce. The only imputer with performance close to \model is HyperImpute~\cite{hyperimpute}, which is an ensemble method that integrates multiple imputation models and automatically selects the most fitting model for each column of the given dataset. This highlights that the modeling capacity of \model's masked autoencoder is comparable with ensemble models. The results show that \model consistently performs better across a range of settings.
+\rev{Why does \model generalize across the settings of MAR, MCAR, and MNAR? One possible explanation is as follows. Recall that in MCAR, the mask vector of each input is realized following a Bernoulli random variable with a fixed mean; in MAR, with a random subset of features fixed to be observable, the remaining features are masked using a logistic
+model; in MNAR, the input features of MAR are further masked following a Bernoulli random
+variable with a fixed mean. Regardless of the missingness mechanism, it is rare that the values of one feature $x$ are missing across all the records. Thus, by its design, \model is able to learn to re-construct feature $\rx_i$ conditional on other features $\rvx_{\bar{i}} = (\rx_1, \ldots, \rx_{i-1}, \rx_{i+1}, \ldots, \rx_d)$. Yet, as reflected in the imputation results,
+the learning to re-construct performs better under MCAR, in which the missing values are evenly distributed across different features, than MAR or MNAR, in which the missing values are not evenly distributed.}
+
+
+
+
+\subsection{Sensitivity Analysis} 
+
+To assess the factors influencing \model's performance, we conduct sensitivity analysis by varying the dataset size, the number of features in the dataset, and the missingness ratio under the MAR setting. Figure~\ref{fig:sensitivity} shows the performance of \model within these experiments against the six closest competitors (HyperImpute, ICE, MissForest, GAIN, MIWAE, and Sinkhorn) on the {\tt letter} dataset. We have the following observations. \mct{a} The performance of \model improves with the size of available data, while its advantage over other imputers (with the exception of HyperImpute) grows with the dataset size. \mct{b} The number of features has a significant impact on the performance of \model, with its advantage over other imputers increasing steadily with the number of features. This may be explained by that \model relies on learning the holistic representations of inputs, while including more features contributes to better representation learning. \mct{c} \model is fairly insensitive to the missingness ratio. For instance, even with 0.7 missingness ratio, it achieves RMSE below 0.1, suggesting that it effectively fits sparse datasets. 
+
+
+\subsection{Ablation Study} 
+
+We conduct an ablation study of \model to understand the contribution of different components to its performance using the {\tt letter} dataset.
+
+\begin{table*}[!ht]
+\centering
+{\small
+    \renewcommand{\arraystretch}{1.2}
+    \setlength{\tabcolsep}{3pt}
+\begin{subtable}[t]{.33\textwidth}
+\centering
+{\begin{tabular}{c|c|c|c}
+ depth & RMSE & WD & AUROC \\
+ \hline
+ \hline
+2  & 0.0729          & 0.0263          & 0.7898          \\
+4  & 0.0636          & 0.0228          & 0.7903          \\
+6 &   0.0616 &   0.0219 &  \cellcolor{Red}0.7909  \\
+8  & \cellcolor{Red}0.0611          & \cellcolor{Red}0.0217          & 0.7892          \\
+10 & 0.0673          & 0.0245          & 0.7879          \\
+\end{tabular}}
+\caption{Decoder depth}\label{tab:decoder_depth}
+\end{subtable}%
+\begin{subtable}[t]{.33\textwidth}
+\centering
+{\begin{tabular}{c|c|c|c}
+ width & RMSE & WD & AUROC\\
+\hline
+\hline
+16          & 0.0902          & 0.0379          & 0.7902          \\
+32          & 0.0714          & 0.0289          & 0.7885          \\
+64 & \cellcolor{Red}0.0616 &  \cellcolor{Red}0.0219 &  \cellcolor{Red}0.7909  \\
+ 128 & 0.0795 & 0.0305 & 0.7845 \\
+ 256 & 0.1040 & 0.0403 & 0.7868 \\
+\end{tabular}}
+\caption{Embedding width}\label{tab:decoder_width}
+\end{subtable}%
+\begin{subtable}[t]{.33\textwidth}
+\centering
+{\begin{tabular}{c|c|c|c}
+ depth & RMSE & WD & AUROC \\
+ \hline
+ \hline
+2          & 0.0637          & 0.0239          & 0.7887          \\
+4          & 0.0625          & 0.0236          & 0.7877          \\
+6          & 0.0644          & 0.0239          & 0.7889          \\
+8 & \cellcolor{Red}0.0616 &  \cellcolor{Red}0.0219 &  \cellcolor{Red}0.7909  \\
+10         & 0.0637          & 0.0227          & 0.7878          \\
+\end{tabular}}
+\caption{Encoder depth}\label{tab:block}
+\end{subtable}
+}
+\caption{Ablation study of \model on the {\tt letter} dataset. The default setting is as follows: encoder depth = 8, decoder depth = 6, embedding width = 64, masking ratio = 50\%, and training epochs = 600.}\label{tab:ablation_exp}
+\end{table*}
+
+{\bf Model design.} The encoder and decoder of \model can be flexibly designed. Here, we study the impact of three key parameters, the encoder depth (the number of Transformer blocks in the encoder), the embedding width (the dimensionality of latent representations), and the decoder depth, with results summarized in Table~\ref{tab:decoder_depth}, Table~\ref{tab:decoder_width}, and Table~\ref{tab:block}, respectively. Observe that the performance of \model reaches its peak with a proper model configuration (encoder depth = 8, decoder depth = 8, and embedding width = 64). This observation suggests that the model complexity needs to fit the given dataset: it needs to be sufficiently complex to effectively learn the holistic representations of inputs but not overly complex to overfit the dataset. \rev{We also compare the performance of \model with different backbone models (\mie, Transformer, linear, and convolutional) with the number of layers and the size of each layer fixed as the default setting. As shown in Table~\ref{tab:backbone}, Transformer-based \model largely outperforms the other variants, which may be explained by that the self-attention mechanism can effectively capture the intricate inter-feature correlation under limited data~\cite{tabtransformer}.}
+
+\begin{table}[H]
+\begin{minipage}[t]{0.48\linewidth}
+\centering
+\rev{
+\small
+    \renewcommand{\arraystretch}{1.2}
+  \setlength{\tabcolsep}{4pt}
+    \centering
+\scalebox{0.82}{
+\begin{tabular}{c|c c c | c c  c}
+\multirow{2}{*}{\rev{backbone}} & \multicolumn{3}{c|}{\tt letter} & \multicolumn{2}{c}{\tt california}\\
+\cline{2-6}
+ & RMSE & WD & AUROC & RMSE & WD  \\
+\hline
+\hline
+\rev{Transformer} &  \rev{0.0611} &  \rev{0.0217} &  \rev{0.7892}  &  \rev{0.0663}  &  \rev{0.0172}   \\
+\rev{Linear} & \rev{0.1732} & \rev{0.1604} & \rev{0.7821} &  \rev{0.1786} & \rev{0.1329} \\
+\rev{Convolutional} & \rev{0.1694} & \rev{0.1582} & \rev{0.7836} & \rev{0.1715} & \rev{0.1286}
+\end{tabular}}}
+\caption{\rev{Performance of \model with different backbones. (note: AUROC is inapplicable to the {\tt california} dataset)}} \label{tab:backbone}
+\end{minipage}
+\hspace{0.2cm}
+\begin{minipage}[t]{0.48\linewidth}  
+\centering
+{\small
+    \renewcommand{\arraystretch}{1.2}
+ \setlength{\tabcolsep}{2pt}
+    \centering
+\scalebox{0.85}{
+\begin{tabular}{c|c c c | c c  c}
+\multirow{2}{*}{loss} & \multicolumn{3}{c|}{\tt letter} & \multicolumn{2}{c}{\tt california}\\
+\cline{2-6}
+ & RMSE & WD & AUROC & RMSE & WD  \\
+\hline
+\hline
+ $\gI_\mathrm{mask+} \cup \gI_\mathrm{unmask}$   &  \cellcolor{Red}0.0616 &  \cellcolor{Red}0.0219 &  \cellcolor{Red}0.7909  &  \cellcolor{Red}0.0663  &  \cellcolor{Red}0.0172   \\
+ $\gI_\mathrm{mask+}$ & 0.0629 & 0.0237 & 0.7890 &  0.0840 & 0.0311 \\
+ \rev{$\gI_\mathrm{unmask}$ } & \rev{0.2079} & \rev{0.1129} & \rev{0.7901} & \rev{0.1932} & \rev{0.1906}
+\end{tabular}}}
+\caption{Performance of \model with reconstruction loss w/ or w/o unmasked values.}\label{tab:loss}
+\end{minipage}
+\end{table}
+
+
+{\bf Reconstruction loss.} We define the reconstruction loss as the error between the reconstructed and original values on the re-masked values $\gI_\mathrm{mask+}$ and the unmasked values $\gI_\mathrm{unmask}$. We measure the performance of \model under \rev{three different settings of the construction loss: \mct{i}  $\gI_\mathrm{mask+} \cup\gI_\mathrm{unmask} $, \mct{ii}  $\gI_\mathrm{mask+}$ only, and \mct{iii} $\gI_\mathrm{unmask}$ only} on the {\tt letter} and {\tt california} datasets, with results shown in Table~\ref{tab:loss}. \rev{Observe that using the reconstruction of unmasked values only is insufficient and yet} including the reconstruction loss of unmasked values improves the performance, which is especially the case on the {\tt california} dataset. This finding is different from the vision domain in which computing the loss on unmasked image patches reduces accuracy~\cite{mae}. We hypothesize that this difference is explained as follows. Unlike conventional MAE, due to the naturally missing values in tabular data, relying on re-masked values provides limited supervisory signals. Moreover, while images are signals with heavy spatial redundancy (\mie, a missing patch can be recovered from its neighboring patches), tabular data tends to be highly semantic and information-dense. Thus, including the construction loss of unmasked values improves the model training.
+
+
+
+
+\subsection{Practice of \model} 
+
+Finally, we explore the optimal practice of \model. 
+\begin{figure*}[!ht]
+     \centering
+     \includegraphics[width=0.99\textwidth]{tat/figures/epoch.pdf}
+        \caption{(a) \model performance with respect to the maximum number of training epochs; (b)  
+        Convergence of \model's reconstruction loss. The experiments are performed on the {\tt letter} dataset under MAR with 0.3 missingness ratio.}
+        \label{fig:training_regime}
+\end{figure*}
+
+{\bf Training regime.} The ablation study above by default uses 600 training epochs. 
+Figure~\ref{fig:training_regime}(a) shows the impact of training epochs, in which we vary the training epochs from 100 to 1,600 and measure the performance of \model on the {\tt letter} dataset. Observe that the imputation performance improves (as RMSE and WD decrease and AUROC increases) steadily with longer training and does not fully saturate even at 1,600 epochs. However, for efficient training, it is often acceptable to terminate earlier (\meg, 600 epochs) with sufficient imputation performance. To further validate the trainability of \model, with the maximum number of training epochs fixed at 600 (which affects the learning rate scheduler), we measure the reconstruction loss as a function of the training epochs. As shown in Figure~\ref{fig:training_regime}(b), the loss quickly converges to a plateau within about 100 epochs and steadily decreases after that, demonstrating the  trainability of \model. 
+
+
+
+\begin{table}[!ht]
+\begin{minipage}[t]{0.48\linewidth}
+\centering
+\rev{
+\small
+    \renewcommand{\arraystretch}{1.2}
+  \setlength{\tabcolsep}{4pt}
+    \centering
+\scalebox{0.82}{
+\begin{tabular}[t]{c|c c c | c c}
+\multirow{2}{*}{masking ratio} & \multicolumn{3}{c|}{\tt letter} & \multicolumn{2}{c}{\tt california}\\
+\cline{2-6}
+ & RMSE & WD & AUROC & RMSE & WD  \\
+ \hline
+   0.1          & 0.0668          & 0.0215          & 0.0789         & 0.0888          & 0.0230           \\
+0.3          & 0.0562          & 0.0207          & 0.7897     &   \cellcolor{Red}0.0654          & \cellcolor{Red}0.0151        \\
+0.5 & \cellcolor{Red}0.0554 & \cellcolor{Red}0.0212 & \cellcolor{Red}0.7935 &  0.0663 & 0.0172\\
+0.7          & 0.0906          & 0.0366          & 0.7878     & 0.1320           & 0.0650           \\
+\end{tabular}}
+\caption{Performance with respect to masking ratio. The results are evaluated on {\tt letter} and {\tt california} under MAR with 0.3 missingness ratio.}\label{tab:maskratio}}
+\end{minipage}
+\hspace{0.2cm}
+\begin{minipage}[t]{0.48\linewidth}  
+\centering
+{\small
+    \renewcommand{\arraystretch}{1.2}
+ \setlength{\tabcolsep}{2pt}
+    \centering
+\scalebox{0.85}{
+\begin{tabular}[t]{c|c c c | c c}
+\multirow{2}{*}{base imputer} & \multicolumn{3}{c|}{\tt letter} & \multicolumn{2}{c}{\tt california}\\
+\cline{2-6}
+ & RMSE & WD & AUROC & RMSE & WD  \\
+ \hline
+  default & 0.0564 & 0.0215 & 0.7899  & 0.0722 & 0.0134 \\ 
+ \model & \cellcolor{Red}0.0554 & \cellcolor{Red}0.0212 & \cellcolor{Red}0.7935 & \cellcolor{Red}0.0702 & \cellcolor{Red}0.0115 \\
+\end{tabular}}}
+\caption{\model as the base imputer within HyperImpute. The results are evaluated on {\tt letter} and {\tt california} under MAR with 0.3 missingness ratio.}\label{tab:baseimputer}
+\end{minipage}
+\end{table}
+
+{\bf Masking ratio.} The masking ratio controls the number of re-masked values (after excluding  missing values). Table~\ref{tab:maskratio} shows its impact on \model. Observe that the optimal ratio differs across different datasets, which may be explained by the varying number of features of different datasets (16 versus 9 in {\tt letter} and {\tt california}). Intuitively, a larger number of features affords a higher masking ratio to balance \mct{i} encouraging the model to learn missingness-invariant representations and \mct{ii} having sufficient supervisory signals to facilitate the training.
+
+
+
+{\bf Standalone vs. ensemble.} Besides using \model as a standalone imputer, we explore its use as a base imputer within the ensemble imputation framework of HyperImpute, with results summarized in Table~\ref{tab:baseimputer}. It is observed that compared with the default setting (with mean substitution as the base imputer), using \model as the base imputer  improves the imputation performance, suggesting another effective way of operating \model.
+
+
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+
+\textbf{Theoretical justification.} The empirical evaluation above shows \model's superior performance in imputing missing values of tabular data. Next, we provide theoretical justification for its effectiveness. By extending the siamese form of MAE~\cite{mim}, we show that \model encourages learning {\em missingness-invariant} representations of input data, which requires a holistic understanding of the data even in the presence of missing values.
+
+Let $f_\theta(\cdot)$ and $d_\vartheta(\cdot)$ respectively be the encoder and decoder. For given input $\rvx$, mask $\rvm$, and re-mask $\rvm'$, the reconstruction loss of \model training is given by (here we focus on the reconstruction of re-masked values):
+\begin{equation}{\footnotesize
+\begin{aligned}
+\label{eq:loss}
+\ell(\rvx, \rvm, \rvm') =  \| d_\vartheta( f_\theta( \rvx \odot \rvm \odot \rvm')) \odot (1-\rvm')\odot \rvm  - \rvx \odot  (1 - \rvm' )\odot \rvm \|^2
+\end{aligned}}
+\end{equation}
+where $\odot$ denotes element-wise multiplication. Let $\ssup{\rvm}{+} \triangleq \rvm \odot \rvm'$ and $\ssup{\rvm}{-} \triangleq \rvm \odot (1- \rvm')$. \meq{eq:loss} can be simplified as: 
+$\ell(\rvx, \ssup{\rvm}{+}, \ssup{\rvm}{-}) 
+= \| d_\vartheta( f_\theta( \rvx \odot \ssup{\rvm}{+})) \odot \ssup{\rvm}{-}   - \rvx \odot \ssup{\rvm}{-} \|^2$.
+As the embedding dimensionality is typically much larger than the number of features, it is possible to make the autoencoder lossless. In other words, for a given encoder $f_\theta(\cdot)$, there exists a decoder $d_{\vartheta'}(\cdot)$, such that 
+$d_{\vartheta'}(f_\theta(\rvx \odot \ssup{\rvm}{-})) \odot \ssup{\rvm}{-} \approx \rvx \odot \ssup{\rvm}{-}$. We can further re-write \meq{eq:loss} as:
+\begin{equation}{\footnotesize
+    \begin{aligned}
+\label{eq:loss2}
+\ell(\rvx, \ssup{\rvm}{+}, \ssup{\rvm}{-}) = & \| d_\vartheta( f_\theta( \rvx \odot \ssup{\rvm}{+})) \odot \ssup{\rvm}{-} - d_{\vartheta^*}( f_\theta( \rvx \odot \ssup{\rvm}{-})) \odot \ssup{\rvm}{-} \|^2 \\
+\text{s.t.} \quad  \vartheta^* = & \argmin_{\vartheta'} \E_{\rvx'} \|d_{\vartheta'}(f_\theta(\rvx' \odot \ssup{\rvm}{-})) \odot \ssup{\rvm}{-} - \rvx' \odot \ssup{\rvm}{-}\|^2
+\end{aligned}}
+\end{equation}
+
+We define a new distance metric 
+$\Delta_{\vartheta, \vartheta'}(\rvz, \rvz') \triangleq  \|  (d_{\vartheta}(\rvz) - d_{\vartheta'}(\rvz') )   \odot  \ssup{\rvm}{-} \|^2$. Then, \meq{eq:loss} is reformulated as:
+\begin{equation}{\footnotesize
+    \begin{aligned}
+\label{eq:loss3}
+\ell(\rvx, \ssup{\rvm}{+}, \ssup{\rvm}{-}) 
+= & \Delta_{\vartheta, \vartheta^*}(f_\theta(\rvx \odot \ssup{\rvm}{+}) , f_\theta(\rvx \odot \ssup{\rvm}{-}))\\ 
+\text{s.t.}\quad  \vartheta^* = &\argmin_{\vartheta'} \E_{\rvx'} \|d_{\vartheta'}(f_\theta(\rvx' \odot \ssup{\rvm}{-})) \odot \ssup{\rvm}{-} - \rvx' \odot \ssup{\rvm}{-}\|^2
+\end{aligned}}
+\end{equation}
+Note that optimizing \meq{eq:loss3} essentially minimizes the difference between $\rvx$'s representations under $\ssup{\rvm}{+}$ and $\ssup{\rvm}{-}$ (with respect to the decoder). As $\ssup{\rvm}{+}$ and $\ssup{\rvm}{-}$ mask out different values, this formulation promotes learning representations insensitive to missing values.
+
+\begin{wrapfigure}{r}{7cm}
+     \centering
+     \includegraphics[width=0.32\textwidth]{figures/cka.pdf}
+        \caption{CKA similarity between the representations of complete and incomplete inputs (with the number of missing values controlled by the missingness ratio). The tested model is trained on {\tt letter} under the MAR setting with 0.3 missingness ratio.}
+        \label{fig:cka}
+\end{wrapfigure}
+To validate the analysis above, we empirically measure the CKA similarity~\cite{cka} between the latent representations (\mie, the output of \model's encoder) of complete inputs and inputs with missing values, with results shown in Figure~\ref{fig:cka}. Observe that the CKA measures under different missingness ratios all steadily increase with the training length, indicating that \model tends to learn missingness-invariant representations of tabular data, which may explain for its imputation effectiveness.
+
+\textbf{Limitations.} As revealed in the above analysis, \model encourages learning representations invariant to re-masked values. Therefore, it tends to perform better if the re-masked values and the missing values follow similar distributions. For example, in MCAR, both re-masked and missing values are evenly distributed across different features. While in MAR, as the observable features are fixed, the re-masked values are more likely to be selected from the observable features, which also biases the representation learning toward the observable features. This bias is reflected in our experimental results, in which \model tends to perform better under MCAR. Another bias we observe is that in some cases (e.g., the {\tt climate} dataset in Figure \ref{fig:overall}), \model outperforms alternative methods in terms of RMSE but underperforms in terms of WD. One explanation is that \model is trained to optimize the reconstruction loss measured by MSE. Thus, it is biased towards re-constructing individual missing values rather than the distributions of missing values.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+In this paper, we conduct a pilot study exploring the masked autoencoding approach for tabular data imputation. We present \model, a novel imputation method that learns missingness-invariant representations of tabular data and effectively imputes missing values under various scenarios. With extensive evaluation on benchmark datasets, we show that \model outperforms state-of-the-art methods in terms of both imputation utility and fidelity. Our findings indicate that masked tabular modeling represents a promising direction for future research on tabular data imputation.
+
+\newpage
+
+
+

@@ -1,0 +1,176 @@
+# LayoutDETR: Detection Transformer Is a Good Multimodal Layout Designer
+
+- Decision: Reject
+- Avg Score: 5.25
+- Scores: 6, 5, 5, 5
+
+## Abstract
+Graphic layout designs play an essential role in visual communication. Yet handcrafting layout designs is skill-demanding, time-consuming, and non-scalable to batch production. Generative models emerge to make design automation scalable but it remains non-trivial to produce designs that comply with designers' multimodal desires, i.e., constrained by background images and driven by foreground content. We propose \textit{LayoutDETR} that inherits the high quality and realism from generative modeling, while reformulating content-aware requirements as a detection problem: we learn to detect in a background image the reasonable locations, scales, and spatial relations for multimodal foreground elements in a layout. Our solution sets a new state-of-the-art performance for layout generation on public benchmarks and on our newly-curated ad banner dataset. We integrate our solution into a graphical system that facilitates user studies, and show that users prefer our designs over baselines by significant margins.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper focuses on the layout generation task by reformulating it as a detection problem. A transformer-based architecture, i.e., LayoutDETR, is proposed to detect reasonable locations, scales and spatial relations for elements in a layout. A new banner dataset is established with rich semantic annotation. The proposed solution is further integrated into a graphical system to scale up the layout generation process.
+
+### Strengths
+The idea of applying the visual detection framework for the layout generation task is interesting and effective. The collected could be useful for future research in the community. The experimental results show the effectiveness of the proposed method under six evaluation metrics.
+
+### Weaknesses
+1. The first contribution of this paper is that no existing methods can handle all those modalities at once. However, as shown in Table 1, Vinci can also use these modalities as conditions.
+2. The computation cost analysis of the proposed solution is missing. Since the model contains a variety of input modalities, I was wondering about the computational cost and runtime analysis of the proposed method and existing works.
+3. It would be better to show the diversity of the generated layouts and discuss the limitations of the proposed method.
+
+### Questions
+1. How to distinguish the foreground image and the background image if the background images are defined with arbitrary sizes?
+2. Why Image FID that uses image features pre-trained on ImageNet could be used to evaluate the quality of the rendered graphic designs?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper studies graphic layout generation conditioned multimodal inputs, including background image, foreground image and text.
+
+The main contribution is to adapt an exciting Transformer-based detector architecture as a content-conditioned layout generator and explore its training under different generative frameworks including GAN, VAE and VAE-GAN.
+
+A new ad banner dataset with rich semantic annotations is created and will be released for the training and evaluation of generative models for graphic layouts.
+
+### Strengths
+1. The paper is studying an important problem. Conditioning layout generation models on rich contents will certainly make the models more practically useful.
+
+2. The newly constructed banner dataset with detailed and rich annotations can be of value to the layout generation community.
+
+3. The evaluation is extensive and the results look good.
+
+### Weaknesses
+1. The amount of technical contribution is small. While I appreciate the great effort that has been input into the work on building the system, testing different design choices and building the banner dataset, I think technical novelty and insight brought by the paper is limited. The whole work is more like constructing a working system by borrowing techniques from another domain directly (e.g., DETR) and combining components from other existing layout methods, e.g., (Kikuchi et al., 2021) and (Li et al., 2020), without any significant modification. Thus, the paper may not be of great interest to the ICLR audience, and perhaps fits better with more system-oriented conferences or journals.
+
+2. The evaluation is insufficient. The paper is aimed at conditional layout generation. However, all the quantitative metrics as well as the user study only evaluate layout quality, and another important aspect of results is ignored — how well generated layouts match the input contents. Thus, an experiment on layout-content consistency is needed but is missing in the current paper.
+
+### Questions
+None
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposed LayoutDETR which can inherit high quality and realism from generative modeling, while reformulating content-aware requirements as a detection problem. It learns to detect in a background image the reasonable locations, scales, and spatial relations for multimodal foreground elements in a layout.
+
+### Strengths
+- study layout generation and visual detection with a unified framework
+- proposed a new banner ads dataset
+- achieve state of art in layout generation in terms of metrics of realism, accuracy, and regularity
+- built graphical system and conduct user study
+
+### Weaknesses
+ - the empty space detection on a background image and the layout generation of foreground can be decoupled as two separate steps. It is better to compare with such a baseline, and justify the superiority of doing it with a joint model.
+- the proposed dataset (images) is collected in prior work. The new contribution here is the detected text objects, background inpainting and the text class annotation, which is not as significant as a new dataset.
+- There are some concerns about the quality of data set. According to the way the data set was constructed, there are only texts as foreground objects, without other elements such as vector shape, image. This is very limited. Also, the inpainted background may contain artifacts which the generator can leverage for text location prediction. How is the text image patch obtained? If it's cropped from the original image, it has the same background patten, which may contain shortcut information for layout prediction.
+
+### Questions
+- please clarify whether there are only text as foreground object in the dataset and all the experiments.
+- why Crello dataset is not multi modal? What is the unique part of the proposed data set?
+- explain whether it's possible to apply this paper to the problem: "Towards Flexible Multi-modal Document Models"
+- Eq 6, should it be p_1^i ?
+- the paper does not evaluated diversity of the generated results. It would be good to show some visual examples of different design variations for one background image.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+In this paper, VAE and GAN are combined with DETR to realize multimodal layout generation. A large-scale ad banner data set with 7,196 samples containing English characters is presented. According to the experimental results of three data sets on ad banner, CGL, and CLAY, the method achieves SOTA performance.
+
+### Strengths
+* The paper is easy to follow. 
+
+* A large-scale ad banner dataset is collected for the layout design task.
+
+* The results show that the model achieves excellent performance.
+
+### Weaknesses
+ * Many technical details are not well-motivated and validated, e.g., VAE and DETR structures. 
+
+* It seems the method combines multiple popular techniques and the novelty in the technical part is unclear. 
+
+* Simply considering the box layout and ignoring font information and box aspect ratios makes the task less extensible. 
+
+* The method requires dozens of loss functions for supervision. I am not sure how to tune weighting factors and make sure each term properly works.
+
+### Questions
+The importance and necessity of VAE design is not validated. As the method takes a generative pipeline, I am interested in the variations and the latent spaces. Moreover, a proper validation of this key design is also important.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair

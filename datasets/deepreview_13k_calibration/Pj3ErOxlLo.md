@@ -1,0 +1,208 @@
+# NaviFormer: A Deep Reinforcement Learning Transformer-like Model to Holistically Solve the Navigation Problem
+
+- Decision: Reject
+- Avg Score: 6.00
+- Scores: 6, 6, 6, 6
+
+## Abstract
+Automatic path planning is a highly relevant research area with multiple applications, but it is usually solved by addressing either the (high-level) route planning problem (waypoint sequencing to achieve the final goal) or the (low-level) path planning problem (trajectory prediction between two waypoints avoiding collisions). However, real-world problems usually require simultaneous solutions to the route and path planning subproblems with a holistic and more efficient approach. In this paper, we introduce NaviFormer, a deep reinforcement learning model based on a Transformer architecture that solves the global navigation problem by predicting both high-level routes and low-level trajectories. To evaluate NaviFormer, several experiments have been conducted, including comparisons with other algorithms. Results show high competitive accuracy from NaviFormer since it can understand the constraints and difficulties of each high- and low-level planning and act consequently to improve the performance. Moreover, its superior computation speed proves its suitability for real-time applications.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The authors propose a transformer policy network trained using deep reinforcement learning to jointly solve the route planning (visit most number of nodes in minimum time) and path planning (generating collision-free paths to goal) problem. The modified transformer architecture applies multi-head attention between graph node and obstacle embeddings (section 4, page 5).
+
+The authors evaluate performance on synthetic and real-world data (PASTIS dataset). An ablation study is included for synthetic data (Table 1) while a comparison to other approaches is done for the PASTIS dataset (Table 2). The authors find a computation time speed up and success rate increase versus more conventional 2-step routing and path planning methods.
+
+### Strengths
+- State-of-the-art performance.
+- The work is well written and clear.
+- Included ablations are useful for analyzing the components of the proposed network.
+- Tested on multiple datasets (synthetic and real-world).
+
+### Weaknesses
+ - When comparing to baselines, all approaches appear to be heuristic methods. It would have been useful to include a machine learning 2-step baselines as the improvement could simply be due to the different class of algorithm instead of the authors' assertion that NaviFormer beats baselines due to its tackling the routing and path planning problem jointly.
+
+- How repeatable are the results over different seeds and validation set splits? It would have been useful to include a variance or confidence interval with the reported results.
+
+### Questions
+- How repeatable are the results over different seeds and validation set splits? It would have been useful to include a variance or confidence interval with the reported results.
+- At the beginning of section 4, $a_t^d$ can take the value $\frac{2\pi}{3}$. I assume this should be $\frac{3\pi}{2}$?
+- In the ablation study, can you clarify what you mean by the “traditional encoder”? It is written that “obstacles are not encoded in the graph embedding” but I assume that they are still input into the Local Obstacle Maps in Figure 2? That is to say that this approach only has the $h^{\mathrm{obs}}$ connection into the Transformer Encoder in Figure 2 is removed?
+
+__Edit: After rebuttal from the author, I have raised my score slightly.__
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper presents a learning-based approach to a specific navigation task, in which predefined waypoints need to be traversed one by one (travelling-salesman style) and obstacles need to be avoided on the way.
+The agent has access to the full system state (waypoints, obstacle positions, its own position), the focus is only on predicting good collision-free routes.
+
+A transformer predicts the next waypoint in a route to follow, and in parallel a convnet predicts the actions that lead to the next waypoint.
+The transformer routing network is very similar to existing prior work [1].
+The first argued advantage of the solution is that both high-level routing and low-level waypoint-to-waypoint navigation are solved in parallel.
+The other is that everything is amortized with deep networks, which is faster than traditional solutions.
+
+The networks are trained to maximize an RL objective, trying to visit as many waypoints on a limited budget while avoiding obstacles.
+The algorithm is evaluated in a toy 2D setup with up to 5 circular obstacles and up to 100 waypoints to traverse.
+It is also applied to a 2D pesticide spraying problem (PASTIS dataset) of similar complexity to the toy setup, on which it is compared to traditional routing + path planning baselines (not deep), mainly showing improved runtime.
+
+[1] W. Kool and H. van Hoof and M. Welling, Attention, Learn to Solve Routing Problems! ICLR 2019
+
+### Strengths
+- Solving the routing problem jointly with any movement constraints (here obstacles) is a good idea, as fragmented solutions are bound to suffer from local minima. I am not sure if this particular aspect has been addressed with deep learning before, though.
+- Aiming to improve the runtime via amortization is also sane, as already shown in [1] and following works. The overall assumptions thus seem sound to me.
+- Ablations of some of the assumptions are included.
+- The paper was easy to follow, with some room for improvement in terms of the level of detail (see below).
+
+[1] W. Kool and H. van Hoof and M. Welling, Attention, Learn to Solve Routing Problems! ICLR 2019
+
+### Weaknesses
+ - I see the joint training of the transformer and the network that predicts directions as the main contribution. What I am missing in that regard is an ablation of whether this actually works better than training both components in isolation. Right now it is hard to tell whether the routing patterns are really influenced meaningfully by the path-planning constraints. In that sense, I think the paper would be stronger if it considers a baseline where a routing-only transformer is pretrained like in prior art, and then a direction-prediction network is fit to its predicted goals post-mortem.
+- Related to the above, the paper would benefit from representative examples of what navigation runs look like, right now these are virtually missing (there is only one pesticide spraying example). This makes it hard to judge how well the routing and obstacle avoidance work together. Particularly because the considered environments are not that complex.
+- The overall idea to use a transformer for routing is directly carried over from prior art (e.g. [1]), one can easily tell by the used notation. Still, most of section 4 is about the transformer design. To count this as a contribution, I find the following points important:
+    - The ablation of the transformer (top 2 rows of table 1) is very important, to justify any changes in architecture.
+    - It appears that the traditional transformer baseline performs quite well in comparison, which makes me question whether the proposed layer structure (cross-attention, etc.) is really necessary.
+    - It is argued that the traditional transformer's success rate is lower because obstacles are not encoded in its embeddings. I don't see why this has to be, can't one provide both the list of waypoints and obstacles as one long vector input? And respectively rely on a more generic architecture, like in [1]?
+- The direction-prediction net uses info only from the local neighborhood of the agent (based on figure 4). This makes the path-planning greedy, which may work reasonably in the considered experiments, but I doubt it will be optimal in something like apartment layouts or mazes. This should be highlighted as a limitation.
+- In terms of the runtime experiments: is the reported runtime of 3.5ms for one forward pass, or for predicting the whole set of goal waypoints + direction actions? It seems like the reported numbers for the traditional methods are for solving the whole problem.
+- Some minor points: presentation-wise, while I appreciate the transparency in the network diagrams, I find these are better suited for an appendix, the information in them could be distilled. I also found the equations in sec. 3 somewhat too verbose, given that they are not used at all in the implementation (e.g. the transformer uses masking to implement most of the constraints).
+
+In summary, I believe the experiments should be more focused on proving that the joint training of the transformer and the path planning network is beneficial, as this appears to be the primary novelty of the research. This and the other issues listed above are currently holding me back. The transformer network itself and the associated runtime benefits were already established in prior works, so I wouldn't count these as novel contributions of this paper.
+
+### Questions
+- In the transformer ablations: what does it mean to not have a transformer encoder, how are the waypoint + obstacle inputs processed then?
+- In the case of the traditional transformer, why is it that "obstacles are not encoded in the graph embeddings"?
+- How are obstacles represented in the pesticide spraying experiments?
+- In the introduction, I wouldn't count A* search as a purely heuristic approach for path-planning. Often A* heuristics happen to be admissible (e.g. in point-to-point navigation like in the paper), which still returns optimal solutions. Would you consider adjusting this? This is also related to my comment about picking directions greedily in the weaknesses section.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This work proposes NaviFormer, a deep reinforcement model that is able to perform route planning and path planning simultaneously. The method is evaluated on one synthetic and one real dataset, demonstrating superior success rates and planning speed to adapted A* and D* methods.
+
+### Strengths
+1. The paper proposes a novel way that is able to conduct route planning and path planning simultaneously.
+2. The design of the neural architecture is clear and well presented.
+
+### Weaknesses
+1. The designed encoder that integrates the obstacle information into node embeddings using attention seems not new, which has already been proposed in [R].
+2. The algorithm is only evaluated on two datasets, and the synthetic dataset lacks enough details. Besides, 640k training samples vs. 10k testing samplings is not a standardized data split, which may cause overfitting.
+
+### Questions
+1. It is not clear to me how the constraints described in Sec 3 are reflected in the neural architecture design. I hope the authors can give more clarification.
+2. Is it necessary to predict both the future actions and directions? Does the predicted action imply the direction?
+3. Does navigation problem aim to connecting the start and goal node by traversing a predefined set of nodes? If so, how are the predefined set of nodes are determined?
+3. Can NaviFormer deal with dynamic environment? i.e., the cases where the obstacles are moving.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper studies the navigation planning problem: the combination of route planning (in terms of prize-collecting for maximizing some benefits from the visited points) and path planning (in terms of avoiding obstacles for finding cost-minimum travel paths) using the transformer-based NN named NaviFormer.
+
+Although the problem definition combines existing problems, and the proposed network seems to be a minor improvement or technical contribution using the transformer block, the design of the training strategy (e.g., rewards) was evaluated in experiments. The experimental results show some improvements in the PASTIS dataset.
+
+### Strengths
+- Interesting navigation problem combining the two existing (possibly traditional) tasks.
+- A transformer-based NN design combining multiple information sources (nodes, start/goals, time limits, obstacles), showing good experimental results via the ablation study.
+
+### Weaknesses
+ - Although the proposed problem is a solid optimization problem, some unclear relation (navigation points of G, spraying points, and local/global maps, particularly with static obstacles) remains, which can be clarified by improving the writing. Specifically, the connection between the high-level navigation goals (points in G) and the low-level path planning, especially in the context of the spraying application, needs further clarification. The role of 'spraying points' as intermediate targets derived from segmented areas is not immediately obvious, and how these points relate to the overall navigation objective requires a more detailed explanation. Furthermore, the distinction between local and global maps and their impact on the agent's decision-making process, particularly with static obstacles, is not fully elaborated.
+- Insufficient experiment explanations, rather than giving some trivial figures: For example, in my opinion, some figures in Fig. 3 are not very important to convey the concept and idea of the paper (just following some basic idea of Transformer), but experiment information is much important as the author tries to tackle a new navigation problem. Fig.6 should be updated for clarity without a 3D plot. The experimental section lacks a detailed analysis of the results. The figures presented, such as those in Fig. 3, do not provide sufficient insight into the performance of the proposed method. A more in-depth discussion of the experimental setup, including specific parameter settings and the rationale behind them, is needed. Additionally, the qualitative performance of the method, beyond simple numerical results, should be presented.
+- Fixed training strategy in the main paper (no link or mention of different rewards or learning strategies). The paper does not explore alternative reward structures or learning strategies, which could potentially improve the performance of the proposed method. The choice of a basic Actor-Critic strategy is not justified, and the potential benefits of using different reward functions or learning algorithms are not discussed.
+
+### Questions
+- Compared with Fig. 1, the possible actions are restricted (only four angles). Can we discuss this point? For example, the learning difficulty when increasing the freedom of angles (e.g., 15 degrees each), the optimization problem, and results (e.g., more profitable routes with restricted times?). In the last sentence of the paper as a future work, could considering the continuous action space make the problem completely different (or some minor differences?)  
+
+- I’m not sure why the global map interrupts the performance (as pointed out in Table 1). Could you give some additional insights? In my feeling, as the obstacles seem to be fixed (not dynamic), the global map could help the task from the macroscopic viewpoint. However, for example, the training to consider the map seems challenging.
+
+- What is the effect of spraying points? In Fig. 5, they seem to be derived from segmentation results. Any connections between the spraying points and obstacles (Bio?). Are all instances similar as illustrated in Fig.5, or are they completely different?
+
+- Some minor comments:
+    - Quick question: how did the authors design A* and D* for the problem? It is interesting if the authors give some details because, in my feeling, I’m not convinced that A* is time-consuming, as Table 2 says when the obstacle information is explicitly given. (Possibly, I misunderstood some settings).
+    - Just a small question: what is an intuitive explanation or visualization of synthetic cases? (in real UAV datasets can be understood through Fig.5).
+    - Time limit in Fig. 2 (denoted by $T$), but in the optimization problem, it seems to be $L$.
+
+~~~~
+
+- After the response, some of the above questions have been clarified, and therefore my score was updated.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair

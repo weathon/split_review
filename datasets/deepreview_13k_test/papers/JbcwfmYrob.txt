@@ -1,0 +1,449 @@
+\title{SEA: Sparse Linear Attention with Estimated Attention Mask}
+
+\begin{abstract}
+The transformer architecture has driven breakthroughs in recent years on tasks which require modeling pairwise relationships between sequential elements, as is the case in natural language understanding. 
+However, long seqeuences pose a problem due to the quadratic complexity of the attention operation. Previous research has aimed to lower the complexity by sparsifying or linearly approximating the attention matrix. Yet, these approaches cannot straightforwardly distill knowledge from a teacher's attention matrix, and often require complete retraining from scratch. Furthermore, previous sparse and linear approaches lose interpretability if they cannot produce full attention matrices.
+To address these challenges, we propose \textbf{SEA}: \textbf{S}parse linear attention with an \textbf{E}stimated \textbf{A}ttention mask.
+SEA estimates the attention matrix with linear complexity via kernel-based linear attention, then subsequently creates a sparse attention matrix with a top-$\hat{k}$ selection to perform a sparse attention operation. 
+For language modeling tasks (Wikitext2), previous linear and sparse attention methods show roughly two-fold worse perplexity scores over the quadratic OPT-1.3B baseline, while SEA achieves better perplexity than OPT-1.3B, using roughly half the memory of OPT-1.3B, providing interpretable attention matrix. We believe that our work will have a large practical impact, as it opens the possibility of running large transformers on resource-limited devices with less memory.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\AddToHook{shipout/background}{
+\ifthenelse{\thepage=2}{
+    \afterpage{
+        \begin{figure}[t]
+        \begin{center}
+        \makebox[\textwidth]{
+            \includegraphics[width=0.9\textwidth]{figures/model_structure.pdf}
+        }
+        \caption{ \small
+        Model diagram of our proposed linear attention method, SEA. 
+        SEA replaces the multi-head attention (MHA) mechanism from the teacher transformer model while preserving the attention matrix using knowledge distillation with only a small finetuning dataset. 
+        The deployed SEA model shows linear complexity at test time.
+        }
+        \label{exp.figure.model_structure}
+        \end{center}
+        \end{figure}
+    }
+}{}
+\ifthenelse{\thepage=4}{
+\afterpage{{
+\begin{figure}[t]
+\centering
+\begin{subfigure}[b]{0.695\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/plot_baseline_opt.pdf}
+    \caption{\small Computational costs vs. perplexity $\downarrow$ on Wikitext2 with OPT-125m.}
+    \label{exp.figure.opt_baselines}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.295\textwidth}
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/plot_opt_curve.pdf}
+    \caption{\small OPT-125M validation curves}
+    \label{exp.figure.opt_curve}
+\end{subfigure}
+\caption{\small \cref{exp.figure.opt_baselines} shows how 9 variants of our model perform when comparing perplexity vs. computation. Baseline model marker sizes correspond to increasing numbers of buckets (Reformer) or random projections (Performer). In all cases, SEA produces the best perplexity score. \cref{exp.figure.opt_curve} Validation curves for SEA and baseline efficient attention methods. SEA converges much faster compared to Performer and Reformer.}
+\label{exp.figure.opt}
+\end{figure}
+\begin{figure}[t]
+    \begin{minipage}[b]{0.75\textwidth}
+        \centering
+        \input{tables/baseline_opt}
+    \end{minipage}
+    \begin{minipage}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/plot_dynamic_k_opt.pdf}
+        \captionof{figure}{\small Dynamically adjusting $k$ after training.}
+        \label{exp.figure.opt_dynamic_k}
+    \end{minipage}
+\end{figure}
+}}
+}{}
+\ifthenelse{\thepage=5}{
+    \afterpage{{
+        \begin{figure}[t]
+        \centering
+        \begin{subfigure}[b]{0.73\textwidth}
+            \centering
+            \includegraphics[width=1.0\textwidth]{figures/plot_baseline_glue_all.pdf}
+            \caption{
+            \small Comparison of the trade-off on GLUE.}
+            \label{exp.figure.bert_baselines}
+        \end{subfigure}
+        \begin{subfigure}[b]{0.26\textwidth}
+            \centering
+            \raisebox{0.4em}{\includegraphics[width=1.0\textwidth]{figures/plot_dynamic_k.pdf}}
+            \caption{\small Dynamically adjusting $k$ after training.}
+            \label{exp.figure.bert_dynamic_k}
+        \end{subfigure}
+        \caption{\small \cref{exp.figure.bert_baselines} shows the comparison of the trade-off between computational cost (latency and memory usage) and accuracy on each GLUE subset with BERT-base. \textbf{\ref{exp.figure.bert_baselines} (column 1)}: Overall performance trade-off over three subsets. We average metrics weighted with dataset size. \textbf{\ref{exp.figure.bert_baselines} (column 2-4)}: Performance trade-off per each GLUE subset. Baseline model marker sizes correspond to increasing numbers of buckets or random projections.
+        \cref{exp.figure.bert_dynamic_k} shows the accuracy trade-off of dynamically adjusting $k$ after training.}
+        \end{figure}
+    }}
+}{}
+\ifthenelse{\thepage=6}{
+    \afterpage{{
+        \begin{figure}[t]
+            \begin{center}
+            \begin{subfigure}[b]{0.9\textwidth}
+                \includegraphics[width=1.0\linewidth]{figures/exp_latency_memory.pdf}
+            \end{subfigure}
+            \begin{subfigure}[b]{\textwidth}
+                \includegraphics[width=\linewidth]{figures/latency_breakdown.pdf}
+            \end{subfigure}
+            \caption{
+            \small
+            \textbf{(top)} Space and time complexity comparison between our SEA attention and baselines. Lower values are better in both figures. SEA exhibits complexity in line with other linear attention models. We show a trend-line for the quadratic attention because it runs out of memory on sequence lengths larger than $2^{13}$.
+            \textbf{(bottom)} Latency (ms) breakdown of our SEA attention ($T=2^{13}$, \textit{causal-per-batch}). Each \textbf{\color{TestOrange}orange} and \textbf{\color{teal}green} box shows that the operation is computed in our novel FlatCSR format and in dense tensor format, respectively.
+            }\label{exp.figure.complexity}
+            \end{center}
+        \end{figure}
+    }}
+}{}
+}
+
+The transformer \citep{transformer} architecture has revolutionized various fields of artificial intelligence, such as natural language understanding \citep{llama2, sni} and computer vision \citep{vit} due to its ability to learn pairwise relationships between all $T$ tokens in a given sequence ($\mathcal{O}(T^2)$). 
+This has ushered in the era of large transformer-based foundation models with impressive generalization abilities \citep{gpt3, vicuna2023}.
+However, since the transformer's attention mechanism comes with a quadratic space and time complexity, it becomes untenable for handling long sequences which are essential for tasks such as dialogue generation \citep{persona}. 
+To overcome this limitation, previous works have suggested approaches with linear complexity by using static or dynamic sparse attention patterns \citep{longformer, bigbird, synthesizer, reformer, sinkhorn, tdsa}, or by replacing quadratic attention with kernel or low-rank approximations \citep{performer, scatterbrain, cosformer}.
+
+However, despite their promising aspects, previous linear attention methods have yet to be widely used in research and production for several reasons.
+Firstly, these attention mechanisms cannot be easily swapped into existing finetuned models. 
+After radically replacing the quadratic attention mechanism, they require training new attention relations to attempt to recover the performance of the quadratic attention module and cannot directly learn the full range of attention relations during knowledge distillation. Therefore, they suffer from unpredictable accuracy degradation on downstream tasks. 
+For example, as shown in \cref{table.baseline.glue}, Reformer~\citep{reformer} outperforms many other baselines on MNLI~\citep{mnli}; however, it shows the worst performance in \cref{table.baseline.opt} on Wikitext2 \citep{wikitext2}.
+Secondly, previous linear attention methods may hinder the ability to interpret the attention matrix or merge/prune tokens~\citep{ltp, sttabt, token-merging} of the transformer model, as they do not produce the full attention matrix which is usually required for analyzing the importance of a given token.
+
+In contrast to previous works, our proposed linear attention method, \textbf{SEA}: \textbf{S}parse linear attention with \textbf{E}stimated \textbf{A}ttention mask, focuses on estimating the attention matrix from a pretrained teacher transformer model with $\mathcal{O}(T)$ complexity at inference rather than $\mathcal{O}(T^2)$.
+In order to do so, our novel estimator, distills knowledge~\citep{kd_hinton} from the teacher and estimates the attention matrix with $\mathcal{O}(T)$ complexity by fixing the second dimension to a constant value $K$ where $K \ll T$. 
+This results in a compressed attention matrix which can be decompressed via interpolation into an approximation of the full attention matrix when performing the distillation step as opposed to previous works which prescribe retraining attention relationships during distillation due to incompatible changes in the attention operation~\citep{performer,cosformer}.
+By distilling from the full attention matrix into our compressed matrix, SEA can use the complex and dynamic attention information from the pretrained model and preserve task performance. 
+
+Furthermore, as SEA distills knowledge from a full attention matrix, the resulting compressed attention matrix and sparse attention matrix can still provide interpretable attention by allowing for interpreting the relationships and importance of tokens (\eg analysis of attention patterns in images~\citep{vit} and token pruning~\citep{ltp, sttabt, token-merging}). 
+Lastly, SEA reduces the space and time complexity of attention from $\mathcal{O}(T^2)$ into $\mathcal{O}(T)$ at test-time, with significantly reduced memory and computational cost while maintaining similar performance to the original pretrained transformer model, as shown in \cref{exp.figure.opt,table.baseline.glue,table.baseline.opt}.
+
+\begin{figure}[t]
+\centering
+{
+\hspace{0.5em}
+\includegraphics[width=0.9\textwidth]{figures/main_concept.pdf}
+}
+\caption{
+\textbf{Concept.} We estimate the attention matrix in a compressed size ($\hat{\mA}$), then perform a grouped top-$\hat{k}$ selection, and subsequently perform sparse attention with our novel FlatCSR operation using an estimated attention mask on the full attention matrix. SEA has linear complexity in all steps at test-time, and requires direct attention matrix distillation from the quadratic teacher at train-time.
+}\label{intro.figure.concept}
+\end{figure}
+
+In \cref{intro.figure.concept}, we provide a overview of our proposed method's inference stage.
+The main idea is to first estimate a compressed attention matrix $\mathbf{\hat{A}}$ with $\mathcal{O}(T)$ complexity, and subsequently perform sparse attention after choosing only $\mathcal{O}(T)$ important relationships inferred from $\mathbf{\hat{A}}$.
+Specifically, we decode the output features of the kernel-based linear attention method Performer~\citep{performer} to form $\mathbf{\hat{A}}$. 
+Next, we perform a top-$\hat{k}$ selection on $\mathbf{\hat{A}}$ to form a compressed attention mask which can be used to generate a sparse attention mask for the final sparse attention operation. 
+By utilizing both kernel-based and sparse attention, we can take advantage of their diverse token embedding spaces, as shown in previous work~\citep{scatterbrain}. 
+The compressed estimated attention matrix $\mathbf{\hat{A}}$ is trained via knowledge distillation~\citep{kd_hinton, tinybert} from a pretrained quadratic teacher model to distill complex and dynamic attention patterns. 
+We achieve linear complexity in this process by controlling sparsity and compression ratio in the compressed attention mask.
+ 
+We validate SEA by applying it to BERT for text classification \citep{bert, glue} and to OPT for causal language modeling \citep{opt, wikitext2}.
+Our empirical findings demonstrate that SEA adequately retains the performance of the quadratic teacher model in both tasks~(\cref{table.baseline.opt,table.baseline.glue}), while previous methods do not. SEA significantly outperforms the best linear attention baselines, such as Performer, in language modeling with $47.7$\% lower (better) perplexity while consuming $54.2$\% less memory than quadratic attention (\cref{table.baseline.opt}).
+This opens up the possibility of running long context language models on lower-grade computing devices that have smaller VRAMs because SEA can run on a smaller memory budget as shown in \cref{sec.exp.efficiency,exp.figure.complexity}.
+To summarize:
+\newpage
+\hspace{0in}
+\begin{itemize}
+    \item We propose a novel, test-time linear attention mechanism (SEA) that distills knowledge from a pretrained quadratic transformer into a compressed estimated attention matrix which is then used to create a sparse attention mask for the final attention operation. As demonstrated in ~\cref{exp.figure.complexity}, SEA is $\mathcal{O}(T)$ at test time, where there is no distillation step.
+    \item We demonstrate the efficiency and effectiveness of our method through empirical evaluations on natural language processing tasks such as text classification on GLUE and language modeling on Wikitext-2, where we maintain competitive performance with the vanilla transformer baseline, as shown in ~\cref{exp.figure.opt_baselines,exp.figure.bert_baselines}.
+    \item We propose and provide code for a novel CSR tensor operation, called \textit{FlatCSR}, which is capable of handling non-contiguous flatten tasks within a GPU kernel. %\textcolor{blue}{More details are in ~\cref{sec.method.sea.sparse_attn,sec.flat_csr,sec.flatcsr_discussion}.}
+    \item We showcase the interpretability of our method by visualizing the estimated sparse attention matrix and comparing it to the teacher's attention matrix. Our estimator can estimate both self-attention and causal attention.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+\textbf{Sparse Attention for Efficient Transformers.}
+Sparse attention can be categorized into methods using static and dynamic attention masks. 
+For static attention masks, Longformer \citep{longformer} and BigBird \citep{bigbird} introduce heuristic patterns,
+but since token relationships may not fit to those heuristics, it can be challenging to achieve state-of-the-art performance for every task.
+Hence, some recent methods focus on learning to sort or cluster the tokens to better fit static masks \citep{synthesizer, reformer, sinkhorn}.
+However, as these works still operate based on static patterns, a more flexible and learnable setting is necessary since patterns in attention are unavoidably dynamic and data-dependent, as shown in TDSA~\citep{tdsa}, which learns to estimate an attention mask.
+However, TDSA still performs quadratic attention when generating dynamic sparse attention masks.%, further works that generate data-dependent dynamic patterns within linear complexity are required.
+
+\textbf{Kernel and Low-rank Methods for Efficient Transformers.}
+Recent works either focus on using kernel-based methods \citep{performer, cosformer} or combining kernel and sparse methods \citep{scatterbrain}. 
+For example, Performer~\citep{performer} uses a positive-definite kernel approximation to approximate the softmax attention mechanism but comes with non-negligible approximation errors and therefore is not generalizable on every task.
+To handle this problem, Cosformer \citep{cosformer} replaces the non-linear approximate softmax operation of Performer with a linear operation that contains a non-linear cosine-based re-weighting mechanism.
+But again, the cosine weighting scheme is a heuristic which limits it to approximating attention with a specific pattern, which may be a downside for attention matrices which do not follow the fixed heuristic pattern, as shown in \cref{exp.figure.attention} (subfigure a, bottom-left).
+Another work, Scatterbrain \citep{scatterbrain} proposes combining sparse and low-rank methods to approximate attention, by separately applying both and then summing the result together. 
+While this is a promising approach, it still cannot straightforwardly benefit from direct attention matrix distillation. 
+
+
+\section{\textbf{SEA}
+
+
+\textbf{Preliminaries.}
+We first define notations used for the attention mechanisms. 
+We define the following real matrices: $\mQ, \mK, \mV \in \R^{T \times d}$.
+The attention matrix $\mA$ is defined as $\mA = \text{softmax}(\mQ \mK^\top) \in \R^{T \times T}$.
+Let $\mC = \mA \mV \in \R^{T \times d}$ be the context feature of the attention lookup, and $T$ be the length of the input sequence, and $d$ be the size of the head embedding dimension. We use $\odot$ to denote elementwise multiplication which may be applied between similar sizes matrices or on the last dimension and repeated over prior dimensions as is the case when applied to a matrix and vector. 
+We define $K$ as the width of the compressed matrix, $k$ as a value which controls the sparsity of an attention matrix. The matrix superscript $*$ (\eg $\mA^*)$ indicates a sparse matrix, and a superscript $\hat{}$ (\eg $\hat{\mA})$ refers to the compressed $T \times K$ space.
+Let $\mathbb{KL}(p, q)$ and $\text{MSE}(x, y)$ be the standard KL divergence and mean-squared error, respectively. All matrices may also contain a batch ($B$) and head ($H$) dimension, but we omit this for simplicity unless otherwise specified.
+
+\textbf{Performer (FAVOR+).}
+We define the simplified notation of FAVOR+~\citep{performer}.
+We omit details, such as the kernel projection matrix, for the convenience of reading. 
+The output of FAVOR+ is defined as $\text{FAVOR+}(\mQ, \mK, \mV) = \phi(\mQ) \times (\phi(\mK)^\top \phi(\mV)) \in \R^{T \times d}$.
+As there is no need to construct the full $T \times T$ attention matrix, the FAVOR+ mechanism scales linearly.
+
+\subsection{\textbf{SEA} Attention}
+\label{sec.method.sea}
+
+SEA consists of two main phases that are depicted in~\cref{exp.figure.model_structure}: (1) \textbf{Attention Estimation} (kernel-based), and  (2) \textbf{Sparse Attention Mask Generation} and Subsequent \textbf{Sparse Attention}. 
+In step (1), we estimate a compressed attention matrix $\hat{\mA}$ by fixing the size of one dimension to be $K$, where $K \ll T$ using the kernel-based method Performer and a simple decoder.
+In step (2), we build an attention mask from the values in $\hat{\mA}$ using one of our novel grouped top-$\hat{k}$ selection methods depicted in~\cref{method.figure.topk_grouping}. 
+We then interpolate the mask to form a sparse mask on the full attention matrix $\mA$, resulting in a sparse attention matrix $\mA^*$. Then, we perform the sparse $\mA^* \mV$ multiplication to complete the procedure. By using a kernel-based estimator, as well as a sparse attention matrix, we take advantage of the complementary aspects of their representation spaces, as shown in previous work~\citep{scatterbrain}.figure.model_structure}.
+\textbf{Attention Matrix Estimation.}
+The intuition for $\hat{\mA}$ is to compress one dimension of the matrix in a way analogous to compressing one dimension of an image. We ultimately want the values within the compressed attention matrix to be similar to the full attention matrix in the same way that compressing one dimension of an image creates a distorted image which is semantically similar to the full image. 
+For this task, we use the Performer~\citep{performer} and a decoder, and treat the output as our estimated attention matrix. 
+Once this attention matrix `image' is obtained, it can be interpolated to decompress it into an approximation of the full attention matrix for distillation during training, or likewise, we may also perform top-$\hat{k}$ selection on the compressed matrix in order to construct a mask for sparse attention. 
+Our attention matrix estimation starts by passing $\mQ$, $\mK$, $\mV_{\text{cat}}$ to the kernel-based linear attention method, Performer~\citep{performer}, where $\mV_{\text{cat}} = [\mV_I; \mV] \in \R^{T \times 2d}$ and $\mV_I$ is obtained by performing nearest neighbor interpolation on the identity matrix $\mI \in \R^{d \times d}$ to modify the first dimension resulting in a matrix $\mV_I \in \R^{T \times d}$. 
+We include $\mV_I$ in $\mV_{\text{cat}}$ because the output of Performer can be considered as the attention matrix when $\mV = \mI \in \R^{T \times T}$, (\eg $\mQ(\mK^\top \mI) = \mQ\mK^\top$), as shown by~\citet{performer}. 
+Therefore, passing $\mV_I$ together with $\mV$ may enable a more accurate estimation of the attention matrix by the decoder described in the next section.
+This results in the context encoding $\mC_{\text{perf}} = \text{FAVOR+}(\mQ, \mK, \mV_{\text{cat}}) \in \R^{T \times 2d}$.
+
+\begin{wrapfigure}[9]{R}[0pt]{0.3\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/cnn_visualize.pdf}
+\captionof{figure}{
+Visualization of Input and Output of CNN Decoder
+}\label{method.figure.cnn_visualization}
+\end{wrapfigure}
+
+\textbf{CNN Decoder.} 
+We further transform Performer's estimated output $\mC_{\text{perf}}$ with an MLP and CNN. 
+We found the CNN to be a necessary part of SEA due to the fact that convolutions provide fine-grained detail among local features, which is crucial for dynamically representing complex patterns present in the attention matrix as shown in~\cref{exp.figure.attention,method.figure.cnn_visualization}. 
+As we may consider the attention matrix as a kind of compressed `image,' a CNN is a natural choice for the decoder.
+For the decoder, we begin by concatenating the local Performer encoding $\mC_{\text{perf}}$ and the previous context $\mV$ as $\mV^\prime_{\text{cat}}=[\mC_{\text{perf}}; \mV] \in \R^{T \times 3d}$.
+We then apply an MLP $\mu: \R^{3d} \mapsto \R^{d^\prime}$ to obtain an intermediate representation $\mZ = \mu(\mV^\prime_{\text{cat}}) \in \R^{T \times d^\prime}$, where $d^\prime$ is a hyperparameter which decides the shared hidden state size.
+The resulting $\mZ$ is used for estimating the attention matrix and also for the scalers ($\mS_{\text{mix}}$ and $\mS_{\text{prob}}$) described in \cref{sec.method.sea.sparse_attn}.
+Then, before applying the CNN on $\mZ$, we apply MLP $\nu: \R^{d^\prime} \mapsto \R^{K c_h/c_s}$, where $c_s$ and $c_h$ are respective width reduction and channel expansion factors.
+We transpose and reshape to make the output $\hat{\mZ} = \nu(\mZ)$ into $\R^{H c_h \times T \times K / c_s}$.
+Finally, we apply a 2D CNN $f_\text{dec}$ which treats the extra head dimension $H$ as a channel dimension, resulting in the compressed attention matrix $\hat{\mA} = f_\text{dec}(\hat{\mZ}) \in \R^{T \times K}$ (for further details, see~\cref{sec.est_cnn}). As the decoder $f_\text{dec}$ results in a fixed width $\hat{\mA}$, we can successfully generate dynamic patterns with linear time and space complexity.
+The CNN $f_\text{dec}$ plays a significant role due to its ability to capture local patterns of the estimated compressed attention matrix.
+The depth of the CNN can be adjusted depending on the task, but we use a fixed 3-layer CNN in our experiments.
+
+\textbf{Grouped Top-$\hat{k}$ Selection.}
+Once we have the compressed attention matrix $\hat{\mA}$, we must select $k$ critical values which will be used in the final $T \times T$ sparse attention. However, since our top-$\hat{k}$ selection is held in the compressed $\hat{\mA}$, we transform $k$ to $\hat{k}$, which refers to the number of selected values in the compressed $T \times K$ attention space.
+For this, we propose four novel methods for top-$\hat{k}$ selection: \textit{per-query, per-head, per-batch}, and \textit{causal-per-batch}, where each method performs the top-$\hat{k}$ selection along different dimensions, as shown in \cref{method.figure.topk_grouping}. As noted in \cref{sec.method.sea} (preliminaries), we have previously omitted the head dimension $H$ from all matrices. However in this paragraph, for clarity, we include the head dimension $H$ so that $\hat{\mA} \in \R^{H \times T \times K}$.
+For \textit{per-query}, \textit{per-head}, and \textit{per-batch}, we gradually extend the dimension of the group, starting from the last dimension of ${\hat A}$, so that top-$\hat{k}$ selection is held in $\R^{K}$, $\R^{T \times K}$, and $\R^{H \times T \times K}$ space for each grouping method, respectively.
+Consequently, $\hat{k}$ is also adjusted to $\hat{k}_{\text{\tiny per-query}} = \hat{k}$, $\hat{k}_{\text{\tiny per-head}} = T\times\hat{k}$, and $\hat{k}_{\text{\tiny per-batch}} = H\times T \times\hat{k}$.
+Finally, we propose \textit{causal-per-batch} for causal attention, which performs top-$\hat{k}$ in $\R^{H \times K}$ space, with $\hat{k}_{\text{\tiny causal-per-batch}} = H\times\hat{k}$.
+For this, we transpose $\hat{\mA}$ to $\R^{T \times H \times K}$ and group the last two dimensions without the $T$ dimension, to avoid temporal information exchange across the time dimension.
+In our experiments, we use \textit{causal-per-batch} which shows strong performance in our ablation study on GLUE-MNLI ($K=128$, 5 epochs), as shown in \cref{method.table.ablation_k}.
+
+\begin{wrapfigure}[16]{R}[0pt]{0.3\textwidth}
+\centering
+\captionof{table}{Ablation study on grouped top-$\hat{k}$ modes} 
+\label{method.table.ablation_k}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|ccc}
+\toprule
+{\small Grouping Method}   & $k=7$ & $k=13$ & $k=25$ \\
+\midrule
+\textit{\small per-query} & 77.68 & 81.45 & 83.55 \\
+\textit{\small per-head} & 79.03 & 82.71 & 83.71 \\ 
+\textit{\small per-batch} & 80.03 & 82.94 & 84.14 \\
+\rowcolor{teagreen}\textit{\textbf{\small causal per-batch}} & \textbf{80.55} & \textbf{83.49} & \textbf{84.19} \\
+\bottomrule
+\end{tabular}
+}
+\smallskip%\par
+\includegraphics[width=\linewidth]{figures/topk_grouping.png}
+\captionof{figure}{
+Visualization of the Group of each top-$\hat{k}$ method.
+}\label{method.figure.topk_grouping}
+\end{wrapfigure}
+
+\textbf{Linear Sparse Attention Mask Generation.}
+With the obtained $\hat{\mA}$, we generate a sparse formatted binary mask $\mM^* \in \{0,1\}^{T \times T}$.
+For this, we take the following two steps: \textbf{1)} Performing our proposed grouped top-$\hat{k}$ selection from the compressed $\hat{\mA}$ to generate a binary mask $\hat{\mM} \in \{0,1\}^{T \times K}$, and \textbf{2)} interpolating $\hat{\mM}$ to the sparse formatted $\mM^* \in \{0, 1\}^{T\times T}$.
+For the grouped top-$\hat{k}$ selection, we set $k$ as a hyperparameter, which will determine the number of selected indices in each block of the binary mask $\mM^*$ depending on the top-$\hat{k}$ strategy and the attention matrix size. Note that each selection strategy has a different block (group) shape as depicted in~\cref{method.figure.topk_grouping}. 
+However, since we perform top-$\hat{k}$ on the smaller $\hat{\mA} \in \R^{T \times K}$, we must convert $k$ to a compressed $\hat{k}$ with $\hat{k}=\max(1, \round(k * K / T))$.
+Once we obtain the compressed mask $\hat{\mM} \in \{0,1\}^{T \times K}$, we interpolate it into the sparse formatted ${\mM^*} \in \{0,1\}^{T \times T}$. In the case of a very long sequence, it is possible that $\max(1, \round(k * K / T))$ evaluates to $1$, and the subsequent interpolation (pixel duplications) to create $\mM^*$ will become a function of $T$ and no longer have linear complexity, as this results in a block larger than $k$ being computed for $\mM^*$. Therefore, in order to avoid this, we enforce the number of pixel duplications in the block of $\mM^*$ to be $\min(k, \ceil{T/K})$, and uniformly space the resulting pixels within the larger block. Since we only need to check the indices where the values are 1 in the compressed $\hat{\mM}$ and put 1 in the corresponding indices in $\mM^*$, the interpolation has \textbf{linear complexity}. For further details, please refer to~\cref{sec.sparse_interp}.
+
+
+\subsubsection{Sparse Attention and Final Output Calculation within Linear Cost}
+\label{sec.method.sea.sparse_attn}
+\textbf{Sparse Attention Mechanism.}
+We calculate a re-weighted sparse attention probability $\mA^*$ by first applying a sparse masked matrix multiplication $\rho$, where $\rho(\mQ, \mK^\top, \mM^*) = \mQ\mK^\top \odot \mM^*$ followed by a softmax operation $\sigma$. Note than the $\mQ$ and $\mK$ matrices which are inputs to $\rho$ are the same $\mQ$ and $\mK$ which were inputs to the Performer. We then re-scale the weights using $\bm{s}_{\text{prob}} \in \R^{T}$ (defined later in this paragraph), so that $\mA^* = \bm{s}_{\text{prob}} \odot \sigma(\rho(\mQ, \mK^\top, \mM^*)) \in \R^{T \times T}$. Note that $\rho$ is a sparse operation and $\mM^* \in \{0, 1\}^{T \times T}$ is the previously obtained sparse binary mask using FlatCSR.
+The output of $\rho$ only needs to store the non-zero values and indices, which are the indices where $\mM^*$ has value 1.
+The softmax $\sigma(\rho(\mQ, \mK^\top, \mM^*))$ calculates the softmax probability of non-zero values in the sparse input.
+After applying $\sigma$, each row of the sparse attention matrix $\mA^*$ will sum to 1, therefore, due to the high sparsity of $\mM^*$, the resulting non-zero values after $\sigma$ will be higher than the ground truth attention matrix from the teacher. To account for this effect, we scale the attention probability using a learned weight $\bm{s}_{\text{prob}} \in \R^{T}$, where $\bm{s}_{\text{prob}} = f_{\text{prob}}(\mZ)$ ($\mZ$ was previously defined in~\cref{sec.method.sea} CNN Decoder) and $f_{\text{prob}}$ is a linear projection from $\R^{d^\prime} \mapsto \R$ followed by a sigmoid activation function.
+Since the sparse calculation of $\rho$ is only performed in the indices where $\mM^*$ has 1, the complexity follows that of $\mM^*$, which is $\mathcal{O}(T)$.
+The resulting $\mA^*$ matrix remains in a sparse matrix format.
+Afterward, we calculate the context feature as $\mC = \mA^* \mV \in \R^{T \times d}$ which has linear complexity due to the linear complexity of $\mA^*$ and $\mV$.
+The output $\mC$ is now stored in a dense matrix format.
+
+\textbf{FlatCSR: A Modified Compressed Sparse Row (CSR) Format.}
+We introduce our novel sparse operation, FlatCSR, which is an efficient implementation of the previously described sparse attention mask generation and attention operations utilizing grouped top-$\hat{k}$ selection.
+Our initial attempt for the sparse operations in our model utilized the Coordinate List (COO) sparse format.
+However, COO is not ideal because it stores every coordinate of each non-zero point and it does not take advantage of the structure provided by our grouped top-$\hat{k}$ selection, as shown in \cref{table.baseline.coo_csr_latency}. 
+Therefore, we eventually adopted the CSR sparse format instead of COO, as it uses less memory and schedules the per-row computations wisely using pre-constructed rows from our grouped top-$\hat{k}$ selection.
+We present a detailed explanation of FlatCSR and further discussions in \cref{sec.flat_csr}.
+
+\input{tables/sparse_coo_csr}
+\textbf{Output Calculation.}
+For the final output, instead of relying solely on the sparse attention operation previously described, we combine the output of the Performer, and the sparse attention operation to improve the ability of the highly sparse attention matrix to look up global information. 
+The final output $\mC_{\text{sea}}$ is computed as a summation of two terms $\mC$ and $\mC_{\text{avg}}$, each obtained from $\mA^*$ and $\hat{\mA}$ respectively.
+ First, we calculate the importance score of each token by averaging every row of $\hat{\mA}$, resulting in $\hat{\vi} = \frac{1}{T} \sum_{t=0}^{T}{\hat{\mA}_{t, :}} \in \R^{K}$. We then interpolate $\hat{\vi}$ to $\vi \in \R^{T}$ and subsequently perform weighted average pooling of $\mC_{\text{avg}} = \vi^\top \mV \in \R^{d}$.
+In causal attention, this global pooled context feature $\mC_{\text{avg}}$ is replaced with an accumulated average of the tokens in $\mV$ such that $\mV_j = \frac{1}{j} \sum_{i=1}^j \mV_i$.
+We mix $\mC_{\text{avg}}$ and $\mC$ using learned weight $\bm{s}_{\text{mix}} = f_{\text{pool}}(\mZ) \in \R^{T}$, with $f_{\text{pool}}$ composed of a linear transformation and sigmoid activation $f_{\text{pool}}: \R^{d^\prime} \mapsto \R$.
+$\mC_{\text{sea}}$ is calculated as $\mC_{\text{sea}} = \bm{s}_{\text{mix}} \odot \mC + (1-\bm{s}_{\text{mix}}) \odot \mC^\top_{\text{avg}}$.
+\subsection{Training SEA Attention}
+\label{sec.method.train}
+For training SEA, we first replace the attention mechanism of a pretrained teacher transformer model with our SEA attention mechanism.
+Then, we use knowledge distillation (KD) \citep{kd_hinton} to train the newly added SEA attention parameters while adapting the original weights to SEA attention.
+Our training scheme is similar to previous transformer KD work \citep{tinybert} since we approximate the context features and attention matrices.
+However, we further add an objective for the compressed estimated attention matrix $\hat{\mA}$ to match the teacher attention matrix. 
+With $\mathcal{L}^{(i)}$ signifying a loss for layer $i$, our overall training loss $\mathcal{L}_{\text{sea}}$ is given as the following, with each term described in the following paragraph:
+
+\begin{align}
+\mathcal{L}_{\text{sea}} = \frac{1}{L}\left(\sum_{i=1}^L \mathcal{L}_{\text{approx}}^{(i)} + \mathcal{L}_{\text{prob}}^{(i)} + \mathcal{L}_{\text{context}}^{(i)} + \mathcal{L}_{\text{kd}}^{(i)} \right) + \mathcal{L}_{\text{kd\_task}} + 
+\mathcal{L}_{\text{task}} 
+\label{eq.total_loss}
+\end{align}
+
+To calculate $\mathcal{L}_{\text{approx}}$, we perform nearest neighbor interpolation to the estimated attention matrix $\hat{\mA}_i$, and get $\mA^\prime_i \in \R^{T \times T}$ in order to match the shape of the teacher attention matrix $\tilde{\mA}_i \in \R^{T \times T}$.
+Then we apply both KL divergence and an MSE loss between $\mA^\prime_i$ and $\tilde{\mA}_i$, $\mathcal{L}_{\text{approx}}^{(i)} = \mathbb{KL}(\mA^\prime_i, \tilde{\mA}_i) + \text{MSE}(\mA^\prime_i, \tilde{\mA}_i)$.
+Next, we calculate $\mathcal{L}_{\text{prob}}^{(i)} = \mathbb{KL}(\mA_i, \tilde{\mA}_i) + \text{MSE}(\mA_i, \tilde{\mA}_i)$ which minimizes the error between the student's $\mA_i$ and teacher's $\tilde{\mA}_i$ attention matrices.
+For $\mathcal{L}_{\text{prob}}^{(i)}$, we calculate the dense student attention $\mA_i = \sigma(\mQ_i \mK_i^\top)$ during training.
+We then add $\mathcal{L}_{\text{context}}^{(i)} = \text{MSE}(\mC_{\text{sea}}^{(i)}, \tilde{\mC}^{(i)})$ to minimize the error between the attention context feature $\mC_{\text{sea}}^{(i)}$ and teacher context feature $\tilde{\mC}^{(i)} \in \R^{T \times d}$.
+Next, to minimize the error of each transformer layer (after the attention layer and MLP), we gather the outputs of each layer $\mO_{\text{sea}}^{(i)}, \tilde{\mO}^{(i)} \in \R^{N \times T \times H*d}$ for SEA and the teacher, respectively, and calculate $\mathcal{L}_{\text{kd}}^{(i)} = \text{MSE}(\mO_{\text{sea}}^{(i)}, \tilde{\mO}^{(i)})$.
+The loss for training the $i$-th  layer is $\mathcal{L}_{\text{sea}}^{(i)}$ and is a weighted sum of each layerwise loss such that $\mathcal{L}_{\text{sea}}^{(i)} = \mathcal{L}_{\text{approx}}^{(i)} + \mathcal{L}_{\text{prob}}^{(i)} + \mathcal{L}_{\text{context}}^{(i)} + \mathcal{L}_{\text{kd}}^{(i)}$. We omit the weight term on each sub-task loss for simplicity; details are in \cref{sec.train_hyperparam}.
+We then calculate knowledge distillation loss from the model output logits $\mathcal{L}_{\text{kd\_task}} = \mathbb{KL}(\mP, \tilde{\mP})$, where $\mP \in \R^z$ is model output logit.
+Finally, we sum together the average layer-wise loss and the downstream task loss $\mathcal{L}_{\text{task}}$ into the SEA training loss given in~\cref{eq.total_loss}.
+
+
+\section{Experiments}
+
+\label{sec.exp}
+
+\subsection{Causal Language Modeling}
+\label{sec.exp.causal}
+
+We further evaluated SEA on the language modeling task on Wikitext2 \citep{wikitext2} with various OPT \citep{opt} variants, which involves causal attention.  
+We selected two representative baselines, Reformer \citep{reformer} and Performer \citep{performer}, which represent the sparse attention and kernel-based linear attention methods, respectively.
+In \cref{table.baseline.opt,table.baseline.glue}, Reformer shows unpredictable performance between the tasks, exhibiting strong performance in text classification (\cref{table.baseline.glue}), and the worst result in causal language modeling (\cref{table.baseline.opt}).
+In contrast, our proposed method, SEA attention, performs the best in both cases with the closest perplexity score to the vanilla OPT and even surpasses the quadratic attention model on OPT-125M in~\cref{table.baseline.opt}. 
+In \cref{exp.figure.opt_baselines}, we show a trade-off between computational cost and perplexity.
+Our method exhibits more latency, since we utilize both kernel-based and sparse attention within our model (detailed latency breakdown in \cref{exp.figure.complexity}).
+Therefore, we discuss the latency and memory trade-off of our method in \cref{sec.exp.efficiency}. We note, however, that even though SEA uses both Performer and sparse attention modules, the convergence rate is much faster than both solo baselines, as depicted in~\cref{exp.figure.opt_curve} due to the direct attention distillation from the quadratic teacher. 
+\subsection{Text Classification}
+\label{sec.exp.classification}
+We perform text classification evaluation of SEA on the GLUE~\citep{glue} benchmark with BERT~\citep{bert}.
+We train SEA attention by adapting to the fine-tuned model, as described in \cref{sec.method.train}.
+In \cref{exp.figure.bert_baselines}, we show a trade-off between computational costs and various performance scores.
+We test the following baseline methods: Reformer, Sinkhorn \citep{sinkhorn}, Performer, Cosformer \citep{cosformer}, and Synthesizer \citep{synthesizer} (see \cref{sec.exp.glue} for further experiment details). 
+In all tested subsets, SEA achieves the top performance and maintains competitive latency and memory costs.
+In \cref{table.baseline.glue}, we show results of the tested baselines within the same constraints by limiting all the baselines and our method to have the same bucket size in sparse attentions and the same number of random projection feature sizes in kernel-based attentions.
+To summarize, our method achieves higher accuracy than all linear baselines while maintaining competitive performance in terms of latency and memory usage. 
+SEA comes within $0.1$\% accuracy of quadratic attention on MNLI in~\cref{table.baseline.glue}, and in~\cref{sec.exp.dynamic_k,exp.figure.opt_dynamic_k,exp.figure.bert_dynamic_k} we show we can dynamically adjust $k$ after training to outperform quadratic attention.
+
+\subsection{Dynamically Adjusting \texorpdfstring{$k$}{k}}
+\label{sec.exp.dynamic_k}
+
+In \cref{exp.figure.opt_dynamic_k,exp.figure.bert_dynamic_k}, we experiment with dynamically adjusting $k$ after training with a fixed value of $k$ on the Wikitext2 and MNLI dataset.
+We find that increasing $k$ also increases the accuracy without the need for any further training.
+This means even after fine-tuning the SEA, our model still preserves pretrained knowledge and increases accuracy when the constraint on $k$ is relaxed.
+Therefore, this characteristic helps users to design flexible and dynamic models that can adapt to real-time service demands and cost constraints by dynamically adjusting $k$. For example, considering that lower $k$ leads to a lower computational cost as shown in \cref{exp.figure.opt_baselines} and \cref{exp.figure.bert_baselines}, if a given situation calls for lower computational cost, $k$ can be minimized, while if accuracy is more important, $k$ can be set to a higher in real-time.
+In addition, surprisingly, increasing $k$ after training makes the model perform better than the vanilla quadratic model.
+In \cref{exp.figure.opt_dynamic_k}, the vanilla baseline shows a perplexity score of $29.2$, however, \textit{all SEA models} ($k=32, 64,128$) surpass this when we increase $k$ after training.
+
+
+
+\section{Efficiency of SEA Attention Computation}
+
+\label{sec.exp.efficiency}
+
+In this section, we provide the memory usage and latency experiment results of our method with different sequence lengths $T$.
+In \cref{exp.figure.complexity}, we show that our resource usage tendency is $\mathcal{O}(T)$.
+We test SEA attention with the \textit{causal per-batch} top-$\hat{k}$ grouping mode with our FlatCSR implementation.
+
+\textbf{Peak Memory Usage.}
+In \cref{table.benchmark_bert.vram_baseline-vram_perlin} and \cref{exp.figure.complexity} (top-left), we compare peak memory usage in mega-bytes for each attention method.
+Compared to baselines, SEA attention shows competitive peak memory usage.
+Our method shows an 81.05\% reduction in peak memory usage compared to quadratic attention at sequence length $2^{13}$. 
+Our method consumes memory only about 78.81\% compared to Reformer, while consistently maintaining higher accuracy as shown in \cref{exp.figure.opt_baselines,exp.figure.bert_baselines,table.baseline.glue,table.baseline.opt}.
+Moreover, our methods successfully operate with a competitive memory budget with other linear attention methods on all sequence lengths (shown in \cref{table.benchmark_bert.vram_baseline-vram_perlin,exp.figure.complexity}), while quadratic attention exceeds memory capacity above $2^{13}$.
+In summary, our method reduces memory complexity to $\mathcal{O}(T)$, and exhibits less memory usage than Reformer.
+
+\textbf{Latency.}
+In \cref{exp.figure.complexity} (top-right), we compare the latency between SEA and our linear attention baselines, showing that SEA scales linearly. 
+Our model only incurs 32.72\% of the latency cost of quadratic attention in~\cref{exp.figure.complexity} for a sequence length of $2^{13}$ where quadratic attention runs out of memory.
+SEA also shows better performance with a similar latency to Reformer, as shown in \cref{exp.figure.bert_baselines} (bottom-left). 
+However, our method also shows a latency-accuracy trade-off in \cref{exp.figure.bert_baselines}, where some baselines such as Sinkhorn, Cosformer, and Performer show better latency but worse accuracy than our SEA.
+We break down the latency of each component of our proposed method in \cref{exp.figure.complexity}~(bottom). 
+The dense operations use 47.45\%, FlatCSR sparse operations use 46.28\%, and the other operations, mainly permute and reshape, comprise 6.27\% of latency.
+However, in the COO sparse format, the dense operations use 13.31\%, and COO sparse operations comprise 86.68\% of the latency cost.
+As a result, the COO format is \textit{6.63$\times$ slower} than our novel FlatCSR format as shown in \cref{table.baseline.coo_csr_latency}.
+
+\begin{figure}[t]
+\begin{center}
+\makebox[\textwidth]{
+    \includegraphics[height=8.75em]{
+    figures/sparse_attention_visualization.png}
+    \hspace{-0.11in}
+    \raisebox{-0.35em}{
+    \includegraphics[height=8.75em]{
+    figures/estimation_visualization.pdf}
+    }
+}
+\caption{\small 
+\textbf{(left)} Intermediate attention examples. \textbf{(right)} The first row is the attention probability of the teacher model, and the second row is the compressed attention interpolated to full size. Interpolation to the full size attention matrix is for visualizing our estimated attention $\hat{\mA}$ and is not part of the regular linear inference procedure. \textbf{(a)} MNLI with BERT-base ($K = 128$) \textbf{(b)} Wikitext2 with OPT-125m ($K = 256$). 
+}\label{exp.figure.attention}
+\end{center}
+\end{figure}
+
+
+
+\section{Visualization of Estimated Attention from SEA Attention}
+
+\label{sec.exp.visualize}
+
+\begin{wrapfigure}{r}{0.45\textwidth}
+\begin{center}
+\includegraphics[width=\linewidth]{figures/masking_process_tiny.pdf}
+\caption{
+Visualization of intermediate buffers during masking and sparse attention.
+}
+\label{exp.figure.masking_process_tiny}
+\end{center}
+\end{wrapfigure}
+
+In \cref{exp.figure.attention} (right-a), using BERT and the MNLI dataset, we visualize the interpolated estimated attention matrix $\hat{\mA}$ from SEA and compare it with the attention matrix of the teacher model $\tilde{\mA}$.  
+The learned estimator of SEA attention shows the ability to predict various attention shapes from the original finetuned BERT model.
+As can be seen, our estimator learns well-known fixed patterns, such as the diagonal but also dynamic patterns that require contextual interpretation.
+In \cref{exp.figure.attention} (right-b), we show the visualization of causal attention commonly used in generative models. 
+In the causal-attention setting, we observe a diagonal attention probability with wavy or chunked diagonal lines, patterns that cannot be handled by previous heuristic linear attention mask patterns. 
+However, our estimator still shows great predictions on such highly variant patterns. 
+In addition, in~\cref{exp.figure.masking_process_tiny}, we show our compressed attention $\hat{\mA}$, top-$k$ compressed mask $\hat{\mM}$, sparse mask $\mM^*$, and sparse attention $\mA^*$.
+
+Moreover, our model can perform well even if the estimated attention is slightly different from the teacher's, thanks to grouped top-$k$, which drops all values that are not selected in the top-$k$ procedure.
+For example, in \cref{exp.figure.attention} (left-bottom), we show a sparse attention matrix after masking the estimated matrix with our grouped top-$k$ selection masks.
+Although the estimated attention matrix seems somewhat different from the teacher's \cref{exp.figure.attention} (left-middle), the resulting sparse attention pattern \cref{exp.figure.attention} (bottom-left) seems quite similar to the teacher's after applying the top-$k$ mask.
+Further visualization results can be found in \cref{sec.attention_vis}.
+
+
+\section{Conclusion and Discussion}
+
+
+Our proposed method, SEA attention, shows state-of-the-art performance for integrating linear attention with pretrained transformers, as we show empirically in \cref{sec.exp}.
+The critical change over existing works is that we estimate the attention matrix in a compressed size using kernel-based linear attention to form a compressed sparse attention mask which can be decompressed into a full sparse attention mask to overcome the quadratic cost.
+By doing so, we can preserve the dynamic and complex attention patterns of the pretrained teacher transformer model through direct attention matrix distillation.
+Furthermore, SEA also provides interpretable attention patterns. SEA performs similarly to vanilla attention while existing works could not. We look forward to seeing future research that; may apply a learnable masking method instead of a top-$\hat{k}$ selection, such as concrete masking \citep{sttabt},
+or improve our uniform interpolation by some non-uniform or learnable interpolation which may provide further performance increases.
+
+

@@ -1,0 +1,189 @@
+# Isometric Representation Learning for Disentangled Latent Space of Diffusion Models
+
+- Decision: Reject
+- Avg Score: 6.25
+- Scores: 6, 8, 5, 6
+
+## Abstract
+The latent space of diffusion model mostly still remains unexplored, despite its great success and potential in the field of generative modeling. In fact, the latent space of existing diffusion models are entangled, with a distorted mapping from its latent space to image space. To tackle this problem, we present \textit{Isometric Diffusion}, equipping a diffusion model with a geometric regularizer to guide the model to learn a geometrically sound latent space. Our approach allows diffusion models to learn a more disentangled latent space, which enables smoother interpolation, more accurate inversion, and more precise control over attributes directly in the latent space. Extensive experiments illustrate advantages of the proposed method in image interpolation, image inversion, and linear editing.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes a method for training models based on the characteristics of the internal representations in Diffusion models. The foundation of this approach lies in the discovery that the deepest feature map of Diffusion models possesses semantically locally linear properties. The paper leverages this finding to train the model such that the Slerp (Spherical Linear Interpolation) trajectory in noise space closely approximates a geodesic in h-space, leading to a latent space that aligns more accurately with human perception. To apply the isometric loss to Diffusion, the authors successfully trained the model by utilizing assumptions applicable around T, which is close to a Gaussian distribution. In addition to the FID and PPL metrics, a new metric is introduced. Results for Unconditional Diffusion Models (DMs) across four different datasets are presented, demonstrating that this learning approach results in a latent distribution that mirrors human perceptual similarity more closely.
+
+### Strengths
+The approach taken in this paper is immensely intriguing. By assuming a manifold and designing a loss that aligns with this manifold, the paper provides geometric intuition through the results obtained from training the model. Complex equations are systematically explained and well-written. The paper is mathematically rigorous, and I was unable to find any significant errors.
+
+### Weaknesses
+I'm having trouble grasping the advantages of having a semantically linear feature in the latent space through Slerp. The benefits and points that can be gained through such a characteristic feel ambiguous and unclear.
+
+The issue I'm noticing is that the effectiveness of this approach seems to be confined to scenarios where the noise is close to Gaussian, due to the assumptions made. Consequently, it appears that the linearity in the H-space is maintained only when the noise is Gaussian, which I find to be a kind of limitation. Specifically, the method relies on the assumption that the deepest feature map of the diffusion model possesses semantically locally linear properties, and this assumption seems to hold only when the noise distribution is close to Gaussian. This limits the applicability of the method to the later stages of the diffusion process where the noise is indeed close to Gaussian, and it is unclear how this method would perform in the earlier stages where the noise distribution is far from Gaussian.
+
+Regarding the results, I'm also skeptical about how semantically linear they truly are. In Figure 1, the transition depicted is from a young man to a middle-aged man, and then to a young woman. While I can see that there is a certain degree of semantically linear progression compared to the second row, I'm not convinced that the results go beyond that. It feels like the paper could provide a more convincing demonstration of the semantically linear nature of these transformations. The interpolation seems to capture a change in age and gender, but it is not clear if this is a truly linear progression in the semantic space or just a smooth transition between different modes in the data distribution.
+
+### Questions
+Could you kindly explain what is the advantage of having semantically linear feature (noise)?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes a Isometry Loss to regularize the learning of the latent space in diffusion models such that the latent space is disentangled. The Isometry Loss is derived by enforcing the mapping between the noise space and the feature space to be an isometry using the Jacobian of the encoder and the Riemannian metrics of the two spaces. The authors did experiments on the CIFAR-10, The CelebA-HQ, LSUN-Church and the LSUN-Bedrooms datasets, and showed that the proposed method can generate realistic images and can produce smoother transitions between two images than baseline method.
+
+### Strengths
+1. This paper is well-motivated, and is a pioneer paper to address the disentanglement in Diffusion Models. The authors observed that the noise points in the latent space of diffusion models lie on a hypersphere, and directly performing interpolation between two noise points in the Euclidean space does not produce meaningful images. The authors proposed a solid method to address this. They introduced stereographic projection of the hypersphere and the corresponding inverse projection. They also introduced the Riemannian metrics of the stereographic projection space and the feature space. They derived the Isometry Loss by enforcing the noise space and the feature space as an isometry. The Isometry Loss is used as a regularizer for training diffusion models. 
+
+2. The proposed regularizer appear easy to use. There are only two hyperparameters: the regularization parameter and the ratio of time steps to skip the Isometric Loss. The hyperparameters are easy to tune according to ablation study. 
+
+3. The results are good. The authors first evaluate the method on an $S^2$ manifold. The authors illustrated that the method can unfold the sphere perfectly on a 2-d plane, while an autoencoder fails to. The authors evaluated the proposed method on CIFAR-10, The CelebA-HQ, LSUN-Church and the LSUN-Bedrooms datasets. The authors showed that the proposed method produced better interpolation results quantitatively and qualitatively while still maintain comparable FID scores.
+
+### Weaknesses
+I am not sure how heavy the computation of the Isometry Loss is. The authors used the stochastic trace estimator to substitute the trace of Jacobian to Jacobian-vector product (JVP). I am curious about how accurate the stochastic trace estimator is.
+
+### Questions
+I am curious about how accurate the stochastic trace estimator is.
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+4 excellent
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+Even though Diffusion Models have shown impressive performance, their latent space has remained underexplored. Thus, the authors are introducing an objective function for training Diffusion Models to make $X$ space isometric. By adding the proposed objective to the original Diffusion objective, the authors show that the $X$ space can have smoother interpolation as well as better disentanglement.
+
+### Strengths
+1. Interesting idea
+2. An intuitive illustration of the effect of the proposed method in a simple setting is contained in the paper.
+
+### Weaknesses
+1. The connection between "ISOMETRIC REPRESENTATION LEARNING" and "DISENTANGLED LATENT SPACE" is not adequately explained. The authors assert that isometric mapping from X-space to H-space leads to a more disentangled X-space, but the reasoning behind this claim is not immediately clear. More rigorous definitions and explanations are needed to establish this relationship, especially considering the various definitions of disentanglement in generative modeling.
+
+2. The necessity of an isometric X-space is questionable, particularly when it leads to a degradation in performance metrics like FID. While the authors mention that the H-space in [1] is considered a reliable semantic space, it is unclear why achieving isometry in X-space is preferable, especially if it compromises the overall generation quality. The trade-offs between isometry, disentanglement, and performance need to be explicitly addressed.
+
+3. The authors assume that the H-space in [1] and the H-space in their proposed method have similar properties, even though they train diffusion models from scratch with an additional objective. This assumption needs further justification. How can we be sure that the introduction of the isometric objective does not alter the fundamental properties of the H-space, potentially affecting its semantic relevance?
+
+4. The paper lacks a comparison with [2], which also addresses the issue of meaningful and decodable representations in diffusion models. Given that the proposed method requires training from scratch, a direct comparison with [2] is crucial to evaluate the relative merits and drawbacks of each approach. The absence of this comparison weakens the paper's contributions.
+
+5. The notations in the paper are confusing. Specifically, the roles of $z$ and $z'$, the implementation of $\it{f}$ in Fig. 2, the meaning of $\phi$ in Fig. 2, and the input of $\mathcal{L}_{iso}$ are not clearly defined. These ambiguities hinder the reader's understanding of the proposed method and need to be clarified.
+
+6. The introduction does not sufficiently motivate the need for the proposed method. While the authors mention the limitations of manipulating attributes indirectly through H-space, the practical advantages of an isometric X-space are not convincingly presented. A stronger case needs to be made for why this approach is necessary and how it addresses the shortcomings of existing methods.
+
+### Questions
+1. The reviewer understands $H$ as a pre-trained feature space of UNet (i.e., the bottleneck layer). There are several questions regarding the $H$ space that are not clear to me.
+    1. The authors have mentioned in the Introduction that “However, manipulating attributes indirectly through $H$ is not fully desirable. One reason is additional computations accompanied with this indirect manipulation, as it requires two times of the score model evaluations and training an extra neural network to find local editing directions at every point of $H$.”
+        1. What does it mean by “as it requires two times of the score model evaluations”? Can it be understood without knowing the paper by Kwon et al. [1]? I also read Section 2.2, but it is still not understandable. Why does the method in [1] require sampling twice? and why does not it happen in the proposed method in this paper?
+        2. From this part “training an extra neural network to find local editing directions at every point of $H$”, I would assume that it means the method in [1] requires to find a semantically meaningful direction by training an additional module. Here is a question. Why does it not happen in $X$ space while it is needed in $H$ space?
+2. What are the $z$ and $z’$?
+3. What is the $\it{f}$ on the bottom of Fig. 2? I saw the definition “A mapping between two Riemannian manifolds”, but it is not clear how it is implemented. Also, using a different letter with the encoder of $s_\theta$ is recommended to avoid any confusion.
+4. What is $\phi$? in Fig. 2?
+5. What is the input of $\mathcal{L}_{iso}$?
+6. I recommend moving the illustration part (Fig. 4 and its description) to the beginning of Section 3. 
+7. What are the interesting applications that the proposed method shows better performance than the baseline?
+8. How was the baseline interpolation done? Is it based on the naive slerp? If so, from my perspective, it is mandatory to compare the results with [1] since the authors have mentioned that [1] is an important related work. 
+9. How is the semantic direction in Fig. 8 found? It would be much better to compare if the images on the starting/ending points are the same. 
+10. The authors argue their proposed methods have 1. better interpolation and 2. better disentanglement. What is the measure supporting the second argument?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes to learn a representation for diffusion models, which is approximately isometric to the representation associated with the score function. The latter was found to be useful by Kwon et al (2023). The main benefit of the proposed approach is that it drastically simplifies the way in which the latent representation can be operationalised.
+
+### Strengths
+* The paper approaches an important problem: finding a way to leverage diffusion models for representation learning.
+* The approach is quite pragmatic enabling its use in reasonably large models.
+* Experiments demonstrate feasibility.
+* The mathematical explanation is simple and meaningful (which is a very good thing).
+
+### Weaknesses
+ * Several key experiments are highly subjective. For example, the opening example of Fig 1 claims that the proposed approach is better than spherical interpolation. In my subjective view, the opposite seems true. Which method actually is better is not obvious to me. The interpolation quality is assessed visually, and it is unclear how the presented examples were chosen. A more systematic approach to evaluating interpolation quality is needed, perhaps by quantifying the smoothness of the transitions or by using perceptual metrics. 
+* I very much miss an early definition of 'isometry'. This is defined rather late in the paper, yet the term is used quite a bit in the first few pages to argue that the proposed approach is sensible. The lack of a precise definition early on makes it difficult to assess the validity of the claims made in the introduction.
+* The paper several times claims that by being isometric all sorts of benefits are gained, e.g. the representation becomes disentangled and reflects semantics perceived by humans. Given that we are not talking about being isometric to a human perception space, then I struggle with the mathematical validity of such statements. I really wish the authors would tone down such claims, as the resulting paper would be much more convincing. The connection between isometry and human perception is not well-established, and these claims should be supported by more rigorous arguments or empirical evidence. It is not clear how the proposed method ensures that the learned representation aligns with human-interpretable semantics.
+* A superficial reading of the paper signals that the resulting representation is an isometry. However, as far as I can tell, it is only regularized towards being an isometry. I do not object to this, but I wish the communication was more clear. The paper should explicitly state that the method aims to approximate an isometry rather than achieving a perfect isometry. The distinction is crucial for understanding the limitations of the approach.
+* Table 1 claims that the obtained FID scores are 'comparable' to competing methods, but, as far as I can tell, the numbers are in fact significantly worse. The paper should provide a more accurate comparison of the FID scores and acknowledge the performance gap. It is important to be transparent about the limitations of the proposed method.
+* Many conclusions of the paper rely on visual inspection of interpolation plots. I honestly cannot tell which is better (e.g. I think DDPM looks better than the proposed method in Fig 8, but how am I supposed to determine which actually is better). The reliance on visual inspection makes the results difficult to reproduce and interpret. Quantitative metrics are needed to support the claims made based on visual inspection.
+* There is rich literature on equipping latent representations with Riemannian geometries, see e.g. "Latent Space Oddity" by Arvanitidis et al. I miss a discussion of this in the related work as much of the tooling is the same.
+
+### Questions
+* Regarding Fig 1 it visually seems like the starting and end points are different in the three rows. Are they? If so, how do I compare?
+* The 'Isometry Loss' section on page 5 proposes a specific measure. How is this different from previous isometric regularizers, e.g. the one from Lee et al.? I ask because this section reads as if it is entirely novel, whereas I suspect it might be quite similar to existing approaches for autoencoder-like models.
+* The approximation in Eq 7 seems sensible. Did you test the quality of this? I would love to see some experiments showing how much is lost through this efficient approximation.
+* I do not understand the illustration in Fig 4. As far as I can tell, panel d provides a highly distorted representation as the sphere is torn apart to fit the Euclidean topology (i.e. there's a massive topology mismatch between the sphere and the plane). What am I missing?
+* In sec 4.4 what does "$p < 0.5$" refer to? What is $p$?
+* Usually representation learning goes hand in hand with dimensionality reduction, which is not the case here. I would expect that there are fewer 'interesting' representation directions than there are image pixels (do you agree?). Does this then imply that most directions in your representation space correspond to 'weird' image changes?
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good

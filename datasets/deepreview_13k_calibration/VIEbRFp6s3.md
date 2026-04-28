@@ -1,0 +1,214 @@
+# Off-the-Grid MARL: Datasets with Baselines for Offline Multi-Agent Reinforcement Learning
+
+- Decision: Reject
+- Avg Score: 5.80
+- Scores: 6, 6, 6, 5, 6
+
+## Abstract
+Being able to harness the power of large datasets for developing cooperative multi-agent controllers promises to unlock enormous value for real-world applications. 
+Many important industrial systems are multi-agent in nature and are difficult to model using bespoke simulators. 
+However, in industry, distributed processes can often be recorded during operation, and large quantities of demonstrative data stored.
+Offline multi-agent reinforcement learning (MARL) provides a promising paradigm for building effective decentralised controllers from such datasets. 
+However, offline MARL is still in its infancy and therefore lacks standardised benchmark datasets and baselines typically found in more mature subfields of reinforcement learning (RL). 
+These deficiencies make it difficult for the community to sensibly measure progress. 
+In this work, we aim to fill this gap by releasing \emph{off-the-grid MARL (OG-MARL)}: a growing repository of high-quality datasets with baselines for cooperative offline MARL research.
+Our datasets provide settings that are characteristic of real-world systems, including complex environment dynamics, heterogeneous agents, non-stationarity, many agents, partial observability, suboptimality, sparse rewards and demonstrated coordination.
+For each setting, we provide a range of different dataset types (e.g. \texttt{Good}, \texttt{Medium}, \texttt{Poor}, and \texttt{Replay}) and profile the composition of experiences for each dataset. We hope that OG-MARL
+will serve the community as a reliable source of datasets and help drive progress, while also providing an accessible entry point for researchers new to the field
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This work introduces Off-the-Grid Multi-Agent Reinforcement Learning (OG-MARL), a repository aiming to address the lack of standardized benchmark datasets and baselines in the emerging field of offline multi-agent reinforcement learning (MARL). The motivation is to leverage large datasets from real-world industrial systems, where distributed processes can be recorded during operation. The provided datasets in OG-MARL exhibit characteristics of complex real-world environments, including partial observability, suboptimality, demonstrated coordination, etc.
+
+### Strengths
+- Benchmarking is essential in machine-learning communities as well as multi-agent learning communities.
+- This benchmark contains a variety of settings in multi-agent, such as team & individual rewards and homogeneous & heterogeneous agents.
+- This paper is well-written to some extent.
+
+### Weaknesses
+ - An explanation and comprehensive analysis of the baselines tested on the proposed dataset should be provided as well.
+- Is there any measurement of the diversity of the trajectories in the dataset?
+- Please clarify the difference between this work and another recent work [1].
+
+### Questions
+Please refer to the weakness section
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper introduces the OG-MARL openly available offline datasets and baselines for MARL. The datasets cover a range of scenarios, including micromanagement in StarCraft 2, continuous control in MAMuJoCo, diverse environments in PettingZoo, train scheduling in Flatland, and energy management in Voltage Control/CityLearn. The paper tries to address the lack of benchmark datasets and baselines in offline MARL and aims to facilitate research and comparison of MARL algorithms.
+
+### Strengths
+- the paper addresses the lack of commonly shared benchmark datasets and baselines in the field of offline MARL.
+- the proposed data contains data on a large collection of various MARL environments, including SMAC, MAMuJoCo, PettingZoo, Flatland, and Voltage Control/CityLearn. 
+- the authors provide detailed descriptions of the different environments and datasets, including information about the composition of the datasets and visualizations of the behavior policy.
+
+### Weaknesses
+ - it would be beneficial to include performance comparisons with more existing algorithms and baselines on the provided datasets. For instance, federated offline MARL, etc
+- it would be beneficial if the paper could provide a list of the size of the data and the approximate amount of computation resources required for training the baseline.
+- it seems the dataset has fewer scenarios with competitive case, adding more competitive datasets would probably be helpful to make it more general.
+
+### Questions
+- For different levels of data (good, medium, etc), how do you make sure that the dataset contains a wide variety of experiences and is not biased to a certain type of policy?
+- Based on the C.1 paper, is the size of the dataset sufficiently large for large-scale experiments such as federated offline MARL?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposed off-the-grid MARL (OG-MARL) datasets with baselines for cooperative offline MARL. The datasets provide settings include complex environment dynamics, heterogeneous agents, non-stationarity, many agents, partial observability, suboptimality, sparse rewards and demonstrated coordination. The OG-MARL provides a range of different dataset types and profiles the composition of experiences for each dataset.
+
+### Strengths
+- This paper proposed the datasets of offline MARL by extending the idea of single-agent offline RL datasets such as D4RL (Fu et al., 2020) and RL Unplugged (Gulcehre et al., 2020). The datasets provide settings include complex environment dynamics, heterogeneous agents, non-stationarity, many agents, partial observability, suboptimality, sparse rewards and demonstrated coordination.
+- This paper also provided baselines for existing cooperative offline MARL such as Behaviour Cloning (BC), QMIX (Rashid et al., 2018), QMIX with Batch Constrained Q-Learning (Fujimoto et al., 2019), QMIX with Conservative Q-Learning (Kumar et al., 2020) and MAICQ (Yang et al., 2021). The results concluded that on PettingZoo environments, with pixel observations, MAICQ is the current state-of-the-art offline MARL algorithm in discrete action settings.
+- The paper is well-written and mostly has clarity.
+
+### Weaknesses
+Although this paper includes a novelty about MARL extension from single-agent RL datasets and baselines, other points seem to be ordinary.  More challenging benchmarks and more real-world scenarios, might provide more significance, as described below.
+There were also some unclear points described below.
+
+### Questions
+1. P6: The authors said that “We chose these environments because they have visual (pixel-based) observations of varying sizes; an important dimension along which prior works have failed to evaluate their algorithms”. What are the prior works specifically and why did they fail the evaluation?
+
+2. For human data (KAZ), the detailed description will be described because humans have diversity and usually the property of the human participants (e.g., age and the game experience) should be reported. If possible, comparison with the data from RL algorithms will estimate the property of human data.
+
+3. The paper mentioned about KAZ that “The players where given no instruction on how to play the game and had to learn through trial and error.” but does it mean the data may include not only “learned” data but also “learning” data? The data acquisition process can be clarified.  
+
+4. More challenging MARL benchmarks such as team sports (e.g., [1] [2]) or more real-world robotics data might provide more significance. 
+[1] Kurach et al. Google Research Football: A Novel Reinforcement Learning Environment, AAAI, 2020
+[2] Liu et al. From motor control to team play in simulated humanoid football, Science Robotics, 2022
+
+### Soundness
+4 excellent
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper proposes datasets for offline multi-agent reinforcement learning including games(real world problems) with both discrete and continuous actions. The paper also provide different types of the datasets: Good, Medium, Poor. Evaluation results of offline multi-agent reinforcement learning baselines are provided.
+
+### Strengths
+1.The dataset for offline multi-agent reinforcement learning is missing, which is important for this community. 2.The paper provides a comprehensive dataset including both games and real world problem, both discrete and continuous. 3.The paper is well written.
+
+### Weaknesses
+1.The major concern of the paper is the correctness of the implementation of the baselines. OMAR definitely outperforms CQL in many tasks, as reported in "Beyond Conservatism: Diffusion Policies in Offline Multi-agent Reinforcement Learning https://arxiv.org/abs/2307.01472". However, this is not true in Table D.5. As a dataset and benchmark paper, I think it's crucial to ensure that the results are replicable and the claims made for previous baselines are correct.
+2.The paper does not provide explanations on why an algorithm outperforms another algorithm.
+
+### Questions
+See the above section.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 5
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper introduces OG-MARL, an expansive repository made for cooperative offline multi-agent reinforcement learning (MARL). Addressing the current lack of standardized datasets and baselines in offline MARL, the authors offer a collection mirroring real-world system complexities, such as heterogeneous agents and non-stationarity. These datasets, classified into types like Good, Medium, Poor, and Replay, undergo thorough quality assurance checks. The authors have made OG-MARL publicly accessible.
+
+### Strengths
+The paper addresses a significant gap in the field of offline multi-agent reinforcement learning.   This initiative targets the lack of standardized datasets and baselines, a challenge often overlooked by many in the field of reinforcement learning.  In terms of quality, the datasets were curated and validated.   The use of diverse real-world system parameters, like heterogeneous agents and non-stationarity, makes the paper better.  This paper is also easy to follow. By providing a public repository, it contributes to the MARL research community.
+
+### Weaknesses
+1. The categorization of datasets heavily based on the quality of experience may inadvertently introduce biases. A more well-rounded evaluation could be achieved by integrating additional qualitative and quantitative metrics. For instance, beyond just 'good,' 'medium,' and 'poor,' the datasets could be characterized by the diversity of state-action trajectories, the coverage of the state space, or the presence of specific failure modes. These metrics would provide a more nuanced understanding of the dataset's characteristics and its suitability for different learning algorithms.
+
+2. The results section provides an overview of algorithmic performance but lacks analytical depth. Explain the reasons behind the observed performances, such as the underperformance of vanilla QMIX, could offer more substantial insights. For example, the authors could analyze the convergence properties of different algorithms on various datasets, or investigate the impact of different dataset characteristics on algorithm performance. This would move beyond simply reporting performance numbers and provide a deeper understanding of the challenges posed by the datasets.
+
+3. There is a similar work, "Off-the-Grid MARL: Datasets and Baselines for Offline Multi-Agent Reinforcement Learning," has been previously published in AAMAS. Does this submission introduce novel datasets or environments that extend beyond those covered in the AAMAS paper? Are there any innovative algorithmic approaches, evaluation metrics, or experimental setups that were not addressed in the prior publication? Further, how does the current paper tackle the challenges and limitations identified in the AAMAS publication?
+
+4.  While this paper undeniably provides significant aid to the research community in terms of establishing a baseline database and engineering groundwork for MARL, its depth seems somewhat superficial.  The ideas, though functional, are straightforward by testing different algorithms in different environments and producing new datasets (by using the old method).   Meanwhile, while the authors have laid out certain frameworks and methodologies, there isn't clear documentation on how one might go about implementing novel algorithms or introducing new environments within the given context.  This work is engineering important but has little contribution to the theoretical underpinnings or conceptual advancements in the field.
+
+### Questions
+Please see the Weaknesses.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

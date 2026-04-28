@@ -1,0 +1,142 @@
+# Decoupled Marked Temporal Point Process using Neural Ordinary Differential Equations
+
+- Decision: Accept
+- Avg Score: 6.33
+- Scores: 6, 5, 8
+
+## Abstract
+A Marked Temporal Point Process (MTPP) is a stochastic process whose realization is a set of event-time data. 
+MTPP is often used to understand complex dynamics of asynchronous temporal events such as money transaction, social media, healthcare, etc. 
+Recent studies have utilized deep neural networks to capture complex temporal dependencies of events and generate embeddings that aptly represent the observed events. 
+While %considerable attention has been given to understanding inter-event dependencies and their representation, 
+most previous studies focus on the inter-event dependencies and their representations,
+how individual events influence the overall dynamics over time has been under-explored. 
+In this regime, we propose a Decoupled MTPP framework that disentangles characterization of a stochastic process into a set of evolving influences from different events.   %a->b
+Our approach employs Neural Ordinary Differential Equations (Neural ODEs) \citep{bib:node} to learn flexible continuous dynamics of these influences while simultaneously addressing multiple inference problems, 
+such as density estimation and survival rate computation. 
+We emphasize the significance of disentangling the influences by comparing our framework with state-of-the-art methods on real-life datasets, 
+and provide analysis on the model behavior for potential applications.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a new modeling framework for marked point processes, where the mark distribution and the conditional intensity function are treated as two separate modeling objectives. These two objectives are assumed to depend on a common latent process that is evolved through a neural ODE model. The proposed algorithm is more computationally efficient than existing methods and provides more interpretable model estimates. The effectiveness of the algorithm is demonstrated by comparisons of five benchmark data sets to state-of-art methods.
+
+### Strengths
+The paper is well-written and the presentation is clear. The proposed idea is sound and may have a large potential impact.
+
+### Weaknesses
+No simulation studies are conducted to demonstrate the estimation accuracy of the proposed algorithm when the data-generating process is assumed in the paper. The absence of such studies makes it difficult to assess the method's performance under controlled conditions, where the ground truth is known. This is particularly important for understanding the bias and variance of the parameter estimates. Furthermore, while comparisons to state-of-the-art methods are provided on benchmark datasets, these comparisons do not fully address the estimation accuracy of the model parameters themselves, focusing more on predictive performance. It is unclear how well the learned latent process reflects the true underlying dynamics, and how this impacts the interpretability of the model.
+
+### Questions
+The paper is quite well written, so I don't have many questions. My major concern is that no simulation studies are conducted to demonstrate the estimation accuracy of the proposed algorithm when the data-generating process is assumed in the paper. Some comparisons with existing methods are desirable as well. That way, one can have better ideas of the advantages and limitations of the proposed method, in terms of estimation accuracy, predictive accuracy, and computing times.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes a new neural ODE-based framework for modeling marked Hawkes/mutually-exciting point processes. The framework models the intensity function (of time) as a summation of event-triggered trajectories, each of which solves a neural ODE with an initial state that depends on the time of each event and its mark. The additivity of event-triggered trajectories on the intensity function allows us for the efficient parallel computation for model training and the explainable analysis of the dependence between events, which is the advantage over previous neural network-based Hawkes processes.
+
+### Strengths
+- The idea of using neural ODEs to model the effect of an event on the subsequent events (essentially, triggering kernel) in temporal point processes is novel and promising.
+- The parallel computing scheme of fitting in the proposed model is beneficial for practical purposes.
+- The validity of the proposed model was evaluated on various real-world data.
+
+### Weaknesses
+ - The authors insist that an advantage of the proposed method (Dec-ODE) over conventional methods (e.g., Yang et al., 2020) is that Dec-ODE can compute multiple integrations simultaneously [Section 3.2]. But Dec-ODE demands to solve ODEs to compute integrations, which is generally more time-consuming than Monte Carlo integrations needed in conventional methods. In Experiment, there are no comparative analysis about computation time (sec/iter), and the authors’ insistence about computation efficiency remains to be verified.
+- The authors insist that an advantage of Dec-ODE over conventional methods (e.g., Yang et al., 2020) is the explainability due to the decoupled structure. But the decoupled structure has been adopted intensively in the literature, which were not in the benchmark models in Experiment. To verify the insistence, the authors need to compare Dec-ODE with references with the decoupled structure, which would make the pros/cons of the proposed model clearer.
+- RMTPP is a standard benchmark model in the literature, and should be included in comparative experiments. Otherwise, the authors need to mention the reason for not including it. 
+- The explanation of the experiment setup seems to be inadequate for reproducibility. The details of neural networks (e.g., activation functions) and the machine spec used in the experiments should be shown.
+- The detailed equation about how to compute the derivative of the likelihood regarding model parameter is not shown.
+- Discussions about the limitation of the proposed model are not in the paper.
+- To the best of my knowledge, there are sentences that seem technically inaccurate as follows, which raises a question about the paper’s quality:
+	- [3rd paragraph in Section 1] the authors introduce neural Hawkes process (Omi et al., 2019) as a marked temporal point process (MTPP), but the Omi’s paper did not consider the marks of each event. Also, there are two Omi’s papers (2019a and 2019b), but they look identical.
+	- [2nd paragraph  in Section 2] the authors explains that the modeling of intensity function is preferred over the pdf $f^*(t)$ due to the complex dynamics of $f^*(t)$, but the complex dynamics depending on the past events is not limited to $f^*(t)$.
+	- [2nd paragraph in Section 2] $\int_0^{\infty} f^*(s) ds = 0$ is correctly $\int_0^{\infty} f^*(s) ds = 1$.
+	- [3rd paragraph in Section 2] the sentence “$\mathcal{N}_g = \{ t_i \}$ is a temporal point process” seems to fail to explain the definition of $\mathcal{N}_g (t_N)$ in Eq. (2). Do the authors mean that $\mathcal{N}_g (t)$ is a counting process?
+	- [Eq. (9)] the definition of $f_{\theta}(h,t)$ is not found.
+	- [References] The authors of Transformer Hawkes process are not Yang et al., but Zuo et al.
+
+### Questions
+See Weaknesses.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes a new Dec-ODE model to learn marked temporal point processes (MTPPs). The Dec-ODE model takes into account the individual events' influence on the underlying dynamics of the whole process and models it as a neural-ODE. Since the model is decoupled into ground intensity and conditional mark distribution, the new approach can compute the integrals for different parts in parallel, making the training faster. The experiment shows the effectiveness of the new model.
+
+### Strengths
+1. The proposed approach is novel. The paper takes into account the events' influence on the underlying dynamics of the later process, which is a significant factor but under-explored before.
+2. The decoupled model facilitates parallel computing of the costly integrals that occur in the neural MTPP formulations. 
+3. The influence model gives Dec-ODE some extent of explainability as a model of MTPP.
+
+### Weaknesses
+1. The proposed approach is novel. The paper takes into account the events' influence on the underlying dynamics of the later process, which is a significant factor but under-explored before.
+2. The decoupled model facilitates parallel computing of the costly integrals that occur in the neural MTPP formulations. 
+3. The influence model gives Dec-ODE some extent of explainability as a model of MTPP.
+
+1. There is a lack of comparison in computation time across different models. The parallel computing scheme is shown to reduce the computation time of neural ODE, but it is unclear whether Dec-ODE runs faster than baseline models like THP.
+
+### Questions
+1. I could not find the reference Yang el al., 2020 for the THP baseline. Is the correct one be [1]?
+
+[1] Zuo, S., Jiang, H., Li, Z., Zhao, T., & Zha, H. (2020, November). Transformer hawkes process. In International conference on machine learning (pp. 11692-11702). PMLR.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

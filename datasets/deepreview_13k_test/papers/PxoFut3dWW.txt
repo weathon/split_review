@@ -1,0 +1,463 @@
+\title{A Simple and Effective Pruning Approach for Large Language Models}
+
+\begin{abstract}
+As their size increases, Large Languages Models (LLMs) are natural candidates for network pruning methods: approaches that drop a subset of network weights while striving to preserve performance. Existing methods, however, require either retraining, which is rarely affordable for billion-scale LLMs, or solving a weight reconstruction problem reliant on second-order information, which may also be computationally expensive. In this paper, we introduce a novel, straightforward yet effective pruning method, termed \methodlong, designed to induce sparsity in pretrained LLMs. Motivated by the recent observation of emergent large magnitude features in LLMs, our approach prunes weights with the smallest magnitudes multiplied by the corresponding input activations, on a \textit{per-output} basis. Notably, \method requires \emph{no} retraining or weight update, and the pruned LLM can be used \emph{as is}. We conduct a thorough evaluation of our method Wanda on LLaMA and LLaMA-2 across various language benchmarks. \method significantly outperforms the established baseline of magnitude pruning and performs competitively against recent method involving intensive weight update. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large language models~\citep{brown2020gpt3,openai2023gpt4} have recently reshaped the field of NLP 
+with their remarkable performance across a range of complex language benchmarks~\citep{gpt_bar,wei2022emergent,bubeck2023sparks}. However, these models, with their billions of parameters, usually require significant computational resources.
+To democratize LLMs, considerable efforts have been taken to mitigate their high computational cost. Many of the notable advancements to date have centered on model quantization, a process where parameters are quantized into lower bit-level representations. The fast pace of LLM quantization research~\citep{dettmers2022llmint8,frantar2023gptq,xiao2022smoothquant,ahmadian2023intrigue} has led to substantial resource savings for these models~\citep{sheng2023flexgen,lin2023awq}.
+Network pruning~\citep{lecun1990obd,hassibi1993obs,han2015magnitude}, on the other hand, shrinks network sizes by removing specific weights from the model -- essentially setting them to zero. Along with quantization, it is often considered another popular approach for compressing neural networks. However, it has received relatively little focus in compressing LLMs. This seems to contradict the trend of model compression in the pre-LLM era, where both approaches have received large amounts of research effort. A quick review of existing pruning methods reveals a possible reason: they typically require retraining~\citep{liu2019rethinking,blalock2020state}, training from random initializations~\citep{zhu2017prune,louizos2018sparse,gale2019state} or even an extensive iterative process~\citep{frankle2019lottery,renda2020rewind}. The sheer amount of computational resources required by LLMs limits these methods. 
+A recent LLM pruning approach, SparseGPT~\citep{frantar2023sparsegpt}, does not require traditional retraining, but still demands a computationally intensive
+weight update process.
+
+The argument concerning the need for retraining and weight update does not fully capture the challenges of pruning LLMs. 
+One might reasonably expect to obtain a fairly high-performing initialization point for retraining using existing popular pruning methods.
+However, a recent study~\citep{frantar2023sparsegpt} finds that magnitude pruning~\citep{han2015magnitude}, a well-established pruning approach, fails dramatically on LLMs even with relatively low levels of sparsity. Considering the past success of magnitude pruning on smaller networks, this result suggests that LLMs, despite having 100 to 1000 times more parameters, are substantially more difficult to prune directly.
+In this work, we address this challenge by introducing a straightforward and effective approach, termed \methodlong. This technique successfully prunes LLMs to high degrees of sparsity without \emph{any} need for modifying the remaining weights.
+We are motivated by an observation from a recent study~\citep{dettmers2022llmint8}, where a small subset of hidden state features are exceptionally large in magnitude, a property unique to LLMs.
+We find that augmenting the standard weight magnitude pruning metric with the input activations, is surprisingly effective as a measure for evaluating the weight importance. Specifically, we introduce a novel pruning metric, where each weight is evaluated by the product of its magnitude and the norm of the corresponding input activations, estimated using a small set of calibration data. Our method uses this metric to induce sparsity in pretrained LLMs by comparing weights locally within each output of linear layers and removing lower priority weights. Our approach is computationally efficient, able to be executed in a single forward pass, and requires minimal memory overhead.
+We empirically evaluate \method on the widely adopted LLaMA~\citep{touvron2023llama} and LLaMA-2~\citep{touvron2023llama2} model families. 
+Our results demonstrate \method can find efficient sparse networks from pretrained LLMs, without any retraining or weight update.
+Our approach \method outperforms the standard magnitude pruning by a large margin and also competes favorably with the prior best LLM pruning method~\citep{frantar2023sparsegpt}, while requiring a lower computational cost. 
+We hope our work serves as a baseline for future work in this area, and encourages further exploration in understanding sparsity in LLMs. 
+\begin{figure*}
+    \centering
+    \includegraphics[width=1.00\linewidth]{figures/main_final_v2-crop.pdf}
+    \caption{Illustration of our proposed method \methodlong, compared with the magnitude pruning approach. Given a weight matrix $\mbf{W}$ and input feature activations $\mbf{X}$, we compute the weight importance as the elementwise product between the weight magnitude and the norm of input activations $(|\mbf{W}|$ $\cdot$ $\|\mbf{X}\|_2)$. Weight importance scores are compared on a \textit{per-output} basis (within each row in $\mbf{W}$), rather than globally across the entire matrix.
+    }
+    \label{fig:main_figure}
+\end{figure*}
+
+
+\section{Preliminaries}
+
+\noindent \textbf{Magnitude Pruning}~\citep{han2015magnitude} is a standard pruning technique to induce sparsity in neural networks.  It removes individual weights based on their magnitudes, where weights with magnitudes below a certain threshold are removed.  In practice, this threshold is typically determined by comparing weights locally within each layer or globally across the whole network. Despite its simplicity, magnitude pruning has been used to find extremely sparse networks~\citep{frankle2019lottery} and now stands out as a strong baseline approach~\citep{blalock2020state} for neural network sparsification. 
+
+\textbf{Emergent Large Magnitude Features} have been observed in Transformer-based large language models. \citet{dettmers2022llmint8} discover that once LLMs reach a certain scale (in practice,  around 6B parameters), a small set of hidden state features emerges with significantly larger magnitudes than the remaining ones. 
+These outlier features exhibit several intriguing characteristics. First, they have very large magnitudes, about 100 times larger than typical hidden state values. Second, they are usually sparse and exist in certain feature dimensions. Finally, these outlier features are essential for the predictive capability of LLMs: zeroing out these features at inference time results in significant degradation of language modeling performance.
+
+
+
+\section{Wanda: Pruning by Weights and Activations}
+
+
+In this section, we motivate and describe our pruning method, \methodlong, which consists of two simple but essential components. First, we propose a novel pruning metric that incorporates both weights and input activations into the computation of weight importance. Second, we compare weights on a \textit{per-output} basis instead of across the whole layer, which we find is crucial for pruning LLMs effectively. An overview of Wanda is shown in Figure~\ref{fig:main_figure}.
+\textbf{A Motivating Example.} Consider a neuron with two inputs and corresponding weights: $\mbf{y}=\mbf{w}_1\mbf{x}_{1}+\mbf{w}_{2}\mbf{x}_{2}$, where $|\mbf{w}_{1}|\le |\mbf{w}_{2}|$. Now suppose the goal is to select one weight for removal while incurring less change on the output. The standard approach of magnitude pruning would always remove weight $\mbf{w}_{1}$, which may be a good strategy if input features $\mbf{x}_{1}$ and $\mbf{x}_{2}$ have similar magnitudes. However, as recently observed in LLMs~\citep{dettmers2022llmint8}, the two input features can differ significantly in scale. For instance, it is possible that $|\mbf{x}_{1}|\gg|\mbf{x}_{2}|$, and as a result, $|\mbf{w}_1\mbf{x}_1| \gg|\mbf{w}_2\mbf{x}_2|$. In this case, we should remove weight $\mbf{w}_{2}$ instead, because this removal clearly exerts a smaller influence on the neuron output $\mbf{y}$ than removing weight $\mbf{w}_{1}$.
+This motivating example with the simplest linear layer hints at a major limitation of magnitude pruning: it does not take into account input activations, which could play an equally important role as weight magnitudes in determining the neuron output. For pruning LLMs, this is especially critical considering the emergent large magnitude features found within them. Thus, as the first part of our method, we propose a pruning metric designed explicitly for LLMs to handle such a limitation, while also maintaining the simplicity of magnitude pruning.
+\textbf{Pruning Metric.} Consider a linear layer with weight $\mbf{W}$ of shape $(C_{\mathtt{out}}, C_{\mathtt{in}})$. For language models, this linear layer takes in input activations $\mbf{X}$ with a shape of $(N\times L, C_{\mathtt{in}})$, where $N$ and $L$ are batch and sequence dimensions respectively. For each individual weight, we propose to evaluate its importance by the product of its magnitude and the corresponding input feature norm. Specifically, the score for the current weight $\mbf{W}_{ij}$ is defined by:
+\begin{equation}\label{eq:prune}
+    \mbf{S}_{ij}=|\mbf{W}_{ij}|\cdot \|\mbf{X}_{j}\|_{2}
+\end{equation}
+where $|\cdot|$ represents the absolute value operator, $\|\mbf{X}_{j}\|_{2}$ evaluates the $\ell_{2}$ norm of $j$th features aggregated across $N\times L$ different tokens, and the final score is computed by the product of these two scalar values. We find that $\ell_{2}$ norm tends to work better than other norm functions (e.g., $\ell_{1}$ and $\ell_{\infty}$) in measuring activation magnitudes. This is possibly because $\ell_{2}$ norm is generally a smoother metric.
+
+This metric is interesting in several aspects. First, when the input channel of the considered weight has large magnitude features, the weight itself tends to be assigned a larger importance score even if it has a low magnitude. This tackles the problem we encounter in the motivating example. The effect can be seen in Figure~\ref{fig:main_figure}, where weights corresponding to the large magnitude feature are more likely to be preserved with Wanda. Second, its computation is straightforward. Once we obtain the norm vector of input feature activations, the weight importance can be calculated using an element-wise dot product. Last, we find empirically that this metric is robust and can be easily estimated  using a modest number of calibration samples, without access to the original training data.
+\textbf{Comparison Group.} Generally, in a pruning method, each weight is first assigned an importance score, such as the pruning metric we discussed above. 
+These weights are then grouped into \textit{comparison groups} where weights within each group are compared against one another.
+Within each comparison group, weights with lower importance scores are pruned.
+Most previous pruning methods default to comparing weights locally within each layer or globally across the whole network.
+While layer-wise and whole-network comparisons have been the popular options,
+we find that pruning LLMs could benefit from a more localized grouping. In our method, we compare and remove weights on a \textit{per-output} basis (per row in Figure~\ref{fig:main_figure}), where weight importance scores are compared locally within each output neuron.  Specifically, for a weight $\mbf{W}_{ij}$ that connects input $j$ to output $i$ inside the linear layer, we define the \textit{comparison group} for this weight as all weights connecting to output $i$:
+\begin{equation}\label{eq:granularity}
+    \mbf{G}_{ij}=\{\mbf{W}_{uv}\,|\,u=i\}
+\end{equation}
+Under this comparison group, for a pre-defined sparsity ratio $s\%$, we eliminate $s\%$ of the weights connected to \textit{each output}. This practice may seem counter-intuitive, since we are basically pruning under a stricter sparsity pattern. 
+However, we find that it is \textit{consistently better} than layer-wise pruning for LLMs. Notably, this holds true not only for our proposed pruning metric (Equation~\ref{eq:prune}) but also the standard magnitude metric.
+This shows that maintaining a balanced pruning ratio across output features is important for pruning LLMs effectively.
+
+To see if the superiority of pruning \textit{per output} over \textit{per layer} holds true in general, we conduct additional experiments on pruning image classifiers. However, we do not observe similar trend in image classification models, suggesting that our observations regarding pruning \textit{per output} might be unique to LLMs. 
+We hope this intriguing observation encourages practitioners to be more cautious in choosing the comparison group. 
+
+\begin{wrapfigure}{t}{0.525\textwidth}
+\begin{minipage}[t]{0.525\textwidth}
+\begin{algorithm}[H]
+\caption{PyTorch code for \method}
+\label{alg:wanda-pytorch}
+\begin{lstlisting}[style=Pytorch,escapeinside={(@}{@)}]
+# W: weight matrix (C_out, C_in);
+# X: input matrix (N * L, C_in);
+# s: desired sparsity, between 0 and 1;
+
+def prune(W, X, s):
+  metric = W.abs() * X.norm(p=2, dim=0) 
+  
+  _, sorted_idx = torch.sort(metric, dim=1)
+  pruned_idx = sorted_idx[:,:int(C_in * s)] 
+  W.scatter_(dim=1, index=pruned_idx, src=0)  
+  return W
+\end{lstlisting}
+\end{algorithm}
+\end{minipage}
+\end{wrapfigure}
+\textbf{Procedure.} \method can be implemented and integrated seamlessly within a \textit{single} forward pass of the LLM model, where feature norm statistics $\|\mbf{X}_{j}\|_{2}$ are estimated with a set of calibration data. We
+provide the PyTorch code of our approach in Algorithm~\ref{alg:wanda-pytorch}. Given a pretrained LLM, we compute our pruning metric from the initial to the final layers of the network. After pruning a preceding layer, the subsequent layer receives updated input activations, obtained on the pruned weights of
+the previous layer. Then the pruning metrics are computed. A recent method for pruning LLMs, SparseGPT~\citep{frantar2023sparsegpt}, requires a sophisticated weight update procedure in an iterative pruning process, while \method does not induce any additional weight update. 
+
+\textbf{Structured N:M Sparsity.}
+While \method so far has been developed for unstructured sparsity, it can be easily extended to structured N:M sparsity~\citep{mishra2021sparse}.
+Structured N:M sparsity requires that at most N out of every M contiguous weights to be non-zero. It can leverage NVIDIA's sparse tensor cores
+to accelerate matrix multiplication in practice. Wanda can be naturally extended to structured N:M sparsity, where we compare weights using the same metric among every M consecutive weights, for all weights connected to an output. 
+
+\textbf{Remark.} We discuss the connection between Wanda and a few existing works. SparseGPT formalizes the problem of pruning LLMs by solving a local layer-wise reconstruction problem, where their pruning metric and weight update procedure is inspired from Optimal Brain Surgeon (OBS)~\citep{hassibi1993obs}. The pruning metric in SparseGPT is:
+\begin{equation}\label{eq:obs_reconstruct}
+    \mbf{S}_{ij}=\left[|\mathbf{W}|^{2} / \mathrm{diag}\big((\mathbf{X}^{T}\mathbf{X}+\lambda \mathbf{I})^{-1}\big)\right]_{ij}
+\end{equation}
+Here $\mathbf{X}^{T}\mathbf{X}+\lambda \mathbf{I}$ in the denominator is the Hessian $\mbf{H}$ for the layer-wise reconstruction problem and $\lambda$ is the Hessian dampening factor to avoid the collapse of inverse computation. With careful inspection, we observe that our metric in Equation~\ref{eq:prune} is similar to the above when $\lambda$ is 0 and only the diagonal elements of the Hessian matrix $\mathbf{X}^{T}\mathbf{X}+\lambda \mathbf{I}$ are retained. Starting from the pruning metric in Equation~\ref{eq:obs_reconstruct}, we show the exact reduction steps and corresponding reduction conditions as follows: 
+\begin{equation}\label{eq:obd_reduction}
+    \mbf{S}_{ij} 
+    \overset{\lambda=0}{\vphantom{\rule{0pt}{1.1ex}}=\,} 
+    \left[|\mathbf{W}|^{2} / \mathrm{diag}\bigg((\mathbf{X}^{T}\mathbf{X})^{-1}\bigg)\right]_{ij} 
+    \stackrel{\text{diagonal}}{\underset{\text{approx.}}{\vphantom{\rule{0pt}{1.1ex}}=\vphantom{\rule{0pt}{1.1ex}}}}
+    \bigg[|\mathbf{W}|^{2} / \bigg(\mathrm{diag}(\mathbf{X}^{T}\mathbf{X})\bigg)^{-1}\bigg]_{ij} 
+    = 
+    \big(|\mbf{W}_{ij}|\cdot \|\mbf{X}_{j}\|_{2}\big)^{2}
+\end{equation}
+
+In the last reduction step, the diagonal of $\mathbf{X}^{T}\mathbf{X}$ is $\mathrm{diag}(\|\mbf{X}_{j}\|_{2}^{2})$, and thus the denominator can be simplified to $(\|\mbf{X}_{j}\|_{2}^{2})^{-1}$. The resulting metric in Equation~\ref{eq:obd_reduction} is the square of our proposed metric. This simplification substantially reduces the required computation of weight importance, eliminating the need for computing any matrix inverses. 
+
+In the 1980s, \citet{lecun1990obd} have set up a pioneering framework for neural network pruning named Optimal Brain Damage (OBD). 
+It uses second-order information without off-diagonal elements in Hessians for faster approximation. 
+Later, Optimal Brain Surgeon (OBS) develops upon OBD partly by taking into account the off-diagonal elements. 
+\method can be seen as a renaissance of OBD -- it may be viewed as applying a process similar to OBD to each neuron, with \emph{local} output reconstruction as the objective function, whereas the original OBD uses the \emph{global} training objective. This is analogous to the relationship between SparseGPT and OBS.
+
+\begin{table*}[ht!]
+\centering
+\huge
+\renewcommand{\arraystretch}{1.15}
+\setlength{\tabcolsep}{4.5pt}
+\resizebox{0.9\textwidth}{!}{
+\begin{tabular}{l c c c c}
+        & & &  & \\
+    \toprule
+    Method  & Weight Update &  \hspace{0.5ex} Calibration Data &  Pruning Metric $\mathbf{S}_{ij}$ & Complexity\\
+    \hline
+    Magnitude  & \xmark & \xmark & $|\mathbf{W}_{ij}|$ & $O(1)$ \\
+    SparseGPT & \cmark & \cmark & $\left[|\mathbf{W}|^{2} / \mathrm{diag}\bigl[(\mathbf{X}\mathbf{X}^{T}+\lambda \mathbf{I})^{-1}\bigr]\right]_{ij}$ & $O(d_\mathtt{hidden}^3)$\\
+    \gr \method  & \xmark & \cmark & $|\mathbf{W}_{ij}| \cdot \|\mathbf{X}_{j}\|_{2}$ 
+    & $O(d_\mathtt{hidden}^2)$\\
+    \bottomrule
+\end{tabular}
+}
+\caption{Comparison of \method with existing pruning algorithms on LLMs. 
+}
+\label{tab:property}
+\end{table*}
+
+A comparison of LLM pruning methods can be found in Table~\ref{tab:property}. Computing the pruning metric of Wanda has a reduced time complexity compared to SparseGPT, because it does not involve inverse computation.
+Overall, our method Wanda (Pruning by \textbf{W}eights \textbf{and} \textbf{a}ctivations)  has several attractive properties as an approach for pruning LLMs:
+\begin{enumerate}[topsep=1pt,itemsep=.3ex]%
+    \item It maintains the simplicity of magnitude pruning in the pre-LLM era, requiring no gradient computation via back-propagation or any second-order Hessian inverses, but is also highly effective in discovering sparse networks in pretrained LLMs.
+    \item \method can be done with a single forward pass of the LLM. At each layer, the pruned weights can be decided in one shot without an iterative procedure. In practice, computing the pruning metric of Wanda can be 300 times faster in pruning LLMs compared with SparseGPT. 
+    \item Unlike SparseGPT, our approach entails no weight update on pruned networks, suggesting that LLMs have effective sparse sub-networks that are \emph{exact}, instead of them merely existing in the neighborhood of the original weights.
+\end{enumerate}
+
+
+
+\section{Experiments}
+
+
+
+\textbf{Models and Evaluation.} We evaluate \method on the two most widely adopted LLM model families: LLaMA 7B/13B/30B/65B~\citep{touvron2023llama} and LLaMA-2  7B/13B/70B~\citep{touvron2023llama2} (LLaMA-2 34B is not released).
+ We measure the performance of pruned models on zero-shot tasks and language modeling. For zero-shot evaluation, we use seven tasks from EleutherAI LM Harness~\citep{gao2021harness}. Following previous works on LLM compression~\citep{xiao2022smoothquant,frantar2023sparsegpt}, we evaluate the perplexity on the held-out WikiText~\citep{wikitext103} validation set.
+\textbf{Baselines.} 
+We compare \method with two prior pruning approaches. Magnitude pruning~\citep{han2015magnitude} is a simple and strong baseline in which weights are discarded based on their magnitudes.  
+SparseGPT~\citep{frantar2023sparsegpt} is a second-order pruning method for LLMs, based on solving a layer-wise reconstruction problem.
+
+Both \method and SparseGPT require calibration data to estimate input statistics (see Table~\ref{tab:property}). To control this  variable factor, we use the \textit{exact same} set of calibration data as SparseGPT, which consists of 128 sequences with context length size sampled from  C4 training set~\citep{raffel2020c4}.
+ 
+
+
+\textbf{Sparsity.}  
+For all pruning methods, we focus on pruning the linear layers (skipping the first embedding layer and the final classification head), which account for around 99$\%$ of the total LLM parameters. We impose a uniform sparsity for all linear layers.
+We evaluate three types of sparsity: unstructured sparsity, structured 4:8 and 2:4 sparsities. The magnitude pruning baseline is extended to structured N:M sparsity in a similar spirit to our method, as described in the previous section.
+
+\begin{table*}[ht!]
+\centering
+\small 
+\renewcommand{\arraystretch}{1.2}
+\resizebox{1.0\textwidth}{!}{
+\begin{tabular}{l c c c c c c c c c }
+\toprule 
+        & & & \multicolumn{4}{c}{LLaMA} & \multicolumn{3}{c}{LLaMA-2}\\
+    \cmidrule(lr){4-7}\cmidrule(l){8-10}
+   Method & Weight Update &Sparsity & 7B & 13B & 30B & 65B & 7B & 13B & 70B \\
+    \hline
+      Dense  & - & 0$\%$ & 59.99 & 62.59 & 65.38 & 66.97 & 59.71 & 63.03 & 67.08  \\
+    \hline
+    Magnitude & \xmark & 50$\%$ & 46.94 & 47.61 & 53.83 & 62.74 & 51.14 & 52.85 & 60.93 \\
+    SparseGPT & \cmark & 50$\%$ & \tbf{54.94} & 58.61 & 63.09 & 66.30 & \tbf{56.24} & 60.72 & \tbf{67.28}  \\
+    \gr \method & \xmark & 50$\%$ & 54.21 & \tbf{59.33} & \tbf{63.60} & \tbf{66.67} & \tbf{56.24} & \tbf{60.83}  & 67.03 \\
+    \hline
+      Magnitude & \xmark & 4:8 & 46.03 & 50.53 & 53.53 & 62.17 & 50.64 & 52.81 & 60.28\\
+      SparseGPT & \cmark & 4:8 &  \tbf{52.80} & 55.99 & 60.79 & 64.87 & \tbf{53.80} & \tbf{59.15} & 65.84\\
+      \gr  \method & \xmark & 4:8 & 52.76 & \tbf{56.09} & \tbf{61.00} & \tbf{64.97} & 52.49 &  58.75 & \tbf{66.06} \\
+    \hline
+        Magnitude & \xmark & 2:4 & 44.73 & 48.00 & 53.16 & 61.28 & 45.58 & 49.89 & 59.95 \\
+    SparseGPT & \cmark & 2:4 & \tbf{50.60} & \tbf{53.22} & 58.91 & 62.57 & \tbf{50.94} & 54.86 & 63.89  \\
+     \gr   \method & \xmark & 2:4 & 48.53 & 52.30 & \tbf{59.21} & \tbf{62.84} & 48.75 & \tbf{55.03} & \tbf{64.14} \\
+    \hline
+\end{tabular}
+}
+\caption{Mean zero-shot accuracies ($\%$) of pruned LLaMA and LLaMA-2 models. Wanda performs competitively against prior best method SparseGPT, without introducing any weight update.  
+}
+\label{tab:zero_shot_results}
+\end{table*}
+
+\subsection{Zero-Shot Tasks}\label{section:zero_shot_task}
+\textbf{Comparison with Baselines.} In Table~\ref{tab:zero_shot_results}, we show the mean zero-shot accuracies on 7 zero-shot tasks of pruned LLaMA and LLaMA-2 models. Across both unstructured and structured sparsities, Wanda outperforms the well-established magnitude pruning approach by a large margin, while also rivals with the previous best approach SparseGPT. Given that no fine-tuning takes place, there is a noticeable gap between sparse pruned LLMs and the original dense LLMs. However, as the model size increases, this accuracy gap diminishes. Remarkably, unstructured 50$\%$ sparse LLaMA-65B and LLaMA-2-70B is able to match the zero-shot accuracies of their dense counterparts.
+
+\textbf{Large Sparse \textit{vs.} Small Dense.} It might be of interest to some readers on the comparison between large sparse LLMs and small dense LLMs with similar parameter counts. For zero-shot performance, we find the trend differs across the types of sparsity. For unstructured sparsity, large sparse LLMs are often better than small dense LLMs on zero-shot performance: unstructured 50$\%$ sparse LLaMA-65B (66.67$\%$) outperforms dense LLaMA-30B (65.38$\%$); unstructured 50$\%$ sparse LLaMA-2-13B (60.83$\%$) outperforms dense LLaMA-7B (59.71$\%$). For structured sparsity, the trend is reversed: without any fine-tuning, large sparse LLMs have worse zero-shot performance than small dense LLMs in general. 
+
+
+
+
+\subsection{Language Modeling}\label{section:exp_language_model}
+In Table~\ref{tab:ppl_results}, we report the perplexity of pruned LLaMA and LLaMA-2 models.
+
+Without any weight update, \method outperforms the established pruning approach of magnitude pruning by a large margin. For instance, for LLaMA-7B, \method is able to find sparse networks with a perplexity of 7.26, significantly better than the magnitude pruning baseline 17.29. This result suggests that exact and effective sparse sub-networks exist for LLMs. For unstructured 50\% sparsity,  Wanda performs on par with the prior best approach SparseGPT.  The comparison between Wanda and SparseGPT is mixed for structured sparsity. On smaller models (e.g., 7B), SparseGPT outperforms Wanda on 2:4 sparsity. Wanda is more favorable for larger models, e.g., LLaMA-30B (2:4 and 4:8) and LLaMA-2-70B (2:4).
+
+\begin{table*}[ht!]
+\centering
+\small
+\setlength{\tabcolsep}{6.5pt}
+\renewcommand{\arraystretch}{1.2}
+\resizebox{1.\textwidth}{!}{
+\begin{tabular}{l c c c c c c c c c }
+\toprule 
+        &  &  & \multicolumn{4}{c}{LLaMA} & \multicolumn{3}{c}{LLaMA-2}\\
+    \cmidrule(lr){4-7}\cmidrule(l){8-10}
+   Method &  Weight Update &Sparsity & 7B & 13B & 30B & 65B & 7B & 13B & 70B \\
+    \hline
+      Dense  & - & 0$\%$ & 5.68 & 5.09 & 4.77 & 3.56 & 5.12 & 4.57 & 3.12\\
+    \hline
+    Magnitude & \xmark & 50$\%$ &17.29 & 20.21 & 7.54 & 5.90 & 14.89 & 6.37 & 4.98\\
+    SparseGPT & \cmark & 50$\%$ &  \tbf{7.22} & 6.21 & 5.31 & \tbf{4.57} & 6.51 & 5.63 & \tbf{3.98}\\
+    \gr \method & \xmark & 50$\%$ & 7.26 & \tbf{6.15} & \tbf{5.24} & \tbf{4.57} & \tbf{6.42} & \tbf{5.56} & \tbf{3.98}\\
+    \hline
+      Magnitude & \xmark & 4:8 & 16.84 & 13.84 & 7.62 & 6.36 & 16.48 & 6.76 & 5.54\\
+      SparseGPT & \cmark & 4:8 &  8.61 & \tbf{7.40} & 6.17 & 5.38 & 8.12 & 6.60 & 4.59\\
+      \gr  \method & \xmark & 4:8 & \tbf{8.57} & \tbf{7.40} & \tbf{5.97} & \tbf{5.30} & \tbf{7.97} & \tbf{6.55} & \tbf{4.47}\\
+    \hline
+        Magnitude & \xmark & 2:4 & 42.13 & 18.37 & 9.10 & 7.11 & 54.59 & 8.33 & 6.33\\
+    SparseGPT & \cmark & 2:4 & \tbf{11.00} & \tbf{9.11} & 7.16 & 6.28 & \tbf{10.17} & 8.32 & 5.40\\
+     \gr   \method & \xmark & 2:4 & 11.53 & 9.58 & \tbf{6.90} &  \tbf{6.25} & 11.02 & \tbf{8.27} & \tbf{5.16}\\
+    \hline
+\end{tabular}
+}
+\caption{WikiText perplexity of pruned LLaMA and LLaMA-2 models. Wanda performs competitively against prior best method SparseGPT, without introducing any weight update. 
+}
+\label{tab:ppl_results}
+\end{table*}
+
+
+ 
+
+
+
+
+\subsection{Speedup} 
+\textbf{Pruning Speed.} The theoretical computational complexity of \method is lower than SparseGPT (Table~\ref{tab:property}). Here we compare their empirical pruning speed. Specifically, we measure the accumulated time for computing the pruning metric at each layer (excluding the forward pass process shared by both methods) on NVIDIA A6000 GPUs. Results are shown in Table~\ref{tab:time_overhead}. \method incurs negligible time overhead relative to SparseGPT. The fast speed of Wanda is particularly useful when pruning needs to be performed on a real-time basis, e.g., training sparse models from scratch~\citep{evci2019rig} and finding the optimal sparsity~\citep{jin2022pruning}.
+\textbf{Inference Speed.} We evaluate the inference speedup for structured 2:4 sparsity on NVIDIA A6000 GPUs. Following the evaluation setup of \citet{frantar2023sparsegpt}, we measure the latency of matrix multiplication in linear layers. We perform simulation analysis using the high-performance GEMM kernel in NVIDIA CUTLASS library. Results for LLaMA-65B (batch size of 1) can be found in Table~\ref{tab:matmul_speedup}. Structured 2:4 sparsity is able to bring notable inference speedup (around 1.6$\times$) for linear layers in LLMs.
+For end to end latency, we observe a speedup of 1.24$\times$ on LLaMA-7B (251ms as compared to 312ms).  
+Last, we emphasize that the inference speedup is not unique to our pruning method but is delivered by the inherent power of sparsity for speeding up computation. 
+
+\begin{figure*}[ht!]
+ \centering
+\begin{minipage}[l]{.48\textwidth}
+\centering
+ \small 
+\renewcommand{\arraystretch}{1.2}
+ \resizebox{1.\textwidth}{!}{
+\begin{tabular}{lccccc}
+\toprule 
+         & \multicolumn{4}{c}{LLaMA} \\
+         \cmidrule{2-5}
+    Method &   7B  & 13B  &  30B &   65B \\ \hline 
+    SparseGPT   & 203.1 & 339.0 & 810.3 & 1353.4 \\ 
+    \gr \method & \tbf{0.54} & \tbf{0.91}  & \tbf{2.9}  & \tbf{5.6}\\
+    \hline 
+    \end{tabular}
+}
+\captionof{table}{Computing the pruning metric of Wanda can be much faster (seconds) than SparseGPT.}
+\label{tab:time_overhead}
+\end{minipage}
+\hspace{1.5ex}
+\begin{minipage}[r]{.47\textwidth}
+  \centering
+ \small 
+ \renewcommand{\arraystretch}{1.2}
+ \resizebox{1.\textwidth}{!}{
+   \begin{tabular}{cccc}
+   \toprule  
+     LLaMA Layer & Dense & 2:4  & Speedup    \\ 
+     \hline 
+   \texttt{q/k/v/o\_proj}  &  3.49 & 2.14 & 1.63$\times$ \\
+    \texttt{up/gate\_proj}  & 9.82 & 6.10 & 1.61$\times$  \\ 
+    \texttt{down\_proj}  & 9.92 & 6.45 &    1.54$\times$ \\
+     \hline 
+    \end{tabular}
+}
+\scriptsize
+\captionof{table}{Speedup of matrix multiplication (ms) in LLaMA-65B, for structured 2:4 sparsity.}
+\label{tab:matmul_speedup}
+\end{minipage}
+\end{figure*}
+
+
+\section{Analysis}
+
+We study several aspects of Wanda to better understand its effectiveness in pruning LLMs. We use the LLaMA-7B model and prune to unstructured 50$\%$ sparsity, unless otherwise specified.
+ 
+\textbf{Fine-tuning.} We study how fine-tuning could recover the performance drop of pruned LLMs, as observed in the previous section. We investigate two strategies for fine-tuning LLMs: LoRA~\citep{hu2021lora} fine-tuning and full parameter dense fine-tuning. Fine-tuning is conducted on C4 training dataset and the objective is the pre-training auto-regressive loss. The pruned mask is kept fixed during fine-tuning. We fine-tune pruned LLaMA-7B with all three types of sparsities: unstructured 50$\%$, structured 4:8 and 2:4. Table~\ref{tab:finetune_results} summarizes the results for mean zero-shot accuracies and perplexity after fine-tuning Wanda pruned LLaMA-7B models.
+
+
+\begin{wraptable}{t}{0.55\textwidth}
+\begin{minipage}[t]{0.55\textwidth}
+\LARGE
+\renewcommand{\arraystretch}{1.1}
+\resizebox{1.0\textwidth}{!}{
+\begin{tabular}{lccccc}
+\toprule 
+    Evaluation &   Dense & Fine-tuning &  50\% & 4:8 & 2:4 \\
+    \hline
+    \gr \wc    \multirow{3}{*}{Zero-Shot} & \wc \multirow{3}{*}{59.99} & \xmark & 54.21 & 52.76 & 48.53 \\
+     & & LoRA & 56.53 & 54.87 & 54.46 \\
+          & & Full & \tbf{58.15} & \tbf{56.65} & \tbf{56.19} \\
+     \hline
+   \gr \wc    \multirow{3}{*}{Perplexity} & \wc \multirow{3}{*}{5.68} & \xmark & 7.26 & 8.57 & 11.53  \\
+          & & LoRA & 6.84 & 7.29 & 8.24 \\
+           & & Full & \tbf{5.98} & \tbf{6.63} & \tbf{7.02} \\
+    \hline
+\end{tabular}
+}
+\caption{Fine-tuning can mitigate the gap to dense LLM.}
+\label{tab:finetune_results}
+\end{minipage}
+\end{wraptable}
+\textit{LoRA Fine-tuning.} We enforce a limited computational budget (1 GPU and 12 hours). The low rank ($r=8$) adapter is applied on the query and value projection matrices in attention layers. For LLaMA-7B, LoRA introduces only around 0.06\% additional parameters, leaving the total sparsity level still around 50\%. With LoRA fine-tuning, we are able to restore the performance of pruned LLMs by a non-trivial amount. One notable instance is that LoRA fine-tuning improves the zero-shot performance of structured 2:4 sparse LLaMA-7B from 48.53$\%$ to 54.46$\%$, outperforming the original unstrucutred 50$\%$ sparse LLaMA-7B (54.21$\%$).
+\textit{Full Parameter Fine-tuning.} We conduct full parameter dense fine-tuning. We enforce a limited computational budget (4 GPU and 3 days). Compared to LoRA fine-tuning, full parameter dense fine-tuning is able to mitigate the gap between pruned LLMs and dense LLMs even further. For unstructured 50$\%$ sparsity, full parameter fine-tuning could improve pruned LLaMA-7B from 54.21$\%$ to 58.15$\%$ in terms of zero-shot accuracy, close to that of dense LLaMA-7B (59.99$\%$).
+
+
+
+\textbf{Pruning Configuration.} \method differs from previous methods in both the pruning metric and the comparison group. We conduct ablation experiments 
+to better understand their impact. The three pruning metrics can be found in Table~\ref{tab:property}. SparseGPT adopts a local comparison group inside a layer, where weights connected to 128 consecutive \emph{input} channels form a group. \method  groups weights connected with a single \emph{output} channel. Therefore, we ablate two blocksize options (128 and 1) and the input/output choice. For simplicity, we use (input/output, blocksize) to denote each local comparison group, e.g., (input, 1). For this experiment, we do not perform the weight update procedure in SparseGPT to focus on the pruning configuration.
+
+\begin{table*}[ht!]
+ \centering
+ \small 
+ \renewcommand{\arraystretch}{1.2}
+ \setlength{\tabcolsep}{6.5pt}
+ \resizebox{1.\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+       & \multicolumn{5}{c}{Comparison Group} \\
+    \cmidrule(lr){2-6}
+    Pruning Metric &   layer  & (input, 1)   &   (input, 128) &  \gc (output, 1) & (output, 128) \\ \hline 
+    Magnitude: $|\mbf{W}_{ij}|$   & \underline{17.29}  & \tbf{8.86}  & 16.82 &  \gc 13.41 & 17.47\\ 
+    SparseGPT: $\left[|\mbf{W}|^{2}/\mathrm{diag}(\mbf{H}^{-1})\right]_{ij}$ & 7.91 & 8.86 &  \underline{8.02} & \gc \tbf{7.41} & 7.74 \\
+    \gr Wanda: $|\mbf{W}_{ij}|\cdot \|\mbf{X}_{j}\|$ & 7.95 & 8.86 & 8.12 & \gc \underline{\tbf{7.26}} & 7.71 \\
+    \hline 
+    \end{tabular}
+}
+\caption{Ablation on the pruning configuration. \tbf{Bold} results denote the best comparison group for each pruning metric. \underline{Underscored} results indicate the default pruning configuration of each method.}
+\label{tab:ablate_config_main}
+\end{table*}
+
+The results are shown in Table~\ref{tab:ablate_config_main}. The default pruning configuration of Wanda delivers the best pruned model (perplexity 7.26). Interestingly, for the magnitude metric, comparing weights of the same input neuron (input, 1) yields a perplexity of 8.86, significantly better than other grouping options. Three methods also produce equivalent pruning results as under this comparison group -- the input is the same, thus weight ranking only depends on weight magnitude. 
+ This finding further highlights the importance of using a proper comparison group for pruning LLMs, even for the classical magnitude pruning approach.
+
+\begin{wrapfigure}{t}{0.46\textwidth}
+\begin{minipage}[t]{0.46\textwidth}
+    \begin{subfigure}{\textwidth}
+    \includegraphics[width=.95\linewidth]{figures/ablation_num_samples-crop.pdf}
+    \end{subfigure}
+    \caption{\method is more robust with less data.}
+    \label{fig:ablate_size}
+\end{minipage}
+\end{wrapfigure}
+\textbf{Robustness to Calibration Samples.} We vary the number of calibration samples by selecting different sample sizes ranging between 1 and 256. Results are summarized in Figure~\ref{fig:ablate_size}. We see a clear difference in trend as the size of calibration data changes, where \method is much more robust when there are few calibration samples. 
+Notably, even with a \textit{single} sample, pruned networks obtained by Wanda have a perplexity of 7.66. This may be because input norm statistics $\|\mbf{X}_{j}\|$ could be much easier to estimate than the full inverse hessian $\mbf{H}^{-1}$ of the local layer-wise reconstruction problem.
+
+\textbf{Weight Update.} 
+We characterize the conditions under which the weight update process in SparseGPT can improve the effectiveness of pruning LLMs. We experiment with two ways of applying weight update: sequential and iterative. A sequential update means that at each layer, the full pruned mask is first computed and weight update is performed on the remaining weights. An iterative update means that the pruning and weight update steps proceed iteratively within each layer. SparseGPT adopts an iterative update procedure every 128 input channels, as it was found to give more accurate results.
+
+\begin{table}[ht!]
+        \centering
+        \small 
+        \renewcommand{\arraystretch}{1.1}
+        \setlength{\tabcolsep}{9.5pt}
+        \resizebox{1.\textwidth}{!}{
+        \begin{tabular}{cccccc}
+        \toprule 
+     \multicolumn{2}{c}{Pruning Configuration} & \multirow{2}{*}{Weight Update} &  \multicolumn{3}{c}{Sparsity}  \\
+      \cmidrule(lr){1-2}  \cmidrule(lr){4-6}  %
+Pruning Metric   & Comparison Group     &       & 50\% & 4:8  & 2:4 \\ 
+    \hline 
+       \multirow{3}{*}{Magnitude:  $|\mbf{W}_{ij}|$ } & layer  & \xmark  &  17.59   & 16.84 & 42.13 \\
+     & layer  & Sequential & \tbf{12.56}  & \tbf{13.37} & \tbf{21.36} \\ 
+     &   (input, 128)   & Iterative &  26.77   &  36.98 & 47.61 \\
+     \hline 
+      \gr \wc     \multirow{3}{*}{\method: $|\mbf{W}_{ij}|\cdot \|\mbf{X}_{j}\|$} & (output, 1) & \xmark  &  \tbf{7.26} & \tbf{8.57} & 11.53 \\
+       & (output, 1) & Sequential &  7.32 & 8.59 & \tbf{10.89} \\
+  &  (input, 128) & Iterative &  \tbf{7.26} & 8.68 & 11.43\\
+        \hline 
+        \end{tabular}
+        }
+    \caption{Effects of the weight update. It offers little or negligible improvement to Wanda.}
+        \label{tab:ablate_update}
+\end{table}
+Effects of the weight update on magnitude pruning and Wanda are summarized in Table~\ref{tab:ablate_update}. We study these two pruning methods because they do not involve any weight update by default. 
+An iterative update changes the comparison group for unstructured pruning, which we denote in the table as (input, 128). We make several interesting observations:
+\begin{itemize}[leftmargin=*]
+\itemsep0em 
+\item For all  considered sparsities, weight update can improve magnitude pruning by a large margin. 
+\item For unstructured 50$\%$ and 4:8 sparsities, weight update does not bring any improvement to Wanda. 
+\item For 2:4 sparsity, the improvement (from 11.53 to 10.89) is marginal. Note that the best 2:4 sparse model (10.89) we obtained here is better than that obtained by SparseGPT (11.00 in Table~\ref{tab:ppl_results}).
+\end{itemize}
+Last, we examine an extreme sparsity level (70$\%$), where weight update can improve Wanda from 84.50 to 29.65. However, the best pruned model (29.65) lags far behind the dense LLaMA-7B (5.68).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Related Work}
+
+\textbf{Network Pruning and Sparsity.} 
+Pruning is a popular technique for compressing neural networks through the elimination of weights, yielding sparse networks~\citep{lecun1990obd,hassibi1993obs}. It can be broadly categorized into \textit{structured} and \textit{unstructured} approaches. 
+
+Structured pruning methods~\citep{liu2017slimming,molchanov2019importance,fan2020dropout,shen2022structural,xia2022structured,fang2023depgraph,nova2023gradient}, sometimes referred to as activation pruning~\citep{gale2019state,guneet2018sap}, remove entire structured components of a network, facilitating efficient GPU speedups. 
+Some existing methods~\citep{babeizadeh2016noiseout,dubey2018coreset} have explored structured pruning based on activation statistics of neuron/filter output, e.g. percentage of zero activations~\citep{hu2016trimming} and activation mean~\citep{molchanov2016prune}. 
+Recently, \citet{ma2023llmpruner} have studied structured pruning of LLMs.
+\citet{bansal2023rethinking,liu2023dejavu} and \citet{elena2023neuron} have demonstrated the existence of prompt-dependent and task-specific sparsity
+in the structural components of LLMs, e.g., attention heads and MLP neurons.
+
+Unstructured methods~\citep{han2015magnitude,han2016deepcompress,mansheej2023unmasking,hoang2023revisiting,gadhikar2023why,liu2023cry} like magnitude pruning operate at the individual weight level, maintaining performance even at higher sparsity levels.
+Existing pruning methods usually require either modifications to the training procedure~\citep{sanh2020movement,kusupati2020soft}, retraining the pruned networks to regain accuracy~\citep{liu2019rethinking,zhou2023three}, or an even more computationally intensive iterative retraining process~\citep{renda2020rewind,frankle2020stabilize}. 
+However, scaling these methods to LLMs with billions of parameters presents a challenge, as the required training process demands substantial computational resources~\citep{hoffmann2022chinchilla,zhang2022opt}. 
+\textbf{Pruning with Limited Data.} Most related to our approach is a recent line of work on pruning with limited data~\citep{hubara2021accelerated,frantar2022obc,frantar2022spdy,kwon2022post}. Such methods require no modification to the original training procedure and also no retraining of the pruned networks on the full training dataset. The primary aim of these methods is to preserve performance during the pruning procedure, assuming access to a limited and small amount of data, also referred to as the calibration data.  In order to mitigate the accuracy drop, a layer-wise reconstruction problem~\citep{hubara2021accelerated} is solved to minimize the change
+of output evaluated on the calibration data. Existing solvers~\citep{singh2020woodfisher,frantar2022obc} for the layer-wise reconstruction problem rely on heavy computation of second-order Hessian inverses, which do not scale to the large hidden state size of LLMs. SparseGPT~\citep{frantar2023sparsegpt} develops an efficient weight update procedure for LLMs via synchronized second-order Hessian updates. 
+\textbf{Emergent Properties of LLMs.} Our work is also related to recent studies on the existence of large magnitude outlier features in large language models~\citep{kovaleva2021bert,bondarenko2021understand,timkey2021all,luo-etal-2021-positional,puccetti2022outliers,wei2022outlier}.  \citet{dettmers2022llmint8} demonstrate that when LLMs exceed a certain parameter scale (e.g., 6B), large magnitude features start to emerge and strongly affect all layers, which can be seen as an emergent property of LLMs~\citep{dettmers2022llmint8,wei2022emergent,schaeffer2023mirage}. They also pinpoint these emerging features as the reason why existing quantization methods fail.
+This observation has spurred the development of various quantization schemes~\citep{dettmers2022llmint8,xiao2022smoothquant,lin2023awq,dettmers2023spqr,kayhan2023quantease} tailored specifically for LLMs to handle outlier features. Our work extends this understanding, demonstrating that outlier features should also serve as pivotal indicators of which weights to prune in LLMs.
+
+
+
+\section{Conclusion}
+
+ In this work, we propose a simple and effective method for pruning Large Language Models (LLMs). Inspired by the recent discovery of emergent large magnitude features in LLMs, our approach, termed \methodlong, removes weights with the smallest magnitudes multiplied by the corresponding input activation norms, on a \textit{per-output} basis. Without the need for any retraining or weight update procedures, \method is able to identify effective sparse networks within pretrained LLMs. We hope our work contributes to a better understanding of sparsity in LLMs. Last, considering the fast speed of pruning with Wanda, it would be interesting to investigate whether Wanda can be useful in the setting of sparse training~\citep{evci2019rig,peste2021acdc,kuznedelev2023accurate,fast2023benbaki,frantar2023scaling}, where pruning has to be conducted repeatedly and thus the pruning efficiency is critical.
+
+
+
+

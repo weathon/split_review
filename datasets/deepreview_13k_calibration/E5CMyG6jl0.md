@@ -1,0 +1,161 @@
+# Unified Language Model Alignment with Demonstration and Point-wise Human Preference
+
+- Decision: Reject
+- Avg Score: 6.00
+- Scores: 6, 5, 8, 5
+
+## Abstract
+Language model alignment is a cutting-edge technique in large language model training to align the model output to user's intent, e.g., being helpful and harmless. Recent alignment framework consists of two steps: supervised fine-tuning with demonstration data and preference learning with human preference data. Previous preference learning methods, such as RLHF and DPO, mainly focus on pair-wise preference data. However, in many real-world scenarios where human feedbacks are intrinsically point-wise, e.g., upvotes number or binary criterion, effective model alignment to user preference is under explored. In this paper, we fill this gap by developing a simplified tuning method for point-wise preference data. Further revelation on the connection between supervised fine-tuning and point-wise preference learning enables us to develop a unified framework for both human demonstration and point-wise preference data, which sheds new light on the construction of preference dataset. Extensive experiments demonstrate the superior performance and efficiency of our proposed methods. A new dataset with high-quality demonstration samples on harmlessness are constructed and made publicly available.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+Language model alignment is a significant technique to align inference output to human preference and help performance improvement. Currently, alignment mainly involves two steps: supervised fine-tuning with designed instructions and then preference learning with pair-wise samples such as RLHF and DPO method. However, most of the existing preference data in the world are not just pair-wise but more fine-grained, i.e., preference data are voted by scores. In this paper, the authors propose a new DPO method to align LLM with point-wise preference data. Standing on the proposed point-wise DPO method, they incorporate supervised fine-tuning, unifie the whole alignment framework, and solve it as a one-step alignment problem. In their experiments, they compare with RLHF and vanilla DPO and validate the effectiveness of their proposed framework by achieving lower perplexity scores and higher preference scores.
+
+### Strengths
+* Originality: Several existing works to align LLM outputs to human preference have been proposed, such as RLHF and DPO. Standing on DPO, this paper devises a new approach for point-wise preference data to make alignments. Besides, they unify the alignment framework with supervised fine-tuning stage. These two contributions enhances paper’s strength on originality.
+* Quality: Numbers in the experiments are solid and look promising, especially the improvements in complexity and preference score (harmful) compared to baseline RLHF.
+* Clarity: The presentation in this paper is easy to follow and well-organized.
+* Significance: A typical way to do preference learning is to treat generated samples with pair-wise binary relation which losses the granular information on voting scores, rankings, or preference levels. To fill the gap, this paper proposes a new DPO method to align LLM with point-wise preference data. They study the gradients between supervised fine-tuning and their proposed method then propose a novel unified framework to learn human preference. Empirically, their results validate the framework’s effectiveness and show the significance of this work.
+
+### Weaknesses
+ * Though the experimental results look promising to demonstrate framework’s effectiveness, more human preference datasets to align LLM should be included, such as datasets provided and used in [1] and [2].
+* The proposed framework should be able to be generalized to more complex metrics (such as the discussion to handle continuous labels) but the datasets used in the experiment are only in binary classes, which is not enough to support the capability of its generalization. 
+* The generalization to other metrics with positive and negative samples needs further description in details.
+
+### Questions
+* What’s the objective loss of ULMA for continuous preference labels? 
+* In this case, how does the framework deal with positive and negative samples?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+In this paper, the authors propose a unified language model alignment approach. Their main idea is to address point-wise human preference. I like the idea of studying point-wise human preference. My main concern is that in many cases, there can be a mapping function between pair-wise preference and point-wise preference.
+
+### Strengths
+1. It is interesting to study the alignments on the point-wise human preference. 
+2. It is great to compare the existing approach.
+3. Releasing more datasets is always great for the community.
+
+### Weaknesses
+1. In many cases, there can be a mapping function between pair-wise preference and point-wise preference. The authors do not discuss these cases. Specifically, the paper lacks a rigorous analysis of scenarios where a transformation between pairwise and pointwise preferences is possible, potentially undermining the novelty of the proposed approach. For instance, the paper does not explore how a simple ranking algorithm derived from pairwise comparisons could achieve similar results to the proposed pointwise method. The absence of such analysis raises questions about the necessity of the proposed pointwise approach.
+2. It would be great to have more experimental results in terms of more LLM-based tasks. The current evaluation is limited in scope and does not fully demonstrate the generalizability of the proposed method across various LLM tasks. The paper should include experiments on tasks such as text summarization, question answering, and code generation to provide a more comprehensive evaluation.
+3. There is no significance test in the tables. The lack of statistical significance testing makes it difficult to ascertain whether the observed performance differences are meaningful or simply due to random chance. The paper should include statistical tests, such as t-tests or ANOVA, to support the claims of performance improvement.
+
+### Questions
+I like the idea of studying point-wise human preference. However, one essential issue is that in many cases, there can be a mapping function between pair-wise preference and point-wise preference. For example, from pair-wise -> point-wise: you can directly enumerate how many positive preferences have been received for each document, and then rank the documents according to the numbers and assign a ranking score to each document. Or, a simpler way is to use the number of (positive num – negative num) preferences as the point-wise preference. Therefore, to verify the idea of studying the point-wise human preference. Similarly, point-wise -> pair-wise, one document with higher scores can receive the positive preference. One must prove that these rule-based methods can not work well for the LLM. Also, to test the performance of an LLM, there are many evaluation metrics and many LLM-based tasks. Therefore, I expect the authors to test the LLM for more tasks and metrics. Also, more LLMs are expected. For the reported tables, many numbers are quite close, and it is necessary to have a significance test to see whether the proposed method is better (or you can report the mean and std for multiple runs). Overall, I like this idea, but this version may not be ready for publication. If you can answer the above question or point out my misunderstanding, I will be happy to raise my score.
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper introduces a novel model alignment technique to user preferences. The authors have developed a simplified tuning method for point-wise preference data as well as human demonstration.
+
+### Strengths
+1. Detailed background and preliminaries section which serves as a refresher of the main LLM methodologies. This serves as a solid base and leads very well to the proposed methodology.
+2. Detailed mathematical explanation of the concept.
+
+### Weaknesses
+The experiments section is not very detailed. Expanding the methodology to more datasets would be nice.
+
+### Questions
+None
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+4 excellent
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper presents a unified framework that integrates the two traditionally separate processes in LLM alignment: SFT on demonstration data and preference learning on preference data. The framework is structured for point-wise preference learning, considering the intrinsic characteristics of real-world preference data distribution. Specifically, the authors treat the positive and negative samples differently, applying SFT loss to the former and adding an additional KL regularizer for the latter. They also justify this formulation via gradient analysis and comparison with DPO. Since the method enhances learning from the positive samples, the authors extend the Anthropic's Helpful and Harmless dataset by refining the positive responses using GPT-4, thus boosting their method with high-quality data.
+
+### Strengths
+Reward modeling is a crucial and challenging part in LLM alignment. Conventionally, preference data is collected through rankings and used as preferred–dispreferred pairs for learning, as the human-annotated scalar scores on individual samples can be uncalibrated and noisy. However, the ranking-based reward model may fail to impose correct penalty, since it is trained based on binary relative signals, potentially compromising its precision on individual samples. In this case, I agree with the authors that pair-wise RM may inadequately capture the nuances of real-world preference data distribution, especially on the data where preferences are obviously polarized and scoring quality against specific criteria is unambiguous. Therefore, I think it is important to explore the point-wise RM for better preference learning in LLM alignment.
+
+### Weaknesses
+While preference learning from pair-wise data is challenging (as I briefly discussed above), it still applies to most cases in the real world. For example, toxicity is not a strictly binary metric as we can categorize samples to be _toxic_, _very toxic_, or just _pose risks of toxic content generation_ [1]. Also for verifiability, there can be labels such as _unhedged correct_, _hedged correct_, and _uninformative_. So I don’t think the authors made a convincing argument regarding the superiority of their point-wise preference learning over the pair-wise methods. In fact, the binary signals could result in significant information loss, since the learning can only capture the data polarity, omitting the nuanced levels present in practice. Furthermore, the argument that pair-wise methods inadequately capture real-world preference distributions is not sufficiently justified. The authors claim that preference data is often polarized and scoring is unambiguous, but this is not always the case. Many real-world scenarios involve complex, multi-faceted preferences that are not easily reduced to binary choices. The method's reliance on a clear separation between positive and negative samples may limit its applicability in more ambiguous preference scenarios.
+
+Additionally, the paper lacks empirical analysis with limited experimental results to justify the design of each component in Equation (9). It is hard to interpret how the win rates evaluated by GPT-4 correlate with human judgment or the actual quality. For example, if I understand it correctly, the baseline to compare against is the chosen answer in the dataset, which can be considered as the golden samples for preference learning. This makes the numbers of win-rates in Tables 1&2 somewhat weird and vague since there should be a big proportion of tie cases as indicated in previous works [2]. It’d help to report on metrics that are consistent with existing works for clear and interpretable result comparison. It is also important to extend the evaluation to other benchmarks, _e.g._, RealToxicityPrompts [1], to compare their effectiveness at least in the domain of harmlessness. The lack of ablation studies to understand the impact of each component of the loss function, particularly the KL divergence term, makes it difficult to assess the contribution of each part. Without such analysis, it's unclear whether the observed improvements are due to the specific combination of SFT and KL regularization, or if simpler alternatives could achieve similar results. The paper also does not address the potential sensitivity of the method to the choice of hyperparameters, such as the weight of the KL divergence term, which could significantly impact performance.
+
+### Questions
+A. Could the authors elaborate more on the design of point-wise preference learning, particularly regarding harmlessness and helpfulness? For example, how to deal with potential information loss when simplifing the label to be strictly binary?
+
+B. The win-rates, especially in Golden HH, are close to $100$%. Could you elaborate on the reasons behind these statistics and also provide information on the corresponding lose- and tie-rates?
+
+C. How did the authors obtain and evaluate the baseline results? For example, there isn’t an official implementation of DPO, how did the authors ensure that their version of DPO is consistent with the original one, and how does their result align with the reported one in the DPO paper?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair

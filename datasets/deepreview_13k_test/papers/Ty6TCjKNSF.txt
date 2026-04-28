@@ -1,0 +1,522 @@
+\title{Newton Meets Marchenko-Pastur: Massively Parallel Second-Order Optimization with Hessian Sketching and Debiasing}
+
+\begin{abstract}
+Motivated by recent advances in serverless cloud computing, in particular the ``function as a service'' (FaaS) model, 
+we consider the problem of minimizing a convex function in a massively parallel fashion, where communication between workers is limited.
+Focusing on the case of a twice-differentiable objective subject to an L2 penalty, we propose a scheme where the central node (server) effectively runs a Newton method, 
+offloading its high per-iteration cost---stemming from the need to invert the Hessian---to the workers. 
+In our solution, workers produce independently coarse but low-bias estimates of the inverse Hessian, using an adaptive sketching scheme. The server then averages the descent directions produced by the workers, yielding a good approximation for the exact Newton step. The main component of our adaptive sketching scheme is a low-complexity procedure for selecting the sketching dimension, an issue that was left largely unaddressed in the existing literature on Hessian sketching for distributed optimization. Our solution is based on ideas from asymptotic random matrix theory, specifically the Marchenko-Pastur law. For Gaussian sketching matrices, we derive non asymptotic guarantees for our algorithm which are essentially dimension-free. Lastly, when the objective is self-concordant, we provide convergence guarantees for the approximate Newton's method with noisy Hessians, which may be of independent interest beyond the setting considered in this paper. 
+    
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Consider minimizing a convex, twice-differentiable function $F:\RR^d \to \RR$, 
+subject to an L2 regularization penalty:
+\begin{equation}\label{eq:Convex-Problem}
+	 \min_{\theta \in \RR^d} F(\theta) + \frac{\lambda}{2} \|\theta\|^2 \,,
+	\end{equation} 
+where $\lambda>0$.
+Such problems frequently appear in machine learning and statistics. Common examples include ridge regression, logistic regression with regularization, support vector machines (SVMs) and kernel machines, among others \citep{hastie2009elements}.
+	
+Consider a scenario where a large number of workers (processors) are available to collaboratively solve \eqref{eq:Convex-Problem}, with the assumptions that each worker (i) has full access to the objective function;
+(ii) operates with limited individual computational resources; and (iii) cannot communicate directly with other workers, 
+only with a central server, with the latter responsible for orchestrating the work of the workers (a ``star'' network topology). This setting is motivated by recent developments in serverless cloud computing, particularly the "function as a service" (FaaS) model  \citep{jonas2017occupy}. Serverless computing and FaaS are well-suited for computing gradients and Hessians on large datasets, enabling parallelization of these computations across a large number of workers. Additionally, this approach provides resilience to failed or straggler workers, ensuring robust and efficient processing \citep{bartan2019straggler}.
+In designing a solution of this setting, we are essentially guided by two key principles:
+(a) minimizing the number of communication or worker deployment rounds, with each round utilizing a large number of workers in parallel; and (b) reducing the computational load on individual workers by distributing smaller tasks across many workers concurrently.
+
+This paper proposes and analyzes a 
+scheme for solving
+\eqref{eq:Convex-Problem} in a massively parallel manner.
+In our scheme, the server aims to solve \eqref{eq:Convex-Problem} using Newton's method, a second-order iterative algorithm which is known to converge extremely fast for sufficiently smooth and strongly convex objectives (quadratic convergence rate).
+Its fast convergence is attained by incorporating curvature (Hessian) information when searching for a descent direction, and specifically requires an inverse Hessian-gradient product at every iteration. This a priori results in massive per-iteration computational cost: exactly computing the descent direction (assuming the Hessian is accessible) costs practically $O(d^3)$ flops; in high-dimensional problems (large $d$), this may be prohibitively expensive.
+
+We wish to offset the high per-iteration cost of Newton's method, by deploying many workers in parallel to collaboratively compute the Newton direction.
+ In the setting we consider, workers cannot easily communicate with one another, and therefore directly inverting the Hessian by is not feasible. 
+In our scheme,
+each worker independently computes a coarse but \textbf{unbiased} estimate of the exact Newton direction, using randomized sketching. These estimates are then aggregated (averaged) at the server, producing a good approximation of the true Newton step.
+
+\paragraph{Newton's method:}
+The exact Newton method for minimizing \eqref{eq:Convex-Problem} has the following form:
+\begin{align}
+	\theta_{t} = \theta_{t-1} - \alpha_t W_t g_t,\qquad (t=1,\ldots,T)\,, \label{eq:Newton-Exact-0}
+\end{align}
+where $\alpha_t$ is a step size (typically chosen by line search) and the gradient and inverse Hessian are
+\begin{align}
+	g_t &:= \nabla F(\theta_{t-1}) + \lambda\theta_{t-1}, \label{eq:Newton-Exact-1}\\
+	W_t &:= (H_t + \lambda I)^{-1},\; H_t := \nabla^2 F(\theta_{t-1}) \label{eq:Newton-Exact-2}\;.
+\end{align}
+For sufficiently smooth convex objectives $F$, Newton's method is known to converge at a quadratic rate: $T=O(\log\log(1/\eps))$ iterations are sufficient to approach the minimum within error $\eps$, as opposed to $T=O(\log(1/\eps))$ for gradient descent and its accelerated variants; see \cite[Chapter 9]{boyd2004convex}. A fast convergence rate is highly desirable in our setting, as the number of iterations corresponds directly to communication/worker deployment rounds.
+
+In our scheme, the server effectively runs the Newton method with an approximate inverse Hessian: 
+\begin{equation}
+	\theta_t = \theta_{t-1} - \alpha_t \bar{W}_t g_t, 
+\end{equation}
+where $\bar{W}$ is obtained by averaging $q$ independent local estimates produced by the workers:\footnote{In practice, the workers send the vector $\hat{W}^{(k)}g_t \in \RR^{d}$ to the server, rather the whole matrix $\hat{W}^{(k)} \in \RR^{d\times d}$.}
+\begin{equation}
+	\bar{W} := \frac{1}{q}\sum_{k=1}^q \hat{W}_t^{(k)} .
+\end{equation}
+
+\paragraph{Debiased inverse Hessian sketching:}
+We wish to avoid directly inverting the full $d\times d$ Hessian, which practically (when done exactly) costs $O(d^3)$. To this end, we have every worker compute, in parallel, a cheap but low-bias estimate of the inverse Hessian by sketching.
+Specifically, at every deployment round, every worker independently samples a random sketching matrix $S\in \RR^{m\times d}$ (where $m<d$), and approximates the inverse Hessian by its sketched version
+\begin{equation} \label{eq:feature-sketch-Def}
+	\hat{W} = S^\T (SHS^\T + \tilde{\lambda}I)^{-1} S ,
+\end{equation} 
+where $\tilde{\lambda}>0$ is a \emph{modified} regularization parameter. Sketches of the type in \eqref{eq:feature-sketch-Def} have been studied before in the literature (also in the context of high-dimensional regression and optimization). Variations have appeared under various names: ``dual sketching'' {\citep{zhang2013recovering}}, ``sketch-and-project'' {\citep{gower2015randomized}}, ``right-sketch'' \citep{murray2023randomized}, and ``feature sketching'' {\citep{patil2023asymptotically}}.
+Note that the cost of forming $\hat{W}g$ is $O(m^3+M)$, where $M$ is the cost of multiplying $SHS^\T$. 
+In this paper, we exclusively consider the case where $S$ is a random dense matrix with i.i.d. entries.\footnote{By ``dense'', we mean that $S$ has $\Omega(md)$ many non-zero entries typically, though it's not necessary that all the entries, or even a majority of them, are non-zero.} In this case $M=d^2 m$, which dominates the overall per-iteration cost. Naturally, we are particularly interested in settings where $m$ can be chosen very small compared to $d$, so that cost, $O(d^2m)$, is substantially smaller than $O(d^3)$.
+
+\begin{remark}
+	In this paper we {do not} assume any particular form for $H$ (i.e., that it is readily factorizable $H=X^\T X$, $X\in \RR^{N\times d}$, a setting which is quite common in the sketching and distributed optimization literature; for example {\citep{pilanci2015newton}}). In fact, sketched measurements $SHS^\T$ may be obtainable even in settings when $F$ is not available in analytic form, but only through a program (oracle) that calculates it - for example by automatic differentiation  {\citep{paszke2017automatic}}.
+\end{remark}
+
+A key question is how to choose $m$ (and in accordance $\tilde{\lambda}$). Define the $\lambda$- effective dimension of $H$,\footnote{$\EffDim(\lambda)$ is also called the ``effective degrees of freedom'' in ridge regression \citep{hastie2009elements}, when the design matrix $X\in\RR^{N\times d}$ is $H=X^\T X$. }
+\begin{equation} 
+	\EffDim(\lambda) := \tr(H(H + \lambda I)^{-1}).
+\end{equation} 
+As we shall see in Section~\ref{sec:RMT-Background}, results from asymptotic random matrix theory imply that, when $S$ is an i.i.d. dense sketching matrix and \textbf{provided} that $m>\EffDim(\lambda)$, the choice
+\begin{equation}\label{eq:Oracle-Reg}
+	\tilde{\lambda} := \lambda\left( 1 - \frac{1}{m} \EffDim(\lambda) \right)
+\end{equation}
+results in $\hat{W}$ which is a \emph{low-bias} estimator of the true inverse Hessian $W$. Note that exactly computing the effective dimension is resource-intensive, and essentially requires inverting the Hessian---the very operation we wanted to avoid. A key component of our proposed scheme is a novel low-complexity procedure, based on ideas from asymptotic random matrix theory, for adaptively selecting $m=O(\EffDim(\lambda))$ and $\tilde{\lambda}$, by only observing sketched measurements of $H$. 
+\begin{remark}
+	When $H$ is effectively low-rank, that is exhibits fast spectral decay, $\EffDim(\lambda)$ may be much smaller than $d$. For example, when the spectrum has power decay $\lambda_k(H)\propto k^{-\alpha}$ and $\lambda=O(1)$, $\EffDim(\lambda)=O(d^{1-\alpha})$ when $\alpha<1$, $\EffDim(\lambda)=O(\log d)$ when $\alpha=1$ and $\EffDim(\lambda)=O(1)$ when $\alpha>1$. Hessian spectral with power decay are common in regression problems involving kernels {\citep{wainwright2019high, yang2017randomized}}.
+\end{remark}
+\paragraph{Outline and Contributions:} 
+\begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
+	\item 
+	In Section~\ref{sec:RMT-Background} we review fundamental results from asymptotic random matrix theory (RMT), specifically the Marchenko-Pastur law and its formulation using deterministic equivalents, and demonstrate how they lead naturally to an asymptotically unbiased inverse Hessian estimator, from i.i.d. sketching matrices $S$. The connection to the Marchenko-Pastur law treats in a uniform framework---and recovers almost immediately---earlier results on Hessian sketch debiasing for distributed Newton methods 
+	\citep{derezinski2020debiasing,zhang2023optimal}.
+	\item 
+	In Section~\ref{sec:Procedure} we propose a \emph{novel data-driven method} for selecting $m$ and $\tilde{\lambda}$ using only the sketched Hessian, avoiding the need to compute the effective dimension exactly. The approach is a natural outgrowth of the RMT framework described previously, and is fully adaptive: no tuning parameters are needed.
+	Section~\ref{sec:Nonasymptotic} further provides {non-asymptotic} error guarantees for our method, focusing on the case where $S$ is an i.i.d. {Gaussian} matrix. Notably, the error bounds obtained in this setting are essentially dimension-free and independent of the Hessian’s condition number.
+	\item 
+	In Section~\ref{sec:Quasi-Newton} we derive convergence guarantees for the Newton method with inexact Hessians; to wit, when the exact inverse Hessian $W$ in \eqref{eq:Newton-Exact-0}-\eqref{eq:Newton-Exact-2} is replaced by an $\eta$-accurate estimate $\bar{W}$. By ensuring a sufficiently small $\eta$, the algorithm achieves an arbitrarily fast linear convergence rate. Our results are proved for self-concordant functions $F(\cdot)$, and to our knowledge are novel and may be of independent interest. Combined with the results of the previous section, we obtain a non-asymptotic, end-to-end convergence guarantee for the entire parallel method (with Gaussian sketches), which remarkably does not depend on the condition number of the Hessians.
+	 \item 
+	  Lastly, Section~\ref{sec:Experiments} is dedicated to experiments, on both synthetic and real-world data.
+\end{itemize}
+
+	
+	\subsection{Related Works}
+Distributed second-order optimization methods have been widely studied for large-scale machine learning. Notable examples include DANE \citep{shamir2013communication}, which addresses communication efficiency, AIDE \citep{reddi2016aide}, designed for accelerated convergence, and DiSCO \citep{zhang2015disco}, which focuses on distributed second-order methods for convex optimization problems. The most closely related body of literature to our work centers around the averaging of inexact Newton steps, which has proven effective when combined with randomized linear algebra. GIANT \citep{wang2017giant} uses the average of local Newton steps as the global step and Determinantal Averaging \citep{derezinski2020debiasing} provides an unbiased averaging technique for distributed Newton methods. Surrogate sketching \citep{derezinski2020debiasing} was introduced for distributed Newton's method, revealing improvements via a simple shrinkage strategy.
+The work \citep{zhang2023optimal} introduced an optimal debiasing method for distributed Newton's method when the effective dimension of the Hessian is known.
+Lastly, there exists a large related corpus of works in optimization involving Hessian subsampling or sketching, for cases where the Hessian admits a good low-rank approximation, though not necessarily in a distributed setting. Examples include \citep{roosta2019sub,
+	gower2019rsnrandomizedsubspacenewton,frangella2022sketchysgd}, among others.
+	
+
+
+\section{Debiasing from I.I.D Sketches and Random Matrix Theory}
+
+	\label{sec:RMT-Background}
+This section concerns inverse sketched Hessian debiasing for sketches $S\in \RR^{m\times d}$ which have i.i.d. entries with mean zero $\Expt[S_{ij}]=0$. We normalize the variance as $\Expt[S_{ij}]^2=1/m$; this normalization is such that $\Expt[S^\T S]=I$, equivalently, $S:\RR^d \to \RR^m$ is an isometry in expectation.
+
+Let $H\succeq 0$ be a positive definite matrix (e.g., the full Hessian at the current iteration). The spectral properties of the matrix $SHS^\T \in \RR^{m\times m}$, which appears in the sketch \eqref{eq:feature-sketch-Def}, are of utmost importance for what follows. Note that this matrix has the same non-zero eigenvalues\footnote{This is a standard consequence of the elementary determinant identity $\det(I+AB)=\det(I+BA)$.} as the matrix $H^{1/2}S^\T S H^{1/2}$: the latter is a \emph{sample covariance} matrix (making the analogy explicit: $m$ is the number of samples, $H$ is the population covariance, and $x_i:=\sqrt{m}H^{1/2}r_i$ are independent ``samples'', $r_1,\ldots,r_m$ being the rows of $S$); accordingly, $SHS^\T$ is sometimes called the companion sample covariance. 
+Sample covariance matrices, and their spectral properties, have been a central object of investigation in random matrix theory (RMT); cf. \citep{bai2010spectral}. A foundational result is the {Marchenko-Pastur law} \citep{marvcenko1967distribution}, 
+which describes the high-dimensional global behavior of the eigenvalues of $H^{1/2}S^\T S H^{1/2}$ (limiting spectral distribution). 
+
+\paragraph{The Marchenko-Pastur equation:} For\footnote{Here $\CC^+$ is the complex upper halfplane, $\Im(z)>0$.} $z\in \CC^+$ let $\Stiel(z)\in\CC^+$ be the unique solution of
+\begin{equation}\label{eq:MP-Eq}
+	\frac{1}{\Stiel(z)} = - z + \frac1m \tr\left( H(I+\Stiel(z)H)^{-1} \right) 
+\end{equation}
+subject to the constraint $\Stiel(z)\in \CC^+$. It is known that (see \citep{bai2010spectral}) $\Stiel(z)$ is the Stieltjes transform\footnote{For a finite measure $\mu$ on $\RR$, its Stieltjes transform is the function $\Stiel_\mu:\CC^+\to \CC^+$ given by $\Stiel_\mu(z)=\int \frac{1}{x-z}d\mu(x)$. Using the Stieltjes inversion formula, the measure $\mu$ can be recovered from $\Stiel_\mu$ in the following sense: for every $\varphi(\cdot)$ bounded and continuous, $\int \varphi(t)d\mu(t) = \lim_{\eta\to 0+}\frac1\pi \int \varphi(x)\Im\Stiel_\mu(x+\iu \eta)dx$. } of a \emph{compactly supported probability measure}, whose support lies in $\RR_{\ge 0}$; this measure is the \textbf{(companion) Marchenko-Pastur law} associated with the population covariance $H$ (and depends only on its eigenvalues) and the number of samples $m$. Moreover: 1) The function $z\mapsto \Stiel(z)$ extends continuously to $\RR$, except possibly at $z=0$; 2) for $x\in \RR$ outside the support, the function $x\mapsto \Stiel(x)$ is increasing; in particular, for negative $x<0$, it is positive and increasing. In this paper, we shall restrict our attention to only negative real valued $z$ in  \eqref{eq:MP-Eq}, understanding that it holds also for $z<0$ real. For more details, cf. \citep{silverstein1995analysis,bai2010spectral}.
+Finally, note that the function $z\mapsto \Stiel(z)$ is invertible, the inverse function given by 
+\begin{equation}\label{eq:Psi-Def}
+	\Psi(\Stiel) = \frac{1}{m}\tr(H(I+\Stiel H)^{-1})- \frac{1}{\Stiel}.
+\end{equation}
+The Marchenko-Pastur equation \eqref{eq:MP-Eq} may equivalently be written as $z=\Psi(\Stiel(z))$.
+
+In RMT, it is typical to consider the \emph{proportional growth} asymptotic regime: $m,d\to\infty$, $m=\Theta(d)$. 
+\begin{definition}
+	For (small) constant $\tau>0$, assumption set \AssumAsymp~ holds if: (1) bounded aspect ratio (proportional growth): $\tau<\frac{m}{d}<1/\tau$; (2) bounded operator norm: $\|H\|<1/\tau$; (3) $H$ is invertible; (4) $H$ has non-degenerate spectrum: at least $\tau d$ eigenvalues are larger than $\tau$.(5) $\sqrt{m}S_{ij}\sim \xi$, with their law $\xi$, satisfying: $\Expt[\xi]=0$, $\Expt[\xi^2]=1$, and $\Expt[|\xi|^k]<\infty $ for all $k>0$.
+\label{def:Asymp}
+\end{definition}
+
+Denote by $\StielEmp(z)$ the Stieltjes transform of the empirical eigenvalue distribution of $SHS^\T$:
+\begin{equation}\label{eq:StielEmp-Def}
+	\StielEmp(z) = \frac1m \tr (SHS^\T -z I)^{-1} = \frac1m \sum_{i=1}^m \frac{1}{\lambda_i(SHS^\T)-z} .
+\end{equation}
+Note that $\StielEmp(z)$ is a random function, since $S$ is random. The following is a (quantitative) statement of the Marchenko-Pastur law \citep{knowles2017anisotropic}; for simplicity, we focus on the case $z<0$.
+\begin{theorem}\label{thm:MP-Law}
+	Set $\eta,D>0$. Assume \AssumAsymp.  W.p. $1-O(m^{-D})$, simultaneously for all $-1/\tau \le z \le -\tau$,
+	\begin{equation}
+		|\StielEmp(z)-\Stiel(z)| = O\left( m^{-1/2+\eta} \right).
+	\end{equation}
+	The constants in the $O(\cdot)$ notation depend on $\tau,\eta,D$.
+\end{theorem}
+\begin{proof}
+	See Theorem 3.7 and Remark 3.10 in \citep{knowles2017anisotropic}.
+\end{proof}
+
+\paragraph{Deterministic equivalent for the sample covariance:}
+The Marchenko-Pastur law (Theorem~\ref{thm:MP-Law}) describes the eigenvalue distribution of $SHS^\T$, equivalently $H^{1/2}S^\T S H^{1/2}$, and relates it to that of $H$ (the connection made via the Marchenko-Pastur equation \eqref{eq:MP-Eq}). One can show something stronger: the entire (random) resolvent $(H^{1/2}S^\T S H^{1/2}-zI)^{-1}$ is in fact close (entrywise, \emph{not} in operator norm) to the resolvent of $H$ (which is deterministic), with appropriate shifting and shrinkage. 
+A result of the following kind is sometimes referred to in the RMT literature as a ``deterministic equivalent'', cf. \citep{couillet2011random,bai2010spectral}. 
+\begin{theorem}\label{thm:Determinstic-Cov}
+	Set $\eta,D>0$. Assume \AssumAsymp. For any $u,v\in\RR^d$, $\|u\|,\|v\|=1$, the following holds.	
+	W.p. $1-O(m^{-D})$, simultaneously for all $-1/\tau^{-1}\le z \le -\tau$,
+	\begin{equation}\label{eq:local-law}
+		u^\T (H^{1/2} S^\T S H^{1/2} - z I)^{-1}  v = u^\T  (-z\Stiel(z)H - zI)^{-1} v + O(m^{-1/2+\eta}).
+	\end{equation}
+	Above, the constants in the $O(\cdot)$ notation depend on $\tau,\eta,D$ and are uniform in $u,v$. In particular,
+	\begin{equation}
+		\left\|\Expt\left[(H^{1/2} S^\T S H^{1/2} - z I)^{-1}\right] - (-z\Stiel(z)H - zI)^{-1}\right\| = O(m^{-1/2+\eta})
+	\label{eq:local-law-1}
+	\end{equation} 
+	\begin{proof}
+		See Eq. (3.3) and Theorem 3.7 in \citep{knowles2017anisotropic}.
+	\end{proof}
+\end{theorem}
+
+\paragraph{Deterministic equivalent for the sketched Hessian:} Recently, a deterministic equivalent for the sketched matrix \eqref{eq:feature-sketch-Def} was obtained by \citep{lejeune2022asymptotics}. We cite a quantitative version of their result \citep[Theorem 4.1]{lejeune2022asymptotics}.
+\begin{theorem}\label{thm:Deterministic-Sketch}
+	Set $\eta,D>0$. Assume \AssumAsymp, and furthermore  $\lambda_{\rank(H)}(H)\ge \tau$. For any $u,v\in\RR^d$, $\|u\|,\|v\|=1$, w.p. $1-O(m^{-D})$, simultaneously for all $-1/\tau\le z \le -\tau$,
+	\begin{equation}\label{eq:lejeune}
+		u^\T S^\T (SHS^\T- z I)^{-1}Sv = u^\T  (H - (\Stiel(z))^{-1} I)^{-1} v + O(m^{-1/2+\eta}).
+	\end{equation}
+	In particular,
+	\begin{equation}\label{eq:thm:Deterministic-Sketch-2}
+		\left\|\Expt\left[S^\T (SHS^\T- z I)^{-1}S\right] - (H - (\Stiel(z))^{-1} I)^{-1}\right\| = O(m^{-1/2+\eta}).
+	\end{equation} 
+\end{theorem}
+\begin{proof}
+	The result is a consequence of Theorem~\ref{thm:Determinstic-Cov}; for completeness, let us repeat the argument of \citep{lejeune2022asymptotics}, assuming $H$ is full rank (see their paper for a generalization). Denote $\tilde{u}:=H^{-1/2}u$, $\tilde{v}:=H^{-1/2}v$, so that $\|\tilde{u}\|,\|\tilde{v}\|\le 1/\sqrt{\tau}=O(1)$. We have w.p. $1-O(m^{-D})$,
+	\begin{align*}
+		&u^\T S^\T (SHS^\T- z I)^{-1}Sv 
+		= \tilde{u}^\T H^{1/2}S^\T (SHS^\T- z I)^{-1}SH^{1/2} \tilde{v} \\
+		&\quad= \tilde{u}^\T  (H^{1/2}S^\T S H^{1/2}- z I)^{-1}H^{1/2}S^\T S H^{1/2} \tilde{v} 
+		= \tilde{u}^\T \tilde{v} + z \tilde{u}^\T  (H^{1/2}S^\T S H^{1/2}- z I)^{-1} \tilde{v}\\
+		&\quad= \tilde{u}^\T \tilde{v} - \tilde{u}^\T (\Stiel(z)H+I)^{-1} \tilde{v} + O(m^{-1/2+\eta}) = u^\T(H+(\Stiel(z))^{-1}I)^{-1} v + O(m^{-1/2+\eta}).
+	\end{align*} 
+\end{proof}
+	
+
+
+\section{An Adaptive Sketching and Debiasing Procedure}
+
+	\label{sec:Procedure}
+Theorem~\ref{thm:Deterministic-Sketch} suggests a clear path for obtaining a low-bias estimate of the inverse Hessian from the sketch \eqref{eq:feature-sketch-Def}, namely: one should choose $\tilde{\lambda}>0$ such that $\Stiel(-\tilde{\lambda})=1/\lambda$, \emph{when such a root exists}. 
+\begin{lemma}
+	A solution $\tilde{\lambda}>0$ satisfying $\Stiel(-\tilde{\lambda})=1/\lambda$ exists if and only if $m>\EffDim(\lambda)$. When this is the case, $\tilde{\lambda}$ is given by \eqref{eq:Oracle-Reg}.
+\end{lemma}
+\begin{proof}
+	By merit of being the Stieltjes transform of a finite measure supported on $\RR_{\ge 0}$, $\Stiel(\cdot)$ maps bijectively $(-\infty,0)$ to $(0,\Stiel(0))$, hence a solution $\tilde{\lambda}>0$ exists if and only if $\Stiel(0)>1/\lambda$. Taking the limit $z\to 0+$ in \eqref{eq:MP-Eq}, we find (after routine algebraic manipulation) that $\Stiel(0)$ solves $\EffDim(1/\Stiel(0))=m$. Since the function $\mu\mapsto \EffDim(\mu)$ is decreasing for positive $\mu$, we deduce that $1/\Stiel(0)<\lambda$ if and only if $m>\EffDim(\lambda)$. When this is the case, $\tilde{\lambda}=\Psi(1/\lambda)$ where $\Psi$ is the explicit inverse \eqref{eq:Psi-Def}.
+\end{proof}
+
+\begin{remark}
+	Earlier works on distributed Newton's method \citep{derezinski2020debiasing,zhang2023optimal}, considered debiasing for a closely related but different Hessian sketch. Specifically, they assume the Hessian has the form $H=X^\T X$ where $X\in \RR^{N \times d}$; such Hessians naturally appear in machine learning problems,
+	for example in the (reguarlized) empirical loss minimization for a generalized linear model (GLM). 
+	\citep{zhang2023optimal} considered (among others), the sketch $X^\T S^\T S X$, and calculated the appropriate shrinkage factor for asymptotically debiasing the inverse: $(\gamma X^\T S^\T S X + \lambda I)^{-1} \simeq (H+\lambda I)^{-1}$ where $\gamma:= 1/\left( 1-\frac1m\EffDim(\lambda) \right)$, provided that $m>\EffDim(\lambda)$, under an asymptotic setting as in Theorem~\ref{thm:Determinstic-Cov} (though without making the connection to the Marchenko-Pastur law explicit). In the scheme they considered, the effective dimension was assumed to be known. We remark that Theorem~\ref{thm:Determinstic-Cov} holds verbatim if $H^{1/2}$ is replaced by $X^\T$, and the ratio $\tau<d/N<1/\tau$ is bounded \citep{knowles2017anisotropic}. Rewritting \eqref{eq:local-law-1} as $(H+(\Stiel(z))^{-1}I)^{-1}\simeq \left( (-z\Stiel(z))^{-1}X^\T S^\T S X + (\Stiel(z))^{-1}I \right)^{-1}$, setting $z=-\tilde{\lambda}$ recovers their proposed shrinkage factor. Accordingly, the adaptive procedure we propose below applies to that sketching scheme as well, with the obvious modifications.
+\end{remark}
+
+Note that we do not have access to the function $\Stiel(\cdot)$ directly (to calculate it numerically via \eqref{eq:MP-Eq}, one needs to invert the full Hessian)---but we \emph{can} estimate it from the sketched measurements $SHS^\T$, using Theorem~\ref{thm:MP-Law}. Accordingly, we can estimate $\tilde{\lambda}$ by the solution $\hat{\lambda}$ of the (random) equation
+\begin{equation}\label{eq:Root-Solving}
+	\StielEmp(-\hat{\lambda}) = 1/\lambda ,\quad \hat{\lambda}>0,
+\end{equation}
+if it exists. To have $\hat{\lambda}\approx \tilde{\lambda}$, we need that $m>\EffDim(\lambda)$, and we do not know this a priori - therefore we also need a way to select large enough $m$ prior to solving \eqref{eq:Root-Solving}. Moreover, to ensure small error in Theorems~\ref{thm:MP-Law}-\ref{thm:Deterministic-Sketch}, one needs to work with $z$ bounded away from $0$. As $\tilde{\lambda}=\lambda(1-\frac1m\EffDim(\lambda))$, to ensure that this is $\Omega(\lambda)$ we need to have $m\ge (1+\Omega(1))\EffDim(\lambda)$. Specifically, we shall aim to choose $m$ between $1.5\EffDim(\lambda)\le m\le 4\EffDim(\lambda)$, the constants chosen somewhat arbitrarily.
+
+\paragraph{Testing for a good $m$.}  
+We devise a test that, given $m$, with high probability: (a) rejects if $m<1.5\EffDim(\lambda)$; and (b) accepts if $m\ge 2\EffDim(\lambda)$.
+Set $z_0=-5\lambda/12$. The tests accepts if $\StielEmp(z_0)>1/\lambda$, and rejects otherwise. \\
+If $m<1.5\EffDim(\lambda)$ then either there is no solution $\tilde{\lambda}>0$ to $\Stiel(-\tilde{\lambda})=1/\lambda$, or there is one, specifically $\tilde{\lambda}=\lambda(1-\frac1m\EffDim(\lambda))\le \lambda/3 < -z_0$. Since $z\mapsto \Stiel(z)$ is positive and increasing for $z<0$, necessarily $\Stiel(z_0)<\Stiel(-\tilde{\lambda})=1/\lambda$. Provided that $m$ is large enough, w.h.p. $\StielEmp(z_0)<1/\lambda$ as well, hence the test rejects. \\
+If $m\ge 2\EffDim(\lambda)$ then $\tilde{\lambda}=\lambda(1-\frac1m\EffDim(\lambda))\ge \lambda/2>-z_0$, hence $\Stiel(z_0)>\Stiel(-\tilde{\lambda})=1/\lambda$. Provided that $m$ is large enough, w.h.p. $\StielEmp(z_0)>1/\lambda$ as well, hence the test accepts.
+
+\paragraph{Searching for $m$ by doubling.} Start with $m=m_0$ large enough; proceeds iteratively, doubling $m$ after each iteration $m := 2m$. At every iteration, apply the above test, halting if it accepts and continuing if it rejects. W.h.p., (a) we do not halt on any $m<1.5\EffDim(\lambda)$; (b) we halt on the first $m$ satisfying $m\ge 2\EffDim(\lambda)$, and therefore return $m$ satisfying $m\le 4\EffDim(\lambda)$.
+
+\paragraph{Computational complexity.} W.h.p., the doubling procedure stops within $\log_2(4\EffDim(\lambda)/m_0))$ iterations. Each iteration $t$ costs at most $O(d^2m_t)$, $m_t=2^{t}m_0$, so the total cost is $O(d^2\min\{\EffDim(\lambda),m_0\})$ and dominated by the cost of  multiplying $SHS^\T$ for $S\in \RR^{m_t\times d}$ at the last iteration.
+
+Having found large enough $m$, we can solve the equation \eqref{eq:Root-Solving} by binary search, and form the sketch \eqref{eq:feature-sketch-Def} with $\hat{\lambda}$ in place of $\tilde{\lambda}$.
+For the reader's convenience, the overall adaptive sketching procedure---which 
+is performed (in parallel) by every worker---is summarized 
+in Algorithms~\ref{Alg:1}-\ref{Alg:2}.
+\begin{algorithm}[H]
+	\caption{}\label{Alg:1}
+	\begin{algorithmic}[1]
+			
+			\Procedure{\ProcChooseMIID}{$H$, $\lambda$, $m_0$}       
+			\State $m=m_0$ 
+			\While{$m<d$}
+			\State{Sample i.i.d. sketch $S \in \RR^{m\times d}$ and form $S H S^\T$.}
+			\State{Compute eigenvalues $\lambda_1(S HS^\T) \ge \ldots \ge \lambda_m(SHS^\T)$.}
+			\If{$\StielEmp(-5\lambda/12) > 1/\lambda$} \Comment{$\StielEmp(z)$ defined in \eqref{eq:StielEmp-Def}.}
+			\State{\Return{m}}	\Comment{Guarantee: w.h.p., $1.5\EffDim(\lambda) \le m \le 4\EffDim(\lambda)$.}
+			\Else
+			\State{m := 2m}	
+			\EndIf
+			\EndWhile
+			\State{\Return m}
+			\EndProcedure
+		\end{algorithmic}
+\end{algorithm}
+\begin{algorithm}[H]
+	\caption{}\label{Alg:2}
+	\begin{algorithmic}[1]
+			
+			\Procedure{\ProcChooseLambdaIID}{$H$, $\lambda$, $m$}
+			\State{Sample sketch $S\in \RR^{m\times d}$ and form $S H S^\T$.}
+			\State{Compute eigenvalues $\lambda_1(S HS^\T) \ge \ldots \lambda_m(SHS^\T)$.}
+			\If{$\StielEmp_m(0)\le 1/\lambda$}
+			\State{ERROR}; set $\hl=5\lambda/12$.
+			\Else
+			\State{
+					Find $5\lambda/12\le \hat{\lambda} \le \lambda$ such that $\StielEmp(-\hat{\lambda})=1/\lambda$.
+				}  \Comment{Can be done by binary search.}
+			\EndIf
+			\State{\Return $(\hat{\lambda}, \hat{W})$ where
+		$					\hat{W}=S^\T (S H S^\T + \hat{\lambda}I)^{-1}S 
+       $
+				}
+				\Comment{(In practice, return $\hat{W}g$ where $g\in\RR^d$ is the current gradient.)}
+			\EndProcedure
+			
+		\end{algorithmic}
+	
+\end{algorithm}
+It is straightforward to establish the asymptotic validity of our adaptive sketching procedure.
+\begin{theorem}\label{thm:Asymptotic}
+	Set $\eta,D>0$, let $m_0$ be an initial sketch size. Assume \AssumAsympZero~(in particular $m_0=\Omega(d)$), and furthermore that $\lambda_{\rank(H)}(H)\ge \tau$. 
+	Let $\hat{m}$ be the output of Algorithm~\ref{Alg:1}, and $(\hat{\lambda},\hat{W})$ be the output of Algorithm~\ref{Alg:2} (the latter given input $m=\hat{m}$).
+	Then w.p. $1-O(m_0^{-D})$:
+	\begin{itemize}[noitemsep,topsep=-5pt]
+		\item $\max\{m_0,1.5\EffDim(\lambda)\} \le \hat{m} \le \max\{m_0,4\EffDim(\lambda)\}$.
+		\item $|\hat{\lambda}-\tilde{\lambda}| = O(m_0^{-1/2+\eta})$.
+		\item $\|\Expt[\hat{W}]-W\| = O(m_0^{-1/2+\delta})$.
+	\end{itemize}
+	The constants in the $O(\cdot)$ notation may depend on $\eta,D>0$ and also $\lambda>0$.
+\end{theorem}
+\begin{proof}
+	This is a straighforward consequence of Theorems~\ref{thm:MP-Law}-\ref{thm:Deterministic-Sketch}. We omit the details.	
+\end{proof}
+
+\subsection{Non-Asymptotic Guarantees for Gaussian Sketches}
+\label{sec:Nonasymptotic}
+
+The guarantees provided by Theorem~\ref{thm:Asymptotic} are asymptotic, in that they do not depend explicitly on crucial problem parameters (such as $\lambda,\|H\|$); in particular, we implicitly assume that $H$ is well-conditioned. When $S\in \RR^{m\times d}$ is an i.i.d. Gaussian matrix, $S_{ij}\sim \m{N}(0,1/m)$, we are able to provide \textbf{non-asymptotic} error guarantees for our adaptive sketching algorithm. Our bounds are dimension-free, and remarkably do not depend explicitly on the condition number of $H$.
+
+Theorems \ref{thm:Alg1-Gauss} and \ref{thm:Alg2-Gauss} respectively provide non-asymptotic guarantees for Algorithms \ref{Alg:1} and \ref{Alg:2}:
+\begin{theorem}\label{thm:Alg1-Gauss}
+	Assume that $S$ has i.i.d. Gaussian entries.
+	Let $\delta\in(0,1)$. Suppose that $m_0\ge  C(1+\log(1/\delta))$ for large enough constant $C$. 
+	W.p. $1-\delta$, Algorithm~\ref{Alg:1} outputs $\hat{m}$ such that 
+	\begin{equation}\label{eq:thm:Alg1-Gauss}
+		\max\{1.5\EffDim(\lambda),m_0\} \le \hat{m} \le \max\{4\EffDim(\lambda),m_0\}\,.
+	\end{equation}
+\end{theorem}
+\begin{theorem}\label{thm:Alg2-Gauss}
+	Assume that $S$ has i.i.d. Gaussian entries.
+	Let $\delta\in(0,1)$ and $\eps>0$. Suppose 
+	Algorithm~\ref{Alg:2} is run with $m\ge 1.5\EffDim(\lambda)$ and that moreover
+	$m\ge C\frac{1 + \log(1/\delta)}{\eps^2}$ for large enough constant $C$.
+	W.p. $1-\delta$, the output $\hat{\lambda}$ satisfies $|\hat{\lambda}-\tilde{\lambda}| \le \eps \tilde{\lambda}$, where $\tilde{\lambda}=\lambda\left(1-\frac1m\EffDim(\lambda)\right)$.
+\end{theorem}
+
+Our final non-asymptotic result concerns the concentration of the aggregate inverse Hessian estimate used by the server. To wit, fix $m\ge 1.5\EffDim(\lambda)$, and let $\hat{W}^{(1)},\ldots,\hat{W}^{(q)}$ be the outputs of $q$ independent runs of Algorithm~\ref{Alg:2}, representing $q$ workers producing estimates of the Newton step in parallel. Denote their average $\bar{W} = \frac{1}{q}\sum_{k=1}^q \hat{W}^{(k)}$, and the error matrix:
+\begin{align}
+	\bar{\m{E}} := (H+\lambda I)^{1/2}\bar{W}(H+\lambda I )^{1/2}-I.
+\end{align}
+Later on, we will obtain error bounds for the quasi Newton method in terms of $\|\bar{\m{E}}\|$.
+
+\begin{theorem}\label{thm:Avg-Gauss}
+	Assume that $S$ has i.i.d. Gaussian entries.
+	Suppose that $m\ge 1.5\EffDim(\lambda)$, and let $q\ge 1$, $\delta\in (0,1)$ satisfy $1/\delta\le \exp(\BigOh(d))$, $q\le \exp(\BigOh(d))$. Let $\exp(-\BigOh(d)) \le \eps\le \BigOh(1)$ be small enough. If moreover
+	\begin{align}
+		m \ge C\frac{1}{\eps^2}\,,\quad q \ge C \frac{d\log d}{m}\frac{\log(1/\delta)}{\eps^2} 
+		\label{eq_26}
+	\end{align}
+	for large enough $C>0$, then w.p. $1-\delta$, $\| \bar{\m{E}} \| \le \eps$.	
+\end{theorem}
+\begin{remark}
+	Up to the logarithmic factor (which we believe is an artifact), the dimensional dependence of $q$ in \eqref{eq_26} is optimal. To see this, suppose that $H=0,\lambda=1$, so $\hat{W}^{(k)}={S^{(k)}}^\T S^{(k)}$. In particular $\rank(\bar{W})=qm$, therefore $\|\bar{\m{E}}-I\|\ge 1$ when $qm<d$. In fact, $\bar{\m{E}}$ is a Wishart (Gaussian sample covariance) matrix corresponding to $mq$ samples, therefore by standard estimates $\Expt\|\bar{\m{E}}-I\| \asymp \frac{d}{mq}\vee \sqrt{\frac{d}{mq}}$, hence the dependence on $\eps$ is correct as well.
+\end{remark}
+	
+
+
+\section{Convergence Results for the Approximate Newton Method}
+
+	
+	\label{sec:Quasi-Newton}
+
+		
+		
+		
+		
+
+In this section we present guarantees for the Newton method with approximate Hessian estimates. These bounds are relevant beyond the parallel scheme considered in this paper, and accordingly are stated in general terms. Let $G:\RR^d\to \bar{\RR}$ be convex and twice-differentiable.\footnote{We denote $\bar{\RR}=\RR\cup\{\infty\}$. With this, the domain of $G$ is $\mathrm{Dom}(G):=\{x\,:\,F(x)<\infty\}$.} We consider generally the Newton-type iteration,
+\begin{align}
+    \theta_t 
+    &= \theta_{t-1} - \alpha_t \bar{W}_t g_t, \label{eq:quasi-Newton-1}\\
+    g_t &:= \nabla G(\theta_{t-1})\label{eq:quasi-Newton-2},
+\end{align}
+where $\bar{W}_t$ approximates the inverse Hessian,
+$\sfH_t := \nabla^2 G(\theta_{t-1})$, $\bar{W}_t\approx \sfH^{-1}_t$ and $\alpha_t$ is a step size.
+\begin{definition}\label{def:Accurate}
+	We say \eqref{eq:quasi-Newton-1}-\eqref{eq:quasi-Newton-2} implement an $\eta$-accurate Newton method if the following holds. Define the error matrix, which measures how well $\bar{W}_t$ approximates the true inverse Hessian $\sfH_t^{-1}$:
+	\begin{equation}
+		\bar{\m{E}}_t := \sfH^{1/2}_t \bar{W}_t  \sfH^{1/2}_t - I \,.
+	\end{equation}
+ Then $\|\bar{\m{E}}_t\|\le \eta$ for every iteration $t$.
+\end{definition}
+For a desired precision $\eps>0$, namely when one desires $\hat{\theta}$ with $G(\hat{\theta})-G(\theta^\star)\le \eps$, $\theta^\star := \argmin G(\theta)$,
+let $\sfT(\eps)$ be the smallest $t\ge 1$ (a priori, if it exists) such that $G(\theta_t)-G(\theta^\star)\le \eps$ for all $t\ge \sfT(\eps)$. This notation suppresses the dependence on $G$ and the sequence of step sizes $\alpha_t$. We consider a variation where the step size is chosen by backtracking line search, see Algorithm~\ref{Alg:LineSearch}.
+\begin{algorithm}[H]
+	\caption{(Backtracking Line Search)}\label{Alg:LineSearch}
+	\begin{algorithmic}[1]
+			
+			\Procedure{\ProcLineSearch}{$\theta_{t-1},g_t,\bar{W}_t$; $G(\cdot)$}
+            \State \textbf{Parameters:} $a,b\in (0,1)$ line search parameters.
+			\State $\alpha=1$ 
+			\While{$G(\theta_{t-1}-\mu \bar{W}g_t) > G(\theta_{t-1})-a g_t^\T (\alpha \bar{W} g_t)$}
+            \State $\alpha := b\alpha$
+			\EndWhile
+            \State\Return $\alpha$ 
+			\EndProcedure
+		\end{algorithmic}
+\end{algorithm}
+This paper focuses on the case when $G$ is self-concordant, which is a standard setting in the literature on second order convex optimization, cf. \citep{boyd2004convex}. We remark that previous works, for example \citep{wang2018giant,dereziński2019distributed}, derived convergence guarantees for the approximate Newton method in a different setting, namely when the Hessian of $G$ is Lipschitz. Due to space constraint, we do not present their results here, though they are applicable in our setting as well. For self-concordant objectives, we are not aware of similar results previously being written down in the literature, hence our results may be of independent interest.
+\begin{definition}
+	We say a univariate convex function $G:\RR \to \bar{\RR}$ is self-concordant if it is thrice-differentiable and $|G'''(x)|\le 2G''(x)^{3/2}$ for any $x$ in its domain. A multivariate convex function $G:\RR^d \to \bar{\RR}$ is self-concordant if any 1-dimensional restriction $G_{x,y}(t)=G(x+ty)$ is self-concordant.
+\end{definition}
+When $f$ is self-concordant, the objective $G(\theta)=f(\theta)+\frac{\lambda}{2}\|\theta\|^2$ in \eqref{eq:Convex-Problem} is self-concordant as well, as the sum of self-concordant function is itself self-concordant, cf. \citep{boyd2004convex}.
+\begin{theorem}
+    Suppose that (a) $G$ is self-concordant; (b) the Newton method is $\eta$-accurate with $\eta<1/5$; and (c) $\alpha_t$ is chosen by backtracking line search. For large enough numerical $C>0$, let 
+    \[
+    T_0 = C \frac{G(\theta_0)-G(\theta^\star)}{ab}, \quad T_1(\eps)=C\log\log(1/\eps),\quad T_2(\eps)=C\frac{\log(\eta/\eps)}{\log(1/\eps)}\,,
+    \]
+    where $a,b$ are the parameters used in backtracking line search (Algorithm~\ref{Alg:LineSearch}).
+    Then 
+    \begin{equation}
+        \sfT(\eps) \le  \begin{cases}
+            T_0 + T_1(\eps) \quad&\textrm{if}\quad \eps\ge \eta \\
+            T_0 + T_1(\eta) + T_2(\eps) 
+            \quad&\textrm{if}\quad \eps<\eta 
+        \end{cases} \,.
+    \end{equation}
+    \label{thm:Convergence}
+\end{theorem}
+The proof of Theorem~\ref{thm:Convergence} builds on and extends an argument of \citep{pilanci2015newton}. Interestingly, Theorem~\ref{thm:Convergence} suggests that the approximate Newton method exhibits two stages: (1) While the error is above the noise floor $\eps\ge \eta$, the error decays quadratically fast. (2) Upon reaching the noise floor, $\eps\le \eta$, the convergence rate becomes linear; however, the linear rate is proportional to $\eta$, that is the error decays as $\sim (O(\eta))^t$. When $\eta$ is very small this decay rate is very fast.
+
+Finally, Theorem~\ref{thm:Convergence} may be readily combined with Theorem~\ref{thm:Avg-Gauss} to yield error bounds for the entire end-to-end parallel method: under the setting of Theorem~\ref{thm:Avg-Gauss}, w.h.p. (and up to $\mathrm{polylog}(d)$ factors),
+\[
+\eta = \tilde{O}\left( \frac{1}{\sqrt{m}} + \sqrt{\frac{d}{mq}} 
+ \right) \,.
+\]
+
+	
+
+
+\section{Numerical Experiments}
+
+
+
+
+
+
+
+
+We demonstrate the utility and validity of our results via numerical experiments. 
+
+
+Our first set of experiments aims to demonstrate our adaptive sketching procedure (Algorithms~\ref{Alg:1}-\ref{Alg:2}) independently of any specific optimization context. For the first experiment, we consider diagonal matrices\footnote{We choose $H$ to be diagonal w.l.o.g. since the Gaussian sketch is invariant to orthogonal transformations.}
+$H$ with eigenvalues $(h_1,\ldots,h_d)$ exhibiting polynomial spectral decay $h_k=k^{-\alpha}$, where $\alpha>0$ is a parameter. The dimension $d=10^4$ is fixed and large, and $\lambda=1$.
+The sketching matrix is i.i.d.i.d. sketching matrices). 
+We run Algorithm~\ref{Alg:1}, repeating for $T=20$ Monte-Carlo trials, and report the sketching dimension found, see Table~\ref{table:Exp1}. Remarkably, our algorithm consistently succeeds, namely finds a sketching dimension that is within $1.5\EffDim(\lambda)\le m \le \max\{m_0,4\EffDim(\lambda)\}$ - per Theorems~\ref{thm:Asymptotic} and \ref{thm:Alg1-Gauss}. 
+\begin{table}[]
+        \centering
+        {\small
+        \begin{tabular}{ |c|c|c|c|c| } 
+         \hline
+         $\alpha$ & $\EffDim(\lambda)$ &  $m_0$ & Success rate & Avg. dim.\\
+         \hline
+         $1$ &$8.8$        &$10$ &$1.0$ &$20$\\ 
+         $2/3$ &$59.7$             &$10$ &$1.0$ &$160$\\ 
+         $1/2$   &$190.4$              &$10$ &$1.0$ &$640$\\ 
+         \hline
+        \end{tabular}
+        }
+        \caption{Success rate of Algorithm~\ref{Alg:1}.}
+        \label{table:Exp1}
+\end{table}
+
+Next, we demonstrate that Algorithm~\ref{Alg:2} produces low-bias estimates of $W$.
+Note that the average Frobenius error $\|\hat{W}-W\|_F^2/d^2$ is a reasonable proxy for the bias of $\hat{W}$, see Theorems~\ref{thm:Determinstic-Cov}-\ref{thm:Deterministic-Sketch}. 
+ Figure~\ref{fig:Exp2} plots the bias proxy for $m$ increasing, starting from $m=1.5\EffDim(\lambda)$, for the Gaussian sketch. As $m$ increases, the bias decreases (roughly at rate $1/\sqrt{m}$). We also plot the bias proxy for a naive estimator of $W$, without bias correction ($\tilde{\lambda}=\lambda$); clearly, our algorithm has substantially smaller bias throughout.
+\begin{figure}[t!]
+\centering 
+\includegraphics[scale=0.30]{figures/fig1_revise2-01.png}
+\caption{
+The bias proxy of the bias-corrected inverse Hessian estimator is substantially lower than without bias correction. Rightmost plot: ensemble (R); left and middle plots: ensemble (L). Leftmost plot: the sketching dimension found by Algorithm~\ref{Alg:1} on ensemble (L). Shaded area: 20\%-80\% confidence interval; We take $T=10$  Monte-Carlo trials. 
+}
+\label{fig:Exp2}
+\end{figure}
+
+Our final set of experiments concerns the performance of the proposed optimization strategy in its entirety, focusing on the benefits of bias reduction. 
+We present experimental results for real-world optimization tasks---for both ridge and logistic regression---using publicly available UCI datasets \citep{chang2011libsvm}. 
+We compare our method with an approximate parallel Newton method where Hessians are sketched ($m$ chosen by Algorithm~\ref{Alg:1}), but no debiasing is done; that is, $\tilde{\lambda}=\lambda$. It is evident from our results, summarized in Figure~\ref{fig:UCI}, that bias correction accelerates convergence, often substantially.
+
+
+
+\begin{figure*}[ht!]
+\begin{subfigure}{}
+\includegraphics[width=3.2cm]{figures/ihs-revise-full-segment.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}{}
+\includegraphics[width=3.2cm]{figures/ihs-revise-full-ionosphere.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}{}
+\includegraphics[width=3.2cm]{figures/ihs-revise-full-space_ga.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}{}
+\includegraphics[width=3.2cm]{figures/ihs-revise-full-vehicle.pdf}
+\end{subfigure}
+\\
+\begin{subfigure}{}
+\includegraphics[width=3.2cm]{figures/logistic-333-diabetes.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}{}
+\includegraphics[width=3.2cm]{figures/logistic-333-heart.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}{}
+\includegraphics[width=3.2cm]{figures/logistic-333-german_numer.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}{}
+\includegraphics[width=3.2cm]{figures/logistic-333-liver-disorders.pdf}
+\end{subfigure}
+
+\caption{
+Improved convergence of our parallel sketched Newton method with bias correction.
+The title of sub-figure corresponds to the dataset used. Repeating for $T=10$ Monte-Carlo trials, the curve corresponds to the median and the shaded part to a $20\%$-$80\%$ confidence interval.
+}\label{fig:UCI}
+\end{figure*}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+
+

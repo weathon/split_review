@@ -1,0 +1,295 @@
+\title{Scaling Diffusion Language Models via Adaptation from Autoregressive Models}
+
+\begin{abstract}
+
+
+Diffusion Language Models (DLMs) have emerged as a promising new paradigm for text generative modeling, potentially addressing limitations of autoregressive (AR) models. However, current DLMs have been studied at a smaller scale compared to their AR counterparts and lack fair comparison on language modeling benchmarks. Additionally, training diffusion models from scratch at scale remains challenging.
+Given the prevalence of open-source AR language models, we propose adapting these models to build text diffusion models. We demonstrate connections between AR and diffusion modeling objectives and introduce a simple continual pre-training approach for training diffusion models.
+Through systematic evaluation on language modeling, reasoning, and commonsense benchmarks, we show that we can convert AR models ranging from 127M to 7B parameters (GPT2 and LLaMA) into diffusion models DiffuGPT and DiffuLLaMA, using less than 200B tokens for training. Our experimental results reveal that these models outperform earlier DLMs and are competitive with their AR counterparts.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+
+Large language models (LLMs) have ushered in a new era of artificial intelligence, demonstrating remarkable capabilities in generating high-quality text, in-context learning, and following complex instructions~\citep{gpt4,touvron2023llama}. These advancements are primarily rooted in the scaling up of autoregressive (AR) language models. During both training and inference, these models leverage vast datasets and billions of parameters, employing a strict left-to-right sequential process for memorization and generation. This approach has resulted in the emergence of intelligence capable of tackling diverse tasks~\citep{wei2022emergent,10.5555/3600270.3602446}. However, the ultimate upper limit of intelligence achievable through this paradigm remains an open question. While AR mechanisms form the foundation of current LLMs, they are not without limitations~\citep{lin2020limitations}. Notable challenges include difficulties in future planning~\citep{bachmannpitfalls,hu2024amortizing,Xie2024TravelPlannerAB} and self-correction~\citep{huang2024large}. These constraints have spurred researchers to explore alternative architectures for next-generation LLMs.
+
+A compelling direction in current research focuses on the development of text diffusion models~\citep{diffusion2023survey}. Building upon the rapid evolution of diffusion models in various domains~\citep{ho2020denoising,nichol2021improved,pmlr-v139-ramesh21a}, innovative text diffusion models~\citep{li2022diffusion, lou2023discrete} have opened up new possibilities for text generation. A unifying insight across these models is the potential of diffusion language models (DLMs) for controllable~\citep{venkatraman2024amortizing}, any-order, and parallel text generation~\citep{gong-etal-2023-diffuseq}. Notably, DLMs exhibit promising capabilities in intermediate token correction~\citep{ye2024diffusion} and global planning~\citep{zhang2023planner}, thereby addressing key limitations inherent in the AR approach.
+
+Despite the promising potential of text diffusion models, the relatively small model size limits the competitiveness of DLMs compared to AR models. Existing state-of-the-art DLMs such as Plaid 1B~\citep{gulrajani2023likelihoodbased} and SEDD~\citep{lou2023discrete} are relatively small in scale (127M-1B parameters) and under-trained, with less than 400B tokens of training data. This substantial gap in scale prevents fair comparisons with larger AR language models on many advanced capabilities and tasks, such as chain-of-thought reasoning abilities on complex mathematical benchmarks. However, pre-training at such a scale is extremely resource-intensive, and the challenge is even more pronounced for diffusion models. These models lack the computational optimizations that have been developed for LLMs~\citep{samragh2024scaling} and require significantly more resources than their AR counterparts, as noted by~\citet{gulrajani2023likelihoodbased}. 
+
+Given these scaling challenges, pre-trained LLMs emerge as an invaluable resource that we can leverage, considering the extensive computational efforts already invested in their development. This strategy aligns with recent trends where new models are scaled up or adapted to new architectures using existing LLMs~\citep{wang2024mamba,zhang2024gated}. However, building DLMs through adaptation from AR models is non-trivial due to fundamental differences in their language modeling objectives. Two key distinctions present significant hurdles. First, AR models employ causal masking to prevent future information leakage, whereas diffusion models utilize bi-directional attention masks. Second, an AR LM processes clean inputs to predict subsequent tokens at each step, while a diffusion model operates on noisy inputs to predict their denoised versions.
+
+
+
+To overcome these challenges, we propose a simple adaptation approach that bridges these discrepancies. We unify their modeling objectives (\S\ref{sec:uni}) and address the architectural differences by breaking the causal masking bias in AR models through attention mask annealing (\S\ref{sec:mask-anneal}). Additionally, we inherit the shift operation from AR models (\S\ref{sec:shift-ope}). This streamlined adaptation recipe enables us to construct a pre-trained DLM that can effectively compete in the arena of LLMs.
+Building on this approach, we leverage the FineWeb~\citep{penedo2024finewebdatasetsdecantingweb} and SlimPajama~\citep{cerebras2023slimpajama} pre-training corpora to continue training small and medium-sized DLMs based on GPT2~\citep{Brown2020LanguageMA}, and further scale up to a 7B model based on LLaMA2~\citep{touvron2023llama2}.
+
+Our experiments provide a comprehensive comparison between AR LMs and DLMs across language modeling, reasoning, and infilling tasks. The evaluation encompasses diverse settings, including zero-shot, few-shot, and fine-tuning scenarios, addressing the limitations of relying solely on perplexity in previous works~\citep{shi2024simplified}. Our contributions and empirical findings include:
+
+\begin{itemize}[leftmargin=12pt]
+    \item We demonstrate that by narrowing the gap between AR models and DLMs, it is possible to convert 127M-7B AR models (GPT2 and LLaMA2) into DiffuGPT and DiffuLLaMA with training on less than 200B tokens. Notably, DiffuGPT outperforms GPT2 in most tasks.
+    \item We 
+    scale DLMs to 7B parameters, greatly expanding the expertise compared to smaller-scale diffusion models. DiffuLLaMA emerges as the state-of-the-art DLM, exhibiting in-context learning, code generation, and strong infilling capabilities. Its generation speed is competitive with AR counterparts for unconditionally generating $1024$ tokens using $256$ diffusion timesteps.
+    \item We provide a comprehensive benchmark for DLMs and release our adapted diffusion models (127M, 355M and 7B) along with open-source adaptation code, efficient fine-tuning scripts, and evaluation toolkits.
+\end{itemize}
+
+
+\section{Preliminary and Notation}
+
+\label{sec:prel}
+Diffusion models~\citep{sohl2015deep,song2019generative,ho2020denoising,song2021scorebased} are latent variable generative models characterized by a forward and a reverse Markov process. We denote $\mathbf{x}_0\sim p_{data}(\mathbf{x}_0)$ as the variable following the data distribution, and $\mathbf{x}_t\sim q(\mathbf{x}_t)$ as the noisy variable of $\mathbf{x}_0$ at time $t$, where the maximum time is $T$. The forward process $q(\mathbf{x}_{1:T}|\mathbf{x}_0)=\prod_{t=1}^Tq(\mathbf{x}_t|\mathbf{x}_{t-1})$ corrupts the initial data $\mathbf{x}_0$ into a sequence of increasingly noisy variables $\mathbf{x}_{1:T}$. Accordingly, the backward Markov process models the joint probability as $p_{\theta}(\mathbf{x}_{0:T})=p_{\theta}(\mathbf{x}_T)\prod_{t=1}^Tp_{\theta}(\mathbf{x}_{t-1}|\mathbf{x}_t)$, which gradually denoises $\mathbf{x}_t$ to reconstruct the original data $\mathbf{x}_0$. Parameters $\theta$ are learned by minimizing the negative log-likelihood of $\mathbf{x}_0$, which can be optimized through the evidence lower bound (ELBO),
+\begin{equation}
+\label{eq:ori-loss}
+    -\log p_{\theta}(\mathbf{x}_0) \leq \mathbb{E}_{q(\mathbf{x}_1|\mathbf{x}_0)}[-\log p_{\theta}(\mathbf{x}_0|\mathbf{x}_1)] + \KL(q(\mathbf{x}_T|\mathbf{x}_0)||p_{\theta}(\mathbf{x}_T))+\mathcal{L}_T,
+\end{equation}
+with $\mathcal{L}_T=\sum_{t=2}^T\mathbb{E}_{q(\mathbf{x}_t|\mathbf{x}_0)}[\KL(q(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0)||p_{\theta}(\mathbf{x}_{t-1}|\mathbf{x}_t))]$. 
+For continuous text diffusion~\citep{li2022diffusion,gong2022diffuseq}, at each forward step, perturbations are applied according to $q(\mathbf{x}_{t} \vert \mathbf{x}_{t-1}) = \mathcal{N}(\mathbf{x}_{t};\sqrt{1-\beta_t}\mathbf{x}_{t-1}, {\beta}_t \mathbf{I})$, where $\beta_t \in (0,1)$ represents different scales across time steps such that $\mathbf{x}_T \sim \mathcal{N}(0, \mathbf{I})$.
+In the case of discrete denoising models~\citep{ho2020denoising, austin2021structured, Zheng2023ARD}, the forward process is defined as a categorical distribution $q(\mathbf{x}_{t} \vert \mathbf{x}_{t-1})=\text{Cat}(\bm{x}_t;\bm{Q}_t^\top\bm{x}_{t-1})$, where each $\mathbf{x}_t \in \{0, 1\}^K$ is a one-hot vector with vocabulary size $K$, $\bm{Q}_t\in[0,1]^{K\times K}$ is the transition matrix, and each entry $[\bm{Q}_t]_{ij}$ denotes the probability of transition from the state $i$ to $j$. We build on the formulation of \textit{absorbing discrete diffusion} \citep{austin2021structured}, which specifies $\bm{Q}_t=(1-\beta_t)I+\beta_t\mathbf{1}\bm{m}^\top$. We denote $\mathbf{1}$ as an all-one vector of size $K$ and $\bm{m}$ as the one-hot encoding of a special \mask token in the vocabulary. 
+Therefore, the transition matrix, $\bm{Q}_t$ indicates that with probability $1 - \beta_t$, $\bm{x}_t$ remains unchanged; otherwise, it transitions to $\bm{m}$, becoming absorbed into \mask.
+Letting $\bm{\overline{Q}}_t \coloneqq \prod_{i=1}^t\bm{Q}_i=\alpha_tI+(1-\alpha_t)\mathbf{1}\bm{m}^\top$ and $\alpha_t \coloneqq \prod_{i=1}^t(1-\beta_t)$, the distribution of $\bm{x}_t$ conditional on $\bm{x}_0$ is given by
+\begin{equation}
+\label{eq:qxt}
+    q(\bm{x}_t|\bm{x}_0)=\text{Cat}(\bm{x}_t;\bm{\overline{Q}}_t^\top\bm{x}_0) = \alpha_t I\bm{x}_0 + (1-\alpha_t)\bm{m}\mathbf{1}^\top\bm{x}_0 = \alpha_t \bm{x}_0 + (1-\alpha_t)\bm{m},
+\end{equation}
+since $\bm{x}_0$ is a one-hot vector and thus $\mathbf{1}^\top\bm{x}_0 = 1$. We expect $\alpha_T$ to approach $0$ such that the full noise data $\bm{x}_T$ equals $\bm{m}$ with probability $1$.
+
+The discrete time representation of $t \in [0, T]$, restricts $\bm{x}_t$ to fixed noise ratios.
+To avoid this bias and enable sampling from any noisy representation, we use continuous-time sampling, allowing $t$ to span any point within $[0, 1]$ ~\citep{kingma2021variational,shi2024simplified,zhao2024improving,ou2024your}.
+Continuous-time sampling is equivalent to dividing  $[0, 1]$ into $T$ intervals and where $T \rightarrow \infty$. 
+For any $0 \leq s < t \leq 1$, the forward process generalizes to $q(\mathbf{x}_{t} \vert \mathbf{x}_{s})$. We will use this continuous-time notation in the following sections.
+
+
+
+\section{Model}
+
+\label{sec:model}
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{fig/pipeline_v3.pdf}
+    \caption{The overview of our approach to adapt autoregressive (AR) models to diffusion models. \textbf{Left}: The shift operation in AR models enables the output layer $h_i$ to approximate the distribution of next tokens $x_{i+1}$ in hidden representations through the cross entropy (CE) loss. \textbf{Middle}: We remove the causal mask gradually during training eventually making our model bi-directional. \textbf{Right}: inside the diffusion models we shift the logits to compute the loss with the next token (i.e., the loss on $h_i$ would be with respect to $x_{i+1}$), while perceptually, the diffusion models are still functioning as recovering the original signals (since $h_i$ corresponds to $x_{i+1}$ in AR loss).}
+    \label{fig:pipeline}
+\end{figure}
+We begin by formulating the continuous-time discrete diffusion process (\S\ref{sec:continuous}) and establishing a connection between the discrete diffusion and autoregressive objectives (\S\ref{sec:uni}). Based on this equivalence, we propose an adaptation approach (\S\ref{sec:ada}) and a sampling algorithm (\S\ref{sec:sampling}) for diffusion models adapted from AR models. The whole process is illustrated in Figure~\ref{fig:pipeline}.
+
+\subsection{Continuous-time Discrete Diffusion Processes}
+\label{sec:continuous}
+Following Eq.\ref{eq:qxt} and $q(\bm{x}_t|\bm{x}_0)=\sum_{\bm{x}_s}q(\bm{x}_t|\bm{x}_s)q(\bm{x}_s|\bm{x}_0)$, the forward transition distribution between arbitrary points $s < t$ can be derived as
+\begin{equation}
+    q(\bm{x}_t|\bm{x}_s)=\text{Cat}(\bm{x}_t;\bm{\overline{Q}}_{s|t}^\top \bm{x}_s) =\frac{\alpha_t}{\alpha_s}\bm{x}_s+(1-\frac{\alpha_t}{\alpha_s})\bm{m},
+\end{equation}
+with $\bm{\overline{Q}}_{s|t} \coloneqq \bm{\overline{Q}}_s^{-1}\bm{\overline{Q}}_t=\frac{\alpha_t}{\alpha_s}I+(1-\frac{\alpha_t}{\alpha_s})\mathbf{1}\bm{m}^\top$. The corresponding backward transition distribution conditional on $\bm{x}_0$ is also available in closed form,
+\begin{equation}
+\label{eq:qxs}
+    q(\bm{x}_s|\bm{x}_t, \bm{x}_0) = \frac{q(\bm{x}_t|\bm{x}_s)q(\bm{x}_s|\bm{x}_0)}{q(\bm{x}_t|\bm{x}_0)}=
+    \begin{cases}
+        \frac{\alpha_s-\alpha_t}{1-\alpha_t}\bm{x}_0+\frac{1-\alpha_s}{1-\alpha_t}\bm{m} & \text{if } \bm{x}_t=\bm{m}, \\
+        \bm{x}_0 & \text{if }\bm{x}_t\neq\bm{m}. \\
+    \end{cases}
+\end{equation}
+In discrete diffusion processes, we aim to approximate the backward transition distribution $q(\bm{x}_s|\bm{x}_t,\bm{x}_0)$ using a denoising model $p_{\theta}(\bm{x_s}|\bm{x}_t, f_{\theta}(\bm{x}_t))$, where $f_{\theta}(\bm{x}_t)$, an approximation of $\bm{x}_0$, is usually the output of neural networks such as a transformer~\citep{NIPS2017_3f5ee243}. We can define the denoising model to have a similar form of backward transitions as $p_{\theta}(\bm{x_s}|\bm{x}_t)=\frac{\alpha_s-\alpha_t}{1-\alpha_t}f_{\theta}(\bm{x}_t)+\frac{1-\alpha_s}{1-\alpha_t}\bm{m}$. According to the training objective in Eq.\ref{eq:ori-loss}, the KL-divergence of $\mathcal{L}_T$ at each step $t$ can be simplified to a reweighted cross-entropy function,
+\begin{equation}
+    \KL(q(\bm{x}_s|\bm{x}_t,\bm{x}_0)||p_{\theta}(\bm{x}_s||\bm{x}_t))=-\frac{\alpha_s-\alpha_t}{1-\alpha_t}\delta_{\bm{x}_t,\bm{m}}\bm{x}_0^\top\log f_{\theta}(\bm{x}_t),
+\end{equation}
+where $\delta_{a,b}$ is the indicator function for $a=b$. If we take the limit and let $T\rightarrow \infty$, the first two terms of Eq.\ref{eq:ori-loss} will approach 0 and some constant, respectively. Thus the evidence lower bound (ELBO) effectively becomes $\mathcal{L}_T$ and
+\begin{equation}
+\label{eq:L_T}
+    \lim_{T\rightarrow \infty}\mathcal{L}_T = \int_{0}^{1}\frac{\alpha_t^\prime}{1-\alpha_t}\mathbb{E}_{q(\mathbf{x}_t|\mathbf{x}_0)}[\delta_{\bm{x}_t,\bm{m}}\bm{x}_0^\top\log f_{\theta}(\bm{x}_t)]\,dt.
+\end{equation}
+ The same form of ELBO which is invariant to noise schedule but related to the signal-to-noise ratio (SNR) is also introduced in~\citet{kingma2021variational,shi2024simplified}. Following~\citet{austin2021structured}, we choose the noise schedule $\alpha_t=1-t$, then $\frac{-\alpha_t^\prime}{1-\alpha_t}=\frac{1}{t}$.
+The previous discussion focused on the single token $\bm{x}_t$, and can be applied independently to a text sequence of $N$ tokens $\mathbf{x}_t=[\bm{x}_t^{1}, \bm{x}_t^{2}\dots, \bm{x}_t^{N}]$. During training, we do not compute integral loss in Eq.\ref{eq:L_T} for efficiency consideration; instead, we sample $t$ for each data point. The final loss at $t$ is
+\begin{equation}
+\label{eq:dm-loss}
+    \mathcal{L}_{t}^{1:N} = \frac{1}{t}\mathbb{E}_{q(\mathbf{x}_t|\mathbf{x}_0)}\left[-\sum_{n=1}^N\delta_{\mathbf{x}_t^n,\bm{m}}(\mathbf{x}_0^{n})^\top\log f_{\theta}(\mathbf{x}_t^{1:N})_n\right],
+\end{equation}
+where $f_{\theta}(\mathbf{x}_t^{1:N})_n$ denotes the whole input sequence is fed into the transformer model and the $n$-th output token is indexed.
+
+\subsection{Unifying Language Modeling Objectives}
+\label{sec:uni}
+The training objective of autoregressive (AR) language models is the negative log-likelihood of each ground-truth token provided the preceding tokens,
+\begin{equation}
+\label{eq:ce}
+    \mathcal{L}_{AR}^{1:N} = -\sum_{n=1}^N (\mathbf{x}_0^{n})^\top \log f_{\theta}(\mathbf{x}_0^{1:n-1})_{n-1}.
+\end{equation}
+Comparing Eq.\ref{eq:ce} against Eq.\ref{eq:dm-loss}, we note that while both take the form of cross-entropy functions, Eq.\ref{eq:dm-loss} includes an additional reweighting term $\frac{1}{t}$ and an indicator function $\delta_{\mathbf{x}_t^n,\bm{m}}$. They result from the definition of discrete diffusion processes (\S\ref{sec:continuous}). The reweighting emphasizes smaller $t$ where $\mathbf{x}_t$ contains fewer masked tokens, and this can be regarded as the importance sampling~\citep{nichol2021improved}. The indicator specifies which tokens are masked for prediction. The AR training objective Eq.\ref{eq:ce}, on the other hand, constrains the context to be unidirectional via attention masking and shifts the targets so that each token predicts the next token instead of itself. These discrepancies form the basis of our adaptation framework, which is detailed in \S\ref{sec:ada}.
+ 
+In fact, an alternative way to understand AR modeling, through the lens of diffusion models, is to consider a diffusion process where the forward pass deterministically masks right-to-left and token-by-token~\citep{austin2021structured,hoogeboom2022autoregressive}. This yields a backward process generating one token at a time from left to right, running with $T=N$ denoising steps in total. As discussed in~\citet{austin2021structured}, the loss objective of this diffusion process is equivalent to standard cross-entropy (Eq.\ref{eq:ce}) commonly used to train AR language models. This crafted diffusion process for AR models represents a special case of discrete diffusion (\S\ref{sec:continuous}), yet it is limited to unidirectional context and sequential token generation. In contrast, general discrete diffusion processes can leverage bidirectional context and support parallel generation in arbitrary orders.
+
+\subsection{Adaptation}
+Building on the connection between AR modeling and discrete diffusion processes, we construct an adaptation recipe next.
+Figure~\ref{fig:pipeline} shows an overview of our adaptation approach. 
+We use attention mask annealing, shift operations, and a time-embedding free architecture to narrow the differences between AR and DLMs.
+
+\label{sec:ada}
+\begin{figure}[ht]
+  \begin{minipage}[h]{0.49\linewidth}
+    \centering
+    \footnotesize
+    \input{algos/training}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[h]{0.49\linewidth}
+    \centering
+    \footnotesize
+    \input{algos/sampling}
+  \end{minipage}
+\end{figure}
+\paragraph{Attention Mask Annealing}
+\label{sec:mask-anneal} 
+The prediction of the $n$-th token, given all preceding tokens, $f_{\theta}(\mathbf{x}_0^{1:n-1})$, is usually implemented by causal attention masking in transformer-based AR language models. 
+As shown in Figure~\ref{fig:pipeline}, causal attention masks set all entries in the upper triangle of the self-attention matrices to zero,
+so each token cannot attend to its respective future tokens. 
+Such causal masking prevents the model from learning right-to-left dependencies for more general diffusion processes. 
+To address this limitation while preserving left-to-right conditionals during adaptation, we introduce an incremental annealing process from causal masks to full attention matrices. 
+During annealing, the causal mask is not immediately removed; instead, it is retained at a controlled ratio, as shown in the middle part of  Figure~\ref{fig:pipeline}.
+At each training step, we sample the amount of context from the right side and progressively increase this amount till we obtain the full attention mask.
+
+\paragraph{Shift Operation}
+\label{sec:shift-ope}
+AR models also apply a shifting operation, where the target output is the input sequence shifted left by one position. In other words, the prediction target of the $(n\!-\!1)$-th token is the $n$-th token, contrasting with typical diffusion models that try to predict masked tokens at their original positions. When initializing text diffusion models with AR model parameters, the model would tend to output the hidden representations of the shifted input sequence. If we continue to optimize the cross-entropy objective based on the original token positions, the model struggles to adapt due to misalignment between input and output. Instead, we maintain the shift operation (Algo.\ref{alg:training}, line \ref{algo:line-loss}), treating the output logits at each position as corresponding to the next token. When calculating the objective, we align prediction targets so that the diffusion model learns to recover the original signals. This process is illustrated in the right panel of Figure~\ref{fig:pipeline}.
+
+\paragraph{Time-Embedding-Free Architecture}
+Many diffusion models for text generation~\citep{li2022diffusion,dieleman2022continuous,gulrajani2023likelihoodbased,lou2023discrete,shi2024simplified} incorporate time embedding layers to represent the information of current timesteps $t$, which can explicitly indicate the noise scale of the input noisy data. 
+While inferring these timesteps can be challenging for image diffusion models~\citep{ho2020denoising,li2024autoregressive}, some discrete text diffusion models~\citep{he-etal-2023-diffusionbert} assert that timesteps $t$ can be easily learned implicitly based on the number of mask tokens. 
+Since AR models are not equipped with time embedding layers, we also choose not to use the time embedding, resulting in no additional parameters compared to previous diffusion models.
+
+
+\subsection{Sampling}
+\label{sec:sampling}
+Following~\citet{shi2024simplified}, we initialize $\bm{x}_T$ with all \mask tokens and then sample tokens according to the time reversal $q(\bm{x}_s|\bm{x}_t, \bm{x}_0)$ in Eq.\ref{eq:qxs}. At each timestep, if $\bm{x}_t$ is a mask, it will jump to the predicted $\bm{x}_0$ at time $s$ with probability $\frac{\alpha_s-\alpha_t}{1-\alpha_t}$. After $T$ iterations, the model generates the full sequence. Since our adapted models are trained with the shift operation, at each sampling iteration, we shift back the generated sentence and prepend a start token before the next forward pass (Algo.\ref{alg:sampling}, line~\ref{algo:line-sample-shift}). Usually larger $T$ requires more interactions of computation, and can yield texts in higher quality, and this trade-off can be controlled easily through $T$. Through experiments, we find that the output generated by diffusion models is diverse and scattered. Therefore, for conditional generation tasks, we improve the sampling procedure to ensure that only tokens with
+high probabilities from neural networks are
+denoised~\citep{ghazvininejad-etal-2019-mask,maskgit,Zheng2023ARD}, so that the model could predict tokens mostly relevant to the input. In addition, existing sampling techniques for AR language models, including top-$k$ and nucleus sampling~\citep{holtzmancurious}, can be seamlessly applied to diffusion models as well.
+
+
+\section{Experiment}
+
+
+
+\subsection{Adaptation setup}
+
+\noindent\textbf{DiffuGPT} We use the 30 billion tokens\footnote{This is the total number of tokens used; however, our effective training tokens exceed this count, meaning that we train for more than one epoch.} random split from the FineWeb dataset \citep{penedo2024finewebdatasetsdecantingweb}, an improved corpus than OpenWebText~\citep{Gokaslan2019OpenWeb} used in prior DLMs~\citep{lou2023discrete}, to continue training GPT2 base \citep{Radford2019LanguageMA}. We use sequence packing, logits shifting, and $10$K-step attention mask annealing to transform GPT2 to DiffuGPT.
+
+\begin{wrapfigure}{r}{0.32\textwidth}
+  \centering
+  \includegraphics[width=0.32\textwidth]{fig/train-loss.pdf}
+  \caption{Training loss over tokens for different scales of our adapted diffusion models.}
+  \label{fig:train-loss}
+\end{wrapfigure}
+
+\noindent\textbf{DiffuLLaMA} We continue pre-training \textsc{llama-2-7-hf}~\citep{touvron2023llama} on a mixture of SlimPajama (70\%)~\citep{cerebras2023slimpajama} and Starcoder (30\%)~\citep{li2023starcoder} data following TinyLLaMA~\citep{zhang2024tinyllama}. 
+We randomly sample 65 billion tokens from this mixture and use sequence packing with context length of $2048$.
+For efficient implementation we enable flash-attention 2~\citep{dao2023flashattention2} and directly use bi-directional attention without attention mask annealing. 
+
+For both adaptation settings, we employ full parameter finetuning with \texttt{bf16}.
+We plot the training loss curve in Figure~\ref{fig:train-loss}. We train DiffuLLaMA on 60B tokens and achieve a lower loss compared to 127M and 335M models, suggesting a scaling trend similar to that of AR LLMs~\citep{kaplan2020scaling}. 
+We also note that there is still scope for training more, since the model does not show signs of saturation.
+\subsection{Evaluation setup}
+Previously developed diffusion language models~\citep{gulrajani2023likelihoodbased,lou2023discrete,shi2024simplified,ou2024your} evaluate model performance using zero-shot perplexity on benchmark datasets. However, this metric alone does not fully capture a model's capabilities for several reasons. First, lower perplexity does not always correlate with human-like content, even in autoregressive models~\citep{kuribayashi-etal-2021-lower}. Additionally, the loss from text diffusion models only indicates an upper bound on negative log-likelihood. While~\citet{kingma2021variational,shi2024simplified} demonstrate that the ELBO is invariant to the noise scheduler, discrepancies between continuous diffusion, discrete diffusion, and autoregressive loss still hinder fair comparisons across different model types. Given the ample evaluation benchmarks~\citep{gu2024olmes} for LLMs, we propose a more comprehensive evaluation for diffusion models.
+\input{tabs/maintab}
+
+\noindent\textbf{Tasks and Metrics}
+We consider TriviaQA~\citep{JoshiTriviaQA2017} to test the reading comprehension of models and last word completion task Lambada~\citep{paperno-etal-2016-lambada} to test how models capture long-range dependencies in text. These two tasks are measured by exact match accuracy.
+We also test for common sense reasoning tasks HellaSwag~\citep{zellers2019hellaswag}, Winogrande~\citep{WinoGrande2021}, SIQA~\citep{sap-etal-2019-social} and PIQA~\citep{Bisk2020}, all of which involve multiple-choice questions assessed by accuracy. On grade school math problems GSM8K~\citep{Cobbe2021TrainingVT}, we follow~\citet{ye2024diffusion} in finetuning setting using the augmented symbolic data to test the CoT~\citep{NEURIPS2022_9d560961} math reasoning abilities of diffusion models. Following~\citet{shen2023film}, we also test the story infilling tasks using ROCStories~\citep{mostafazadeh-etal-2016-corpus} and evaluate using ROUGE score~\citep{lin2004rouge}. To test the code infilling, we adopt Humaneval~\citep{bavarian2022efficient} single line infilling task, which is evaluated by pass@1 rate.
+We evaluate DiffuLLaMA's math reasoning and in-context learning ability by evaluating on MAWPS~\citep{koncel-kedziorski-etal-2016-mawps}
+and SATMATH
+\citep{zhong-etal-2024-agieval}.
+We 
+re-implement all tasks to ensure a fair comparison.
+
+\noindent\textbf{Implementation Details} For pre-trained diffusion language models, we mainly use continuous diffusion (CD) model Plaid 1B
+\citep{gulrajani2023likelihoodbased}, discrete diffusion (DD) model SEDD
+\citep{lou2023discrete} with different scales as baselines. 
+For autoregressive (AR) baselines, we consider the base models from which our models adapt. We implement infilling tasks for AR models by feeding the prefix and cutting off the generation length using the oracle length, considering that these AR models are not supporting infilling. For the sentence completion task, $T$ is the exact number of ground truth tokens for DD and $32$ for CD. For 4 multi-choices tasks from commonsense reasoning, we compute the loss (Eq.\ref{eq:L_T}) of each choice (averaged by token) and choose the one with lowest loss (perplexity). For GSM8K finetuning, we use parameter-efficient LoRA tuning~\citep{hu2022lora} for DiffuLLaMA. The decoding $T$ are set to $32$ by default.
+
+\subsection{Language modeling capacities}
+\paragraph{Benchmark performance}
+According to Table~\ref{tab:eval}, the results on diverse tasks demonstrate that our adapted diffusion models achieve the state-of-the-art results among all existing diffusion language models (DLMs). Notably, by observing different scales of our adapted diffusion models, we can draw the conclusion that scaling diffusion language models results in improved performance. When comparing with their respective AR counterparts, both DiffuGPTs outperform the GPT2 on most tasks. DiffuLLaMA's performance still falls short of the LLaMA2 model. This discrepancy is presumably attributed to the extensive amount of training tokens processed by the DiffuGPT series models, whereas the 7B model has not undergone equivalent training. TriviaQA and PIQA are significant challenging for DLMs, probably because they require specific physical knowledge, such as \textit{the capital of a city} or \textit{the boiling point of water}; while our models are trained on 30B-70B tokens, which may be insufficient to preserve the general knowledge in the original LMs~\citep{ke2023continual}. 
+
+In tasks that require more extensive global reasoning, such as complex mathematics and coding, DLMs consistently exhibit better performance compared to AR models that rely solely on left-to-right modeling capabilities.
+Remarkably, DLMs demonstrate their strengths in infilling tasks.
+Regular LLMs like LLaMA2 are not trained for filling-in-the-middle (FIM) tasks like those in ~\citet{roziere2023code}, making them incapable of handling infilling. Considering this, we do not provide the suffix information to the model, which might result in an unfair comparison. But the FIM requires re-arranging the order of pre-training/inference sequence with special tokens~\citep{zheng2024selfinfilling}, while diffusion training naturally supports this in its objective modeling.
+
+Tasks in Table~\ref{tab:eval} mainly measure conditional modeling abilities, where Plaid 1B performs unsatisfactorily for conditional generation tasks even though with 1B parameters. 
+We attribute this result to the gap between the continuous diffusion modeling and discrete text representation; in contrast, discrete diffusion models align more closely with AR modeling, naturally supporting conditional generation. Despite this, as illustrated in Figure~\ref{fig:ungen-ppl}, Plaid 1B demonstrates its strength in unconditional generation, highlighting its language modeling capabilities as a generative model. These findings reveal that the previous evaluation based on the perplexity of test data is too general to accurately assess the model's true capabilities, while our evaluation offers a more nuanced benchmark.
+
+\paragraph{Unconditional Generation}
+\begin{wrapfigure}{r}{0.4\textwidth}
+  \centering
+  \includegraphics[width=0.4\textwidth]{fig/ungen-ppl.pdf}
+  \caption{Quality evaluation for unconditional generation, with perplexity measured by GPT2 large and distinct 2-gram diversity.}
+  \label{fig:ungen-ppl}
+\end{wrapfigure}
+We evaluate the quality of text unconditionally generated by DLMs in Figure~\ref{fig:ungen-ppl}. The perplexity is measured using GPT2 large, consistent with the prior work~\citep{lou2023discrete}, where the data of MD4~\citep{shi2024simplified} is sourced from its original paper. To make sure low perplexity is not brought by repeated content, we assess the distinct 2-gram diversity of the generated text. Our model achieves low perplexity while maintaining a high level of diversity, validating that the DiffuGPT series excels in fluent text generation.
+As the number of decoding steps increases, thereby extending the test computing time, the fluency of unconditional generation improves. Similarly, scaling model size also contribute to better performance. An increase in generation perplexity is often associated with a slight decrease in diversity, which is a common phenomenon. Notably, DiffuGPT outperforms both SEDD and MD4 models, particularly at lower step counts (e.g., 64 steps), while as the continuous diffusion models, Plaid 1B needs more decoding steps to generate more fluent texts. DiffuGPT thus exhibits a significant advantage on less sampling time.
+
+\subsection{Analysis on DiffuLLaMA}
+\input{tabs/diffullama}
+We validate that scaling of DLMs significantly enhances the performance of downstream tasks in Table~\ref{tab:eval}. 
+Further, we aim to assess if the scaled 7B model demonstrates in-context learning and reasoning capabilities 
+similar to AR LLMs. Table~\ref{tab:diffullama} presents the exact match accuracy between gold labels and predictions generated by DiffuLLaMA across zero-shot (ZS), few-shot (FS), and FS with chain-of-thought (CoT) scenarios. Besides, we deploy the self-consistency approach~\citep{wang2023selfconsistency}, considering that small DLMs can indeed benefit from this technique~\citep{ye2024diffusion}. We use majority vote to choose the best answer from $3$ individual predictions, and also report the hit rate @$k$ with $k=3$, which counts if any of the predictions hit the correct answer. 
+For in-context learning (ICL) evaluations, we give $4$-shot on math tasks and $2$-shot on TriviaQA. 
+
+The performance improvement from zero-shot to few-shot settings suggests that DiffuLLaMA can learn from ICL examples, particularly in following to the format of answers as we observe. We hypothesize that the adapted model retains some of the abilities from the base AR model.
+We randomly select the ICL demonstration here and anticipate that advanced ICL strategies in LLMs~\citep{wu-etal-2023-self} could yield potentially higher results.
+The self-consistency offers LMs with an effective approach to test-time scaling~\citep{snell2024scaling}, and DiffuLLaMA shows that it can also leverage this method. Furthermore, we report the hit rate results in generated candidate answers, highlighting the model's potential to produce the correct answer. This reveals that the current model exhibits high uncertainty about its responses, leading to temporarily suboptimal performance.
+We also observe that adding step-wise solutions in the in-context example (CoT) leads to a drop in performance, likely due to the absence of instruction tuning, similar to the findings in LLMs~\citep{ouyang2022training}. We will leave instruction tuning as the future work as~\citet{ye2023diffusion} show that text diffusion model can benefit from instruction tuning.
+In summary, we show the potential capabilities of DiffuLLaMA, which motivates us to further investigate the scaling of diffusion models.
+
+\subsection{Discussions}
+\paragraph{Ablation Test on GSM8K-symbolic}
+\input{tabs/gsm}
+Direct ablation on adaptation training is costly; hence, we conduct preliminary experiments to determine the adaptation recipes.
+Following~\citet{ye2024diffusion}, we finetune models on the augmented GSM8K symbolic dataset using various base models and training objectives. The models are either trained from scratch (random initialization) or initialized with GPT2-S/M weights. Training objectives includes autoregressive training with a causal mask, continuous diffusion loss (CD), and discrete diffusion loss (DD).
+As shown in Table~\ref{tab:gsm}, different training objectives yield comparable results when training from scratch.
+However, when using GPT2 as the base model, the CD loss performs worse than both the DD and AR losses. We attribute this to the better alignment of DD and AR losses as discussed in \S\ref{sec:uni}. 
+Previous continuous diffusion models~\citep{dieleman2022continuous, gulrajani2023likelihoodbased} has reparameterized the estimation of embeddings into the CE loss. However, adapting diffusion models from an AR model in continuous space necessitates an additional projection from the embedding to a categorical distribution, increasing the difficulty of adaptation.
+
+For DD loss, removing attention mask annealing and shift operations both degrade performance, indicating the efficacy of our approaches. The mask annealing has minimal impact, so we choose to omit it for 7B adaptation to simplify implementation using flash-attention 2.
+
+Direct DD loss finetuning on GPT2 achieves accuracy of $45.4$ and $49.7$ for small and medium models, respectively, outperforming GPT2 AR finetuning. However, finetuning from already adapted diffusion language models (DiffuGPT) yields accuracy of $50.2$ and $61.8$ (Table~\ref{tab:eval}). This demonstrates the superiority of DiffuGPT as the current best diffusion base model at this scale and highlights that a better base model leads to improved results.
+
+\paragraph{Inference Speed}
+
+\begin{wrapfigure}{r}{0.38\textwidth}
+  \centering
+  \includegraphics[width=0.38\textwidth]{fig/speed.pdf}
+  \caption{Single batch decoding speed (seconds) for different models using flash-attention 2.}
+  \label{fig:speed}
+\end{wrapfigure}
+
+AR models usually utilize key-value caching (incremental decoding; \citealt{ott-etal-2019-fairseq}) to enhance throughput during decoding. However, due to the nature of sequential token generation, they are highly memory-bound and cannot fully exploit modern accelerators \citep{chen2023accelerating}. In contrast, diffusion models, despite not having a concept of caching and requiring self-attention over the entire sequence at each iteration, can operate with fewer iterations than the sequence length and exhibit less memory-bound behavior. Their performance can be further boosted with hardware-aware optimizations like flash-attention~\citep{dao2022flashattention1,dao2023flashattention2,shah2024flashattention3}. In Figure~\ref{fig:speed}, we evaluate the decoding latency with batch size 1 using flash-attention 2 and illustrate that our DiffuLLaMA achieves better inference efficiency using $T=256$ when generating sequences of length $1024$ or longer. This underscores the significant potential of diffusion models for efficient inference. Further decreasing $T$ can lead to faster decoding but may sacrifice quality.
+
+
+
+\section{Related Work}
+
+\noindent\textbf{Continue Pre-training}
+Continue pre-training is commonly used in adapting an existing language model (LM) to a domain-specific LM~\citep{ke2023continual} or enabling new abilities of LM, such as for longer context~\citep{chen2024longlora} or code generation~\citep{xu2024lemur}. Pre-training LMs is non-trivial and expensive~\citep{samragh2024scaling}, thus in exploring of new architectures of LMs such as Mamba~\citep{gu2023mamba} and gated attention, \citet{wang2024mamba,zhang2024gated} choose to transfer from LMs to save the training cost. However, all these continue pre-training works follow the autoregressive (AR) language modeling, while adapting LMs into diffusion language model is more challenging due to discrepancies between their modeling objectives. 
+
+\noindent\textbf{Text Diffusion Models}
+Diffusion models have demonstrated significant diversity and controllability in image generation \citep{ho2020denoising, song2020denoising, ramesh2022hierarchical}. Building on this success, line of research~\citep{li2022diffusion, gong2022diffuseq, gong-etal-2023-diffuseq, dieleman2022continuous} build continuous diffusion models for text generation tasks. Among them, \citet{genie2023} experiment with a pre-training and finetuning framework under a small scale; \citet{gulrajani2023likelihoodbased} highlight the scaling law of continuous diffusion models, revealing that the compute-optimal requires longer training than their AR counterparts. To address the discrete nature of text, \citet{austin2021structured, hoogeboom2021argmax, Zheng2023ARD} incorporate an absorbing \mask state as noise, laying the foundation for discrete diffusion models, which are further developed by \citet{lou2023discrete, shi2024simplified, ou2024your, zhao2024improving}.
+By connecting text diffusion models with pre-trained masked language models (MLMs; \citealt{devlin-etal-2019-bert}), \citet{ye2023diffusion, he-etal-2023-diffusionbert} initialize discrete diffusion models using MLMs. Besides, the unification between diffusion and AR generation is also discussed in image generation~\citep{li2024autoregressive}. However, the adaptation of diffusion models from AR LLMs remains unexplored.
+\noindent\textbf{Non-autoregressive Generation}
+Non-autoregressive (NAR) models, introduced by~\citet{gu2017non}, break free from the left-to-right generation constraint, allowing for new capabilities like planning with future tokens~\citep{wu2024do}. Current diffusion language models are a notable part of the NAR family~\citep{gong2022diffuseq}. Given the challenges of developing NAR models, researchers often seek to find a trade-off. For instance, SSD-LM~\citep{han-etal-2023-ssd} leverages diffusion models to iteratively generate text blocks, facilitating a semi-NAR generation process. Similarly, CLLM~\citep{kou2024cllms} enhances LLMs by enabling the parallel generation of $n$ tokens, thereby improving decoding speed. FiLM \citep{shen2023film} adapts language models to generate tokens in any order, which is particularly useful for infilling tasks. Additionally, \citet{gloeckle2024better} focus on training models to achieve better and faster multi-token predictions as they scale up. These semi-NAR approaches provide compelling alternatives to traditional AR LLMs, yet few have thoroughly explored the scalability of fully-NAR models.
+
+
+\section{Conclusion}
+
+
+Building on existing DLMs, we present a recipe for scaling DLMs by continuing training on off-the-shelf autoregressive LLMs. 
+Our adaptation technique involves using 1) attention mask annealing to enable bidirectional modeling and 2) shift operation to allow similar training dynamics like AR models. 
+By unifying the language modeling objectives of autoregressive and diffusion models, we scale diffusion models up to 7B parameters. 
+Through experiments on common sense reasoning, language modeling, math reasoning and code generation, we show that DiffuGPT and DiffuLLaMA have better performance compared to existing DLMs. We find that DiffuLLaMA is capable of following in-context demonstrations to some extent on math problems. 
+In the future, we aim to instruction tune our DLMs and explore inference time planning methods. 
+We release DiffuLLaMA and DiffuGPT for further exploration of diffusion models as an alternative language modeling method.
+
+
+
+\subsubsection*{Author Contributions}
+Shansan Gong: Project lead, methodology development, DiffuGPT training and model evaluation, major writing. Shivam Agarwal: Discussion, DiffuLLaMA training, writing. Yizhe Zhang: Discussion, DiffuLLaMA training, writing suggestions. Jiacheng Ye: Initial methodology exploration. Lin Zheng: Discussion, writing. Mukai Li \& Chenxin An: Discussion, writing suggestions. Others: Mentorship and supervision.
+
+
+

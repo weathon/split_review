@@ -1,0 +1,178 @@
+# Real-time learning of decay trajectory of Higgs boson using reservoir-in-reservoir architecture
+
+- Decision: Reject
+- Avg Score: 4.25
+- Scores: 6, 5, 5, 1
+
+## Abstract
+Real-time learning of the decay trajectory in Higgs bosons as they interact in the Higgs Field is the key to understanding and furthering of the mass providing mechanism and particle interaction mechanism beyond the Standard model in particle physics. We propose a novel machine learning architecture called reservoir-in-reservoir, to learn this complex high dimensional weak and electromagnetic interaction model involving a large number of arbitrary parameters whose full understanding remains elusive to physicists, making it harder to handcraft features or represent in a closed-form equation. Reservoir-in-reservoir is a reservoir computing (RC) approach, where we built a large reservoir using a pool of small reservoirs that are individually specialized to learn patterns from discrete time samples of decay trajectory without any prior knowledge. Each small reservoir consists of a paired primary and secondary reservoir of recurrently-connected neurons, known as learner and generator, respectively, with a readout connected to the head. During the training phase, we activate the learner-generator pairs within the pool. Then we excite each learners with an unit impulse and individual time windows of the incoming system. We train the internal recurrent connections and readouts using a recursive least squares-based First-Order and Reduced Control Error (FORCE) algorithm. To enhance adaptability and performance, we implement a time-varying forgetting factor optimization during training. This optimization helps control the fading and adaptation of the covariance matrix based on variations in the incoming decay trajectory and patterns. This comprehensive training strategy aims to guarantee that the entire reservoir pool evolves in harmony with the desired output dynamics. We optimize hyper-parameters such as the number of learner-generator pairs within the pool, their network sizes, batch sizes, and the number of training trials. During testing, we excite the generators in the pool, with only an unit impulse, to mimic the dynamic system. We facilitate real-time learning by re-triggering the training process involving learner-generator pairs whenever the error rate exceeds a predefined threshold. We evaluate our reservoir-in-reservoir architecture using Higgs boson decay trajectories as
+detected in the Compact Muon Solenoid (CMS) detector of CERN’s Large Hadron Collider (LHC). The reservoir pool is used to model the dynamics of momentum components (and transverse momentum) as Higgs boson decays into photons and leptons (electrons and muons) with invariant masses between 120-130 GeV. Our results indicate that reservoir-in-reservoir architecture is a well suited machine
+learning paradigm in learning dynamical systems such as Higgs boson decay.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+In the present work the authors present a new reservoir computing architecture centered around a larger reservoir with a number of smaller reservoirs embedded inside of it in an approach which can be likened to Multi-level, or coarse-graining approaches. This new algorithm is subsequently applied to system identification on Higgs boson decay trajectories from particle physics.
+
+On this benchmark the new approach is compared to echo state networks, FORCE, and full-FORCE showing significantly better mean squared error than existing approaches.
+
+### Strengths
+Where the paper in its current form shines is the reflected view on the requirements necessitated by the particle physics identification problem at hand, the clarity of presentation of the used algorithms, and the incredibly well-crafted illustrations of the problem, and algorithmic components. The algorithmic approach itself is novel, and elicits the desire to explore its performance on other system identification problems.
+
+### Weaknesses
+The paper as is has a significant weakness in the clarity, and the style of its write-up. While the illustrations, as pointed out before, are incredibly well-done the flowing text lacks clarity, and focus. The introduction is very verbose, and _Related Work_ lacks embedding into the wider system identification literature. Where this shows the most is in the _Methods_ section, which lacks structure, and only is tractable due to the write-up of the algorithms.
+
+Space invested in earlier sections, is then missing in the _Experiments_, and _Results_ section. The experiments section would benefit greatly from citations to the algorithms the approach is compared to, and could be more brief. The results section suffers from a number of issues in presentation such as
+- The Eigenvalue testing being 2 pages ahead of the actual results section
+- _Table 2_, the table with the main results being too small, and unpronounced. I would urge the authors to make it more prominent by e.g. rotating it by 90 degrees, and following the ICLR table formatting guidelines.
+- The caption of Figure 6 is as is not useful, and requires a rewrite to make the results more clear, and better legible.
+
+In addition the results section leaves a lot of questions unanswered with regards to the performance of the algorithm, further testing of which would improve the paper significantly:
+- An ablation analysis over the number of reservoirs inside of the reservoir instead of just treating it as a hyper parameter, i.e. how does the quality of the result change over the number of reservoirs?
+- Performance testing to substantiate the claim of _real-time learning_ by e.g. adding a third column to table 2 for the speed of the approach.
+- Illustrative experiments complementing the presented theoretical analysis of recursive least squares-driven loss functions would help to further substantiate this contribution of the paper, and would strengthen the draft.
+
+### Questions
+- Why did you choose the 3 system identification approaches over other established approaches? Have you considered adding more comparisons to further system identification approaches?
+- Why did you hide _"Notably this contradicts the conventional approach seen in state-of-the-art reservoir architectures, which often advocate larger network sizes for tackling complex tasks"_ in _Results and Discussion_ instead of making it much more prominent in the conclusion, the introduction, and possibly even the end of the abstract?
+- What do you estimate the performance of your algorithm to be like in the low-data limit? Have you considered "starving" your algorithm (& others it is being compared to) of data to inspect their behavior?
+- What tool did you use for the search space exploration for the optimal size of the pool? If it is a commonly used hyperparameter optimization tool, I would suggest to concretize this part, and cite the respective tool.
+- Which framework, and based on which stack did you write your approach in? As is, this is left completely open, and would benefit from further clarification and citation to the respective libraries.
+
+### Soundness
+3 good
+
+### Presentation
+1 poor
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes a Reservior-in-Reservior method to model the trajectories of the Higgs boson decay, especially in real time. Although the application is potentially an important one, the writting seems rushy and I believe the authors can do a better job at explaning the motivations for both the application and the method. The notations are a bit messy, so I'm not sure if I fully understand the method, please see the Questions part.
+
+### Strengths
+* Figures are illustrative, although can still be improved 
+* The background in physics is elaborated
+* Contains necessary technical details to reproduce the work
+
+### Weaknesses
+ * Notations are overall a bit messy. For example: (1) for math symbols, sometimes they are written as math, sometimes as regular texts. (2) In Figure 2(d), the subscript range from numbers (0,1) to letters ("a","y","z"). I can't spot a consistent pattern for the notation; (3) Figure 3 (g), subscripts are missing; (4) Eq. (2), a right parenthesis ")" is missing.
+* Motivations are not unclear, see the Questions part.
+
+### Questions
+* What's the motivation for reservior-in-reservior? Is it similar to boosting methods, or ensembling methods in classical machine learning? Or perhaps similar to multi-head attention where each heads focus on some part of the problem, and then they are aggregated.
+* It seems the goal here is to predict the trajectories of Higgs Boson decay (please correct me if I'm wrong). A more important problem is to detect Higgs Boson decay trajectory from other background trajectories. Can your method handle this?
+* What's the motivation for having both a learner and a generator in the reservior? If I understand correctly, standard reservior only have one component instead of two. Is the idea similar to generative adversarial networks?
+
+### Soundness
+2 fair
+
+### Presentation
+1 poor
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper introduces a complex reservoir-computing based approach to to learning decay trajectories of Higgs bosons. It is argued that a reservoir computing approach is especially suitable in the real time setting needed to analyze experiments.
+
+### Strengths
+The approach is quite innovative and suitable for real time analysis of traces
+
+### Weaknesses
+The manuscript introduces a reservoir computing approach for learning decay trajectories of Higgs bosons, which is presented as suitable for real-time analysis. However, the manuscript is not particularly accessible, and the proposed learning mechanism is quite involved. The core issue is the lack of clarity in the description of the reservoir-in-reservoir training process, making it difficult to grasp the rationale behind the specific choices made in the architecture. The sensitivity of the algorithm to the reservoir size is a major concern, as the performance degrades with increasing size, which is counter-intuitive and not adequately explained. Furthermore, the manuscript lacks a clear explanation of how the reduced RMS translates to practical improvements in the classification of decays, making it hard to assess the real-world impact of the proposed method. The comparison with other system identification algorithms is also lacking, making it difficult to assess the novelty and advantages of the proposed approach.
+
+### Questions
+Why the algorithm is so sensitive to the choice of the reservoir size? The other approaches reported in Table 2 seem to depend significantly less on this choice 
+
+For a non specialist, it is very hard to assess the state of the art here, it would be helpful to understand what the reduced RMS found here imply in terms of classification of decays.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+1
+
+### Rating Number
+1
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes a modular reservoir computing approach, complemented by FORCE-based training, for learning the Higgs bosons decay dynamics.
+The paper presents an empirical analysis in comparison to some other reservoir computing approaches.
+
+### Strengths
+- Potentially, the modular approach in reservoir computing seems interesting and holds promises in terms of effectiveness
+
+### Weaknesses
+ - The paper's readability is really poor, due to several typos and incomplete descriptive content (just to mention one: figure 2 is not entirely described neither in the caption nor in the text).
+- Similarly, the mathematical description of the proposed approach is rather vague and not given in detail through a proper section in the paper. The description of the FORCE training is particularly lacking, with no clear explanation of how the feedback weights are updated or how the target signals are generated for the reservoir. The paper also lacks a clear definition of the reservoir's internal dynamics, making it difficult to understand the proposed modular approach.
+- Relevantly, it is not clear to me the motivations behind the proposal of the reservoir-in-reservoir in the given application context; why reservoir computing is even needed is not clear, given that other approaches for learning temporal dynamics are overall ignored. The paper does not provide a justification for why a reservoir computing approach is more suitable for modeling Higgs boson decay dynamics compared to, for example, standard recurrent neural networks or other established time-series analysis techniques. The specific benefits of the proposed modular reservoir architecture over a single, larger reservoir are also not explained.
+- The experimental analysis seems not providing a proper model selection approach for the crucial hyper-parameters of both the proposed model and the methods from literature; moreover, std across repetitions is not reported. The paper lacks a systematic exploration of the hyperparameter space for the proposed model, such as the size of the reservoirs, the spectral radius, and the sparsity of the connections. The absence of standard deviations across multiple runs makes it difficult to assess the robustness of the results and to determine if the reported performance is statistically significant.
+
+### Questions
+Several aspects of the proposed work remain unclear and not convincing, including the following that would need severe deepening:
+- Thorough model selection on both the proposed model and the baselines from the literature;
+- Comparison with fully trainable models outside the reservoir computing methodology;
+- Motivation of the proposed architecture, and of the reservoir computing approach overall, to the tackled problem;
+- Mathematical analysis of the introduced modular recurrent architecture;
+- Profound restructuring of the manuscript, which has many typos and grammatical errors.
+
+### Soundness
+2 fair
+
+### Presentation
+1 poor
+
+### Contribution
+2 fair

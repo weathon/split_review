@@ -1,0 +1,149 @@
+# UGradSL: Machine Unlearning Using Gradient-based Smoothed Label
+
+- Decision: Reject
+- Avg Score: 3.00
+- Scores: 3, 3, 3
+
+## Abstract
+The objective of machine unlearning (MU) is to eliminate previously learned data from a model. However, it is challenging to strike a balance between computation cost and performance when using existing MU techniques. Taking inspiration from the influence of label smoothing on model confidence, we consider MU as decreasing confidence in the forgotten data and increasing it in the remaining. This observation suggests a simple gradient-based MU approach that uses an inverse process of label smoothing. This work introduces UGradSL, a simple, plug-and-play MU approach that uses smoothed labels. We provide theoretical analyses demonstrating why properly introducing label smoothing improves MU performance. We conducted extensive experiments on six datasets of various sizes and different modalities, demonstrating the effectiveness and robustness of our proposed method. The consistent improvement in MU performance is only at a marginal cost of additional computations.  For instance, UGradSL improves over the gradient ascent MU baseline by 66\% unlearning accuracy without sacrificing unlearning efficiency. This work also introduces a more practical MU paradigm, known as group-forgetting, which involves forgetting a subgroup of a superclass.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper focuses on the machine unlearning problem and proposes a gradient-based unlearning algorithm. Targeting the high time cost and significant drops of remaining and test accuracies, this paper proposes to use the label smoothing technique in the design of the unlearning loss function. This paper firstly proves that the gradient ascent can achieve exact unlearning and then it proves that using the generalized label smoothing in the gradient ascent can narrow down the errors. Then this paper proposes UGradSL and UGradSL+ algorithms for unlearning, which iterate over the remaining and forgetting dataset respectively. Then this paper sets up experiments on class unlearning, randomly selected data unlearning, and sub-class unlearning. The experiments present improvements compared with the selected baseline methods.
+
+### Strengths
+a) This paper proposes a different direction of reducing the performance drop of remaining and test data by label smoothing.
+
+b) This paper provides both theoretical and experimental evidence to support the proposed method.
+
+c) The experiments are comprehensive, including three different unlearning tasks and multiple datasets ranging from image to text data. The time efficiency of the proposed method is significantly improved.
+
+### Weaknesses
+a) This paper assumes that “the exact MU should behave as the model does not access $D_f$ at all so that the prediction on $D_f$ should be as random as  possible.” This paper cannot hold for most of the unlearning scenarios. For example, in the sub-class unlearning as this paper mentions, if the forgetting sub-class is fighter aircraft and the super-class is the airplane, the data of fighter aircraft should also be more likely to be classified as the airplane after unlearning because the fighter aircraft and other remaining planes share many similar features. In addition, in your definition of unlearning, $\Theta_r$ is the model distributions learned from the remaining data and it does not have any restrictions on the forgetting data.
+
+b) The proof of exact unlearning in theorem 1 looks weird: this paper uses the Taylor series and uses the approximately equal symbol in eq.(6) and eq.(7). Thus, how to get a conclusion with the strict equal symbol of the exact unlearning in theorem 1.
+
+c) Some issues exist in the presentations, like notations and terminologies. For example, the term Unlearning Diagram is not explained either on page 7 or the appendix reference is missing on page 9.
+
+d) This paper claims that the group unlearning is one of the contributions of this paper. However, this type of unlearning task has been discussed in [1]
+
+e) The evaluation part of this paper mentions that the higher unlearning errors, remaining accuracies, and test accuracies stand for the better unlearning performances for all unlearning tasks. However, some other papers like [2] which this paper cites, [3], and [4], all mention that the closer to the models that are trained on the remaining data will be better.
+
+### Questions
+a) Why use the approximately equal symbol in eq.(8)?
+
+b) How to understand if the model outputs random predictions, ⟨a-b,c-b⟩ ≤ 0 will 
+hold? 
+
+c) What are the training details of the proposed methods, especially for the alpha, E, and p? Does this paper use any pre-train parameters for the models?
+
+d) This paper has mentioned 5 baselines. What are the standards for selecting 
+baselines and why some results of these baselines are missing in experiments?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The authors propose an unlearning method by using negative label smoothing as the unlearning algorithm. They show that the proposed method can reduce the confidence for the forgotten samples thereby attempting to achieve unlearning. The paper uses theoretical inspiration from linearization of the network along with influence functions to provide theoretical arguments. Finally the paper provide empirical evidence to support their claims.
+
+### Strengths
+1. The paper address the problem of unlearning which a pretty important problem given the increase in use of foundation models. 
+2. The proposed algorithm is easy to implement, and does not require computation of any hessians.
+3. For a linear model, the proposed theorems are very intuitive, and provide insights about the unlearning procedure. 
+4. The authors have performed extensive empirical evaluation
+
+### Weaknesses
+1. The theoretical analysis in the paper is based on influence functions, however it is well know that influence functions dont work well for deep neural networks [1]. This makes the theoretical foundation of the work weak.
+2. Forgetting based on linearization of deep networks was already studied in [2,3] which is not cited in the paper, nor is the method compared against.
+3. [3] proposed a method where they linearized a network, such that the optimization problem is convex, such an approach could be extremely useful with the theoretical framework provided in the paper, as it would make the theorems more applicable and rigorous.
+4. The proposed method is an approximate unlearning method, however the paper does not provide a bound on the error as a function of unlearning requests. This is an imperative result for approximate unlearning algorithms.
+5. To make the theoretical results be more compatible with the empirical results the authors can consider fine-tuning (as the model will be more convex) compared to training from scratch where the landscape is highly non-convex.
+6. It will be interesting to see how the weights in different layers move after learning, i suspect that the last layer moves the most while the lower layers wont change much in value, this could correspond to unlearning in the activations but not the weights. Having such a plot could be interesting for analysis.
+7. [4] has shown that the algorithm and definition proposed by Bourtoule et al may not be sufficient against adaptive unlearning requests, which may require shades of DP( differential privacy) in the unlearning algorithm How do you plan to add this to the existing approach?
+8. All the empirical results measure the unlearning in the final activations of the model, which does not consider unlearning from the weights of the model. How do you ensure that the information is removed from the weights? and how do you plan to show it empirically?
+
+### Questions
+See weaknesses above.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The authors propose to leverage label smoothing to enhance machine unlearning.
+
+### Strengths
+-	The label smoothing for unlearning seems interesting.
+
+### Weaknesses
+ - The introduction on prior machine unlearning problem is incorrect.
+- The evaluation of machine unlearning efficacy is incorrect.
+
+My main concern with this paper is that the authors seem to not understand the machine unlearning problem correctly. First, note that the exact unlearning means that the unlearned model parameters are identical to the one obtained from retraining from scratch in distribution. This is correctly stated by the authors in the Definition 1. However, this is **not** what works that incorporate DP principle achieve in general such as Guo et al. 2019 and Sekhari et al. 2021. By their definition of unlearning, they only ensure that the distribution of their unlearned model weights are **approximately** the same as the retraining one. The approximation error is controllable and there is an inherent utility-privacy-complexity trade-off. It is incorrect to state that these methods are exact unlearning methods and claim that these methods cannot balance between unlearning efficacy (privacy) and computational complexity.
+
+I am also confused with the claim made right after Definition 1. The authors mention that `` The MU performance of retrain using iterative training is sensitive to different hyper-parameters and the distribution of the prediction on $D_f$ is not random enough as given in Section 5, showing that retrain is effectively an approximation of exact MU.`` How does it even make sense when in definition 1 the authors literally define retraining as the gold standard of exact unlearning? I believe the statement of the authors here is not what they really mean, but it is very confusing to readers.
+
+Another issue I have is that the evaluation metric on unlearning efficacy (privacy) is **problematic**. As defined by the authors themselves (definition 1), the optimal case in machine unlearning (at least from the privacy aspect) is retraining. In the experiment section, the authors test several metrics Membership Inference Attack (MIA) and Unlearn Accuracy (UA) as metrics for privacy. The authors claim that higher MIA and UA imply better privacy (unlearning efficacy) for the unlearning method. This is absolutely **incorrect**. Intuitively, consider the following hypothesis test: the given model is from retraining (null hypothesis) or not. Note that if one can achieve very low type I and II errors in this hypothesis test, they can equivalently know that the data ``was’’ seen by the model and thus breach the privacy. As a result, one should measure the unlearning efficacy by how close these metrics are with respect to the retraining model, instead of making them as high as possible. This is exactly the evaluation of Golatkar et al. 2020 and many more unlearning for deep neural networks literature. I also encourage the authors to check the manuscript of the NeurIPS 2023 machine unlearning competition written by Google, where comparing with retraining is their standard as well. As a result, I do not think the privacy-related conclusion drawn from Tables 1 and 2 is correct. 
+
+For the same reason, having higher entropy $H$ on the prediction probability of $D_f$ is also not a reasonable metric for privacy evaluation. Note that it is possible that even if we completely remove a sample, the model with perfect privacy having $H\rightarrow0$ still makes sense. Consider the following simple but extreme scenario, where our dataset contains data points that are **identical** to the centroid of each class and they are well-separated (well-clustered). In this case, even if you remove one sample and retrain from scratch, the decision boundary will not change so the retrained model will still be confident (low $H$) on the sample subjected to be removed. In this scenario, having $H$ being unreasonably high is in fact **hurting** the privacy as it will tell the adversary that we do something other than retraining. I hope this simple counter-example can let the authors understand my point.
+
+### Questions
+Please let me know if I missed something regarding my statement in the weaknesses section.
+
+### Soundness
+1 poor
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair

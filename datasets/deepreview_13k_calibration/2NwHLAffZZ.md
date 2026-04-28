@@ -1,0 +1,176 @@
+# Weak Correlations as the Underlying Principle for Linearization of Gradient-Based Learning Systems
+
+- Decision: Reject
+- Avg Score: 2.33
+- Scores: 3, 3, 1
+
+## Abstract
+Deep learning models, such as wide neural networks, can be conceptualized as nonlinear dynamical physical systems characterized by a multitude of interacting degrees of freedom. Such systems in the infinite limit, tend to exhibit simplified dynamics. This paper delves into gradient descent-based learning algorithms, that display a linear structure in their parameter dynamics, reminiscent of the neural tangent kernel. We establish this apparent linearity arises due to weak correlations between the first and higher-order derivatives of the hypothesis function, concerning the parameters, taken around their initial values. This insight suggests that these weak correlations could be the underlying reason for the observed linearization in such systems. As a case in point, we showcase this weak correlations structure within neural networks in the large width limit. Exploiting the relationship between linearity and weak correlations, we derive a bound on deviations from linearity observed during the training trajectory of stochastic gradient descent. To facilitate our proof, we introduce a novel method to characterise the asymptotic behavior of random tensors.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper asks why overparameterized neural networks can be linearised with respect to their parameters (e.g. in the Neural Tangent Kernel regime), and propose that the reason is weak correlations between the first and higher derivatives of the model function. With respect to previous work, they consider the case of neural networks with two distinct activation functions and the deviation from linearity during SGD training.
+
+### Strengths
+Understanding the behaviour of overparameterized neural networks is a very important and interesting question.
+
+### Weaknesses
+In my opinion this work fails on providing and/or communicating anything new on the topic.
+
+1) Discussion on some very important related work is missing, which this work should have compare with.
+2) Several statements are unsupported, definitions are missing, there are several inaccuracies and the paper is overall very hard to follow.
+3) The mathematical notation is cumbersome and, for no apparent reason, completely different from many related papers.
+4) Crucial points are relegated to the appendix, without which the main text is severely incomplete.
+
+The main reference missing is “On the linearity of large non-linear models: when and why the tangent kernel is constant”, NeurIPS 2020 by Liu, Zhu, Belkin (https://arxiv.org/abs/2010.01092), but there are many other papers following this one that have studied the question of why neural networks can be linearised, also in relation to the model derivatives.
+This line of work is not discussed at all.
+
+i) As a main contribution, the author list the case of “wide neural networks with two distinct activation functions”, but the only thing they say about this case in the main text is one sentence on page 9, relegating all about this claim in the appendix (we are not even told what “neural networks with two distinct activation functions” mean in the main text).
+ii) Section 2 is completely unmotivated and its relevance remains unclear until much later. For example, in the first three paragraphs of section 2.2 it’s unclear what is the goal and the challenges in reaching the goal.
+iii) The function \Epsilon is supposed to be a generic convex function, but there seems to be an (unstated) assumption that it depends on the difference between F and y, which is true for the square loss but not for many other commonly used loss functions.
+iv) (x,y) are called, respectively, label and images, but it should be the other way around.
+v) A “limiting parameter” in introduced on page 5 but never explained in the main text
+vi) Equation 9 only applies to gradient flow, not to gradient descent. After reading Theorem 3.1 it becomes clear that Equation 9 is a definition, but until then it just looks like a mistake.
+vii) Below Equation 12, Why can the parameter indices viewed as random variables? They are not random variables, and they are not drawn from a uniform distribution. Instead, all indices are summed over all the parameters. If they were a sample from a uniform distribution, there would be some noise.
+viii) No intuition is given here about the relevance of the quantity introduced in equation 12.
+ix) I don't understand Definition 3.2. "O" is supposed to be limiting order. What is "O" there?
+x) n0 not defined in equations (16) and (17)
+xi) There should not be a Delta in the second expression of equation (17)
+xii) Inequality 19 seems to be crucial for obtaining the results. However, the statement "nearly all realistic scalable systems satisfy" is not justified.
+xiii) What does "typical parameter of the linearization/correlation decay" mean?
+xiv) “This scenario is a little more complex but can be dealt with.” How is this scenario dealt with? It seems the reader here just needs to trust the authors without any explanation or justification.
+xv) “These systems can be interpreted as non-linear dynamical systems.” Any reference for this statement?
+
+i) The Jacobian of the model is called “derivative matrix and is transposed with respect to the Jacobian that everyone uses.
+ii) I have never seen a gradient with a subscript “T” to denote the transpose of the operation result.
+iii) In equation 12, the gradient with several subscripts and superscripts is just a (high order) partial derivative. Why re-inventing the notation?
+
+### Questions
+NA
+
+### Soundness
+2 fair
+
+### Presentation
+1 poor
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The problem it aims is to give precise criteria for linearized training (i.e. NTK-like) to occur (e.g. we know it occurs in the limit of infinite width given a specific parameterization [Jacot et al. 2018] or when we add a large scaling factor [Chizat et al. 2020]). It also claims to prove that wide NNs satisfy these precise criteria but this result is not properly stated in the main.
+
+A half of the paper is devoted to a formalism on measuring asymptotic behavior of random tensors. This formalism aims to give precise definition for "M_n = O_{n \to \infty} (a_n)", where M_n is a sequence of random tensors and a_n is a number sequence. This definition has nothing to do with the tensor itself but rather deals directly with its operator norm. Therefore it should be applicable to sequences of random variables; it would be helpful for the reader to understand how this notion is different to the usual "stochastic Big O".
+
+The results are presented in a very general form making them difficult to consume. I would suggest the authors putting a simplified formulation in the main, maybe also a proof sketch, as well as some application examples, in particular *emphasizing the cases where their analysis allows one to gain insight over the existing methods*. 
+
+The significance of the results are not convincing. When are these results able to prove linearized training in cases where [Lee et al., 2019] does not apply? Both results are asymptotic in nature; what are the cases when the claimed results are stronger?
+
+The paper contains no experimental evidence that the results are applicable in practice, it would be good to add some. 
+
+The literature review is a little thin. The paper does not mention the work of [Dyer & Gur-Ari, 2020] that seems very relevant.
+
+### Strengths
+The overall problem is interesting, and the local structure of the paper is reasonable (no typos, definitions are always provided, etc.). Any substantial contribution to understanding when linearization occurs or doesn't would be very valuable (though the abstract formulation makes it a little hard to see in the present form).
+
+### Weaknesses
+The problem it aims is to give precise criteria for linearized training (i.e. NTK-like) to occur (e.g. we know it occurs in the limit of infinite width given a specific parameterization [Jacot et al. 2018] or when we add a large scaling factor [Chizat et al. 2020]). It also claims to prove that wide NNs satisfy these precise criteria but this result is not properly stated in the main.
+
+A half of the paper is devoted to a formalism on measuring asymptotic behavior of random tensors. This formalism aims to give precise definition for "M_n = O_{n \to \infty} (a_n)", where M_n is a sequence of random tensors and a_n is a number sequence. This definition has nothing to do with the tensor itself but rather deals directly with its operator norm. Therefore it should be applicable to sequences of random variables; it would be helpful for the reader to understand how this notion is different to the usual "stochastic Big O".
+
+The results are presented in a very general form making them difficult to consume. I would suggest the authors putting a simplified formulation in the main, maybe also a proof sketch, as well as some application examples, in particular *emphasizing the cases where their analysis allows one to gain insight over the existing methods*.
+
+The significance of the results are not convincing. When are these results able to prove linearized training in cases where [Lee et al., 2019] does not apply? Both results are asymptotic in nature; what are the cases when the claimed results are stronger?
+
+The paper contains no experimental evidence that the results are applicable in practice, it would be good to add some.
+
+The literature review is a little thin. The paper does not mention the work of [Dyer & Gur-Ari, 2020] that seems very relevant.
+
+Also, some things are not correctly written (e.g. the NTK does not converge to the target function as written somewhere).
+
+### Questions
+Can you give a clear intuition of what we learn about neural networks? Is your approach a conceptualization of earlier approaches or a different novel idea? How is one expect to use your result?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+1
+
+### Rating Number
+1
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper tries to establish weak correlations among derivatives of an NN wrt to its degrees of freedom as the underlying mechanism of linearization of gradient-based learning behaviour in infinitely or very wide neural networks. More precisely, it is claimed that (i) NNs exhibit weak correlations, and (ii) gradient-based (possibly more general) learning systems linearize under weak correlations.
+To this end, the author(s) introduce the concept of random tensor asymptotic behaviour in order to establish bounds on said derivative correlations, and in such a manner that the Neural Tangent Kernel exhibits a special case. It is then claimed a tight bound on higher order derivative correlations, eventually leading to the traditional NTK regime, i.e. that vanishing higher order contributions effectively constitute the training linearization (and not the other way around).
+
+### Strengths
+(1) The paper pursues a highly ambitious and highly relevant question, providing possibly groundbreaking insights. E.g. if the claims show to be true, this would ensue further research on how correlations can be induced in large NNs in order to overcome linearization and/or the loss of representation learning in wide deep learning, generally on how to leverage correlations in order to control training dynamics.
+
+(2) The paper introduces the framework of random tensor asymptotic behaviour, which promises to facilitate several other applications in the field
+
+### Weaknesses
+As much as I appreciate the importance of the research question and the mathematical elaborateness, the paper exhibits the following problems:
+
+(1) Clarity / Presentation is immature: While the posed claims of the paper and the introduced methodological notions (NTK, random tensor asymptotic behaviour) are crystal clear, the presentation of logical reasoning and evidence to support the claims is rather hard to follow. Even after studying the supplementary material, the overall synthesis of the many involved steps, aspects and "directions" is incoherent/confusing.  Most notably, "m(n)" is used to establish the main theorems, but the definition of "m(n)" is nowhere to be found (also not in the supplementary), except for a prosaic description of "the typical parameter of the linearization/correlation decay where m(n) → ∞". This is in contradiction to the seeming mathematical rigour and elaborateness. Furthermore, the connection between the random tensor asymptotic behavior and the specific neural network architectures being analyzed is not clearly established. It's unclear how the properties of random tensors directly translate to the behavior of gradients in these networks, particularly in the context of the specific scaling limits being considered. The paper lacks a clear explanation of how the abstract mathematical framework relates to the concrete practical problem of training neural networks.
+
+(2) The paper presents no experiment(s). The work would strongly benefit from numerical examples to more clearly support the claims and illustrate the implications & significance of this work. This should at least include 2 manufactured toy examples, where (i) linearization is demonstrated in correspondence with weak correlations, as well as (ii) the opposite of that. Also the transition regime is interesting. Or even better, maybe even real-world applications can be found for demonstration. The absence of empirical validation makes it difficult to assess the practical relevance and applicability of the theoretical results. The claims regarding the relationship between weak correlations and linearization remain purely theoretical without any concrete evidence.
+
+### Questions
+Some suggestions have been given above, more minor questions/comments:
+
+(1) The presentation would certainly benefit from (i) a coherent reorganization, (ii) replacing in statements like "as we see/explore/demonstrate later" the word "later" with a reference to a concrete section of the paper, (iii) supporting numerous statements that are "evident" at least with references, and (iv) a complete introduction of the non-standart notation (several symbols are not properly introduced like \phi or \Delta, and sometimes I had to guess the meaning of notation, e.g. \nabla^{\times d} or the big-O subscripts), maybe even streamlining the notation. E.g. the meaning of the crucial limiting parameter is discussed only several pages after theorems have been stated with it. For building intuition with the reader, it could be helpful to first discuss a simple low-rank example
+
+(2) The paper would benefit from a clear delimitation of scope, discussion of limitations, disadvantages
+
+(3) The authors state "Our theorem will be applicable solely for systems that are properly scaled in the
+initial condition where n → ∞". What does that mean?
+
+(4) There are several incomplete sentences
+
+### Soundness
+1 poor
+
+### Presentation
+1 poor
+
+### Contribution
+4 excellent

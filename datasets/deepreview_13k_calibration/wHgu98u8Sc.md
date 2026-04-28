@@ -1,0 +1,225 @@
+# $\nu$-ensembles: Improving deep ensemble calibration in the small data regime
+
+- Decision: Reject
+- Avg Score: 4.40
+- Scores: 5, 5, 6, 3, 3
+
+## Abstract
+We present a method to improve the calibration of deep ensembles in the small data regime in the presence of unlabeled data. Our approach, which we name $\nu$-ensembles, is extremely easy to implement: given an unlabeled set, for each unlabeled data point, we simply fit a different randomly selected label with each ensemble member. We provide a theoretical analysis based on a PAC-Bayes bound which guarantees that for such a labeling we obtain low negative log-likelihood and high ensemble diversity on testing samples. Empirically, through detailed experiments, we find that for low to moderately-sized training sets, $\nu$-ensembles are more diverse and provide better calibration than standard ensembles, sometimes significantly.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper introduces a method to enhance the calibration of deep ensembles, particularly in situations where there is a small amount of labeled data and some unlabeled data. For each point in the unlabeled dataset, the ensemble members are trained with different randomly selected labels. The authors provide a theoretical justification for this approach, drawing on PAC-Bayes bounds to argue that it leads to lower negative log-likelihood and higher ensemble diversity on test samples. Empirically, they demonstrate that ν-ensembles outperform standard ensembles in terms of diversity and calibration, especially when the training dataset is small or moderate in size.
+
+### Strengths
+- The paper gives a method to improve calibration error for deep ensembles using unlabeled data. The use of unlabeled data to improve calibration error of deep ensembles has not been explored much before as most of the works have focused on joint training approaches which can be memory and computationally expensive.
+- The paper is overall well written and easy to understand. 
+- The paper presents supports their method with both theoretical and experiments.
+
+### Weaknesses
+ - One major weakness of the paper is that their method only improves calibration error not accuracy but they have not compared to any other calibration technique like temperature sampling. 
+- The other issue is that the method appears very similar to the Agree to disagree work mentioned in the paper where they also use unlabeled data to maximize diversity and the idea seem incremental. Can the authors please explain in detail how exactly Agree to disagree maximizes diversity on the unlabeled set?
+- Another limitation is that this method only improves calibration in the small data regime. 
+- Another limitation is that there are only two datasets used in the paper - CIFAR-10 and CIFAR-100. It would be nice to have additional datasets.
+
+### Questions
+- The paper says that the labels for unlabeled data points are chosen without replacement. What happens if we sample with replacement? One should expect the same empirical results to hold but maybe the theoretical argument will not hold?
+- I understand the text written at bottom of the Figure 1 but I don’t understand the figure. What are the 3 columns in the figure?
+- One part that is not clear to me is when we are forcing the models to make random predictions on unlabeled data which is from the same distribution, why we are not hurting the accuracy or the cross entropy loss of the model? When training data is small and unlabeled data set is bigger, can the authors share their regularization parameters and if they had to give small weights on the regularization term?
+- The colors used in figure 2 and 3 are very similar and it is hard to distinguish different lines. 
+- There are other works which also use this idea of diversifying using unlabeled datapoint for other problems. For example, DIVERSIFY AND DISAMBIGUATE: OUT-OF-DISTRIBUTION ROBUSTNESS VIA DISAGREEMENT. Can the authors please compare to this work also?
+- Did the authors try using the unlabeled data from different distributions like random Gaussian noise. One benefit would be that fitting random labels on this dataset will not interfere with the learning on the original distribution.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The authors present a method for improving the calibration of deep neural network ensembles in the small data regime when access to an unlabelled data set is assumed. In particular, they propose the counterintuitive idea of randomly labelling the unlabelled dataset (distinctly for each ensemble member) and training the deep ensemble on the joint supervised and randomly labelled data. The randomly labelled data promotes ensemble diversity. A PAC bound which relates generalisation performance to ensemble diversity is derived while the diversity of the ensemble is demonstrated to be related to the ensemble size. Experiments on various slices of CIFAR-10 and CIFAR-100 show that while the method does not improve accuracy relative to standard ensembles, there are substantial gains on calibration. Calibration does not improve consistently over more complicated/expensive diversity promoting ensemble methods.
+
+### Strengths
+- The paper is very well written and clear.
+- The idea for the method, of using randomly labelled unsupervised data to promote ensemble diversity is simple, cheap and easy to implement and in so far as promoting diversity makes sense.
+- Some theoretical results are presented in which the ensemble diversity is related via a PAC bound to the generalization performance (I have some other comments on these results below).
+- The experimental results are convincing that at least in the small data regime with relatively little unsupervised data the calibration relative to standard ensembles is significantly improved.
+
+### Weaknesses
+Please see my questions in the section below for potential weaknesses that can be addressed through further experiments.
+
+- The method is targeted solely at the small data regime, gains in calibration go to zero as the amount of labelled data increases.
+- The method introduces a new $\beta$ hyperparameter which must be tuned.
+- The experiments are presented without error bars and it is unclear if they come from a single run or are averaged over multiple seeds, standard practice, especially when considering the relative small datasets considered in this paper is to run experiments with multiple random seeds and present averages and standard deviations of the metrics of interest (or better yet other forms of statistical test of the significance of the results).
+- Experiments are conducted on small slices of CIFAR-10 and CIFAR-100, while performance in the large data regime is alluded to in the paper, an experimental evaluation of this setting (for example ImageNet is fairly standard in the ensemble literature) would be much appreciated.
+- From equation 3, it seems to be the case that as the number of classes (c) increases the gains in ensemble diversity go to zero, so the method is both likely to give no gains in the large data and large number of classes regime.
+- The primary theoretical motivation for the method is equation 1, which is a PAC bound on the generalization performance, it is difficult to get a sense of how tight this bound is and to what extent there is a competition between the various terms in the bound.
+
+Small things (didn't effect rating):
+- Typo: "coincides we standard weight decay" -> "coincides with standard weight decay"
+- It took me a while when reading the paper printed out to realise that there are two colours plotted in the left hand side of Figure 2 - as the orange is almost fully hidden by the red, making this clear in the figure or caption would be helpful to readers.
+
+### Questions
+- While the experimental results do not show big drops in accuracy, I am quite concerned that given vastly more unlabelled data the method would lead to overfitting the random labels and thereby harm test set accuracy (as is a well known phenomenon in the noisy label literature). More formally one could imagine that vast amounts of unlabelled data would promote the diversity term in the RHS of equation 1, but I given results in the noisy labels literature, I would find it hard to believe that this would not come at a corresponding cost in the first term on the RHS of equation 1. Could the authors please comment on this concern? Experimentally, I would be interested in seeing an experiment on ImageNet, for example, where the labelled set is of size 50k and the unlabelled set is 950k examples, a standard resnet50 or similar capacity model is used with 4 ensemble members (as per other papers in the literature) and a comparison to standard ensembles in terms of accuracy and calibration is given. This is a significant concern for me, as usually with methods that make use of an unsupervised dataset, the expectation is that as the unlabelled dataset grows, the gains from using it grow to. I fear this will not be the case for this method, which would limit the method to the small dataset, small number of classes and small unlabelled dataset regime. I recognise that the $\beta$ hyperparameter can to a certain extent control this trade-off, so if further experiments are conducted to address this concern, please report the results over the $\beta$ hyperparameter range.
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes a very neat method for improving the diversity of deep ensembles: It assigns random labels to a set of unlabelled data and lets each ensemble component fit different random labels such that these ensemble components can be diverse. The paper further provides theoretical guarantees for the resulting ensembles' behavior on test samples. The empirical results further show that the method acquires significantly better calibration on small training dataset regime, without sacrificing accuracy. Importantly, the method only introduces little extra training overhead while outperforming baseline approaches that are way more complicated. Overall, I think the proposed idea is novel, interesting, easy-to-use, and could be of great impact.
+
+### Strengths
+- The proposed method is easy! It is much easier and efficient to implement than other methods for enhancing ensemble diversity, such as Stein-based methods.
+
+- The proposed method comes with theoretical guarantees: Although the method sounds like some heuristic, the author provides PAC-Bayes bounds for its performance on test data.
+
+- The empirical performance improvement is significant: The results show that the proposed method improves the calibration error to a great extent for both in-distribution test data and out-of-distribution data (i.e. corrupted data), without hurting the accuracy.
+
+### Weaknesses
+ - The method "Sample y randomly without replacement", however, when the number of ensemble is larger than the number of classes, it is unclear to me how the method should be applied. Specifically, if we have 10 ensemble members and only 5 classes, the sampling strategy is not well-defined. It would be helpful if the authors could clarify the exact sampling procedure in this scenario, and whether the theoretical guarantees still hold when labels are sampled with replacement.
+
+- Since the method assumes having access to a validation dataset, a baseline worth considering would be temperature scaling. It is a simple and effective post-hoc calibration technique, and it would be valuable to see how the proposed method compares against it, especially given that both methods rely on a validation set. The comparison should include not only the calibration error but also the accuracy, to ensure that the calibration improvement does not come at the cost of performance.
+
+- The presentation of the results can be improved: There is no legend for the lines in Figure. 2; The usage of bold font is not consistent and confusing in Table. 1. For example, it is not clear why some numbers are bolded while others are not, and this makes it hard to quickly grasp the key results. The authors should provide a clear explanation of the formatting choices in the tables and figures.
+
+### Questions
+Why the method becomes less effective when we have access to more data?
+
+If I understand correctly, the method assigns random labels to **in-distribution** data, this sounds weird to me, as it implies that the ensemble would have high uncertainty on these in-distribution samples. I think one can also consider introducing OOD samples into training and assigning random labels to them for each ensemble member.
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+4 excellent
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper introduces an ensembling technique for making use of unlabeled data in $k$-class classification. Namely, the authors suggest training $k$ models, each of which see a different (randomly selected without replacement) label for each unlabeled data point. In this way, at least one model is guaranteed to have trained on a correct data point (since we exhaust all labels). The authors show that this approach can have benefits with respect to calibration metrics such as ECE when compared to other ensembling approaches on small-scale datasets.
+
+### Strengths
+- **Originality:** Although the proposed method is quite simple, to the best of my knowledge I have not seen a similar approach analyzed empirically or theoretically in the literature on ensembling. 
+- **Quality:** The paper motivates the proposed method with a simple example and attempts to provide theoretical justification with a PAC-Bayes bound and related analysis. The algorithm and associated experiments in the paper are described well, but I have reservations about the quality of experiments as detailed in weaknesses below.
+- **Clarity:** The experiments in the paper are easy to follow, but the theoretical aspect of the work is not as clear.
+- **Significance:** Improving ensembles is an important problem, and the idea of diversifying ensembles has received much attention over the past few years. As such, the paper considers a significant problem, but I question the progress made on this problem by the proposed method.
+
+### Weaknesses
+## Main Weaknesses
+1. **Insufficient experimental setup for proposed method.** 
+    The authors claim that for small-scale datasets their method preserves the performance boost of standard ensembling but results in better calibration, while maintaining the same level of efficiency (as opposed to joint training methods that are compared to). However, this comparison seems incomplete - firstly, my understanding is that the compared-to ensembling approaches do not make use of the additional unlabeled data (at least standard ensembling does not). In Table 1 (the main table in the paper) the results are with respect to a training size of 1000 data points, but the unlabeled data size and validation size are 5000 points each. As a result, this comparison seems unfair - one should at least consider some other pseudo-labeling scheme for the unlabeled data, since it makes up the majority of the data being considered.
+
+    Additionally, even this part aside, the authors should compare the method to training ensembles with some kind of data augmentation (label smoothing [1], Mixup [2], etc.) since these methods are not only known to improve feature learning diversity but also regularize predicted confidences. Furthermore, training with these methods is going to be even more efficient than the proposed approach, and I expect would perform better. My reasons for expecting this are two-fold: firstly, the proposed approach intuitively regularizes confidence by having the ensemble uncertainty be high on the unlabeled data (essentially these points should be predicted uniformly randomly based on how the ensembles are trained), but Mixup and label smoothing are approaches that can do this as well. Additionally, and more importantly, the authors themselves note that their approach does not work (and can even hurt) for larger dataset sizes, but the aforementioned data augmentations are known to improve calibration even in that regime.
+
+2. **Theoretical approach needs greater clarity.** The theory here needs significantly more clarification in my view. For example, the authors define $\hat{\rho}$ to be a uniform combination of point masses on different weights (and even here the notation should be made more precise, $\delta$ is not defined a priori) and then claim that $\hat{V}$ is the empirical variance of $\hat{\rho}$, but that is not what it represents from Equation (2), which is the variance of the predictive distribution of the ensemble when evaluated with respect to the true labels of data points in $U$. Furthermore, for the predictive distribution the authors use $p(y \mid x, f)$ in Equation (2) and it should be clarified at this point that $y$ corresponds to the true label of $x$ (which the authors mention later). More importantly, the proof of Proposition 1 is very hard to make sense of. What is the indicator variable of $y$ not being in the random labels? Aren't the random labels supposed to be exhaustive? Even ignoring this, how does the second term become zero when passing from the first line to the second line? 
+
+### Questions
+My main questions are stated above as part of weaknesses.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 5
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper introduces ν-ensembles, a novel deep ensemble algorithm that achieves both efficiency and conceptual simplicity. When presented with an unlabeled dataset, ν-ensembles generate distinct labelings for each ensemble member and subsequently fit both the training data and the randomly labeled data.
+
+### Strengths
+The strength of ν-ensembles lies in their ability to enhance deep ensemble diversity and calibration without significantly increasing computational demands. Key strengths include improved calibration in both in-distribution and out-of-distribution settings, achieved without complex implementation or extensive hyperparameter tuning. This method maintains the efficiency of standard deep ensembles, ensuring diversity through a straightforward process of assigning random labels to unlabeled data points. The theoretical grounding via PAC-Bayesian analysis provides a guarantee of diversity, accuracy, and calibration on test data, making ν-ensembles a promising and efficient technique for enhancing deep neural network ensembles.
+
+### Weaknesses
+1. The paper lacks the related works of other calibration method such as train time calibration loss, and post hoc calibration which is very important in this domain.
+2. From my experience, the ECE measurement could be very unstable when classification accuracy is low. For experiments in table 1 for CIFAR100, the accuracy is very low, and the results may not reliable.
+3. The experiments lack the comparison with SOTA methods such as Focal Loss Calibration and Adaptive Label Smoothing.
+
+### Questions
+In table 1, how many times does the author run the experiments? Since the ECE measurement can be very stable among low prediction accuracy models, the ECE reported in Table can have very large variance. Please report the variance of multiple runs to verify the effectiveness of your method.
+
+The experiment is limited to CIFAR10 datasets. Since the authors mention that the small dataset regime often happens in medical area. It is better to verify your algorithm on the small medical datasets.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+1 poor

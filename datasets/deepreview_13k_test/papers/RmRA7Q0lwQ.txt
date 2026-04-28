@@ -1,0 +1,444 @@
+\title{Stay on Topic with Classifier-Free Guidance}
+
+\begin{abstract}
+Classifier-Free Guidance (CFG) \cite{cfg} has recently emerged in text-to-image generation as a lightweight technique to encourage prompt-adherence in generations. In this work, we demonstrate that CFG can be used broadly as an inference-time technique in pure language modeling. We show that CFG (1) improves the performance of Pythia, GPT-2 and LLaMA-family models across an array of tasks: Q\&A, reasoning, code generation, and machine translation, achieving SOTA on LAMBADA with LLaMA-7B over PaLM-540B; (2) brings improvements equivalent to a model with twice the parameter-count; (3) can stack alongside other inference-time methods like Chain-of-Thought and Self-Consistency, yielding further improvements in difficult tasks; (4) can be used to increase the faithfulness and coherence of assistants in challenging form-driven and content-driven prompts: in a human evaluation we show a 75\% preference for GPT4All using CFG over baseline.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sct:introduction}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+
+  \begin{center}
+  \includegraphics[width=0.48\textwidth]{cfg-latent.pdf}
+  \end{center}
+  \caption{A notional 2D projection of a textual latent space showing how increasing the guidance weight $\gamma$ increases the importance of the prompt ``Today in France,''.}
+    \label{fig:cfg-latent}
+
+\end{wrapfigure}
+
+In recent years large language models have exhibited strong generative capabilities to solve a diverse range of tasks \cite{devlin-etal-2019-bert,brown2020language,scao2022bloom}. ``Prompting'' is typically used to condition generation, with task instructions and context \cite{reynolds2021prompt}, or a small set of examples \cite{brown2020language}. However, language generation, especially with smaller models, has been shown to struggle with issues such as hallucination \cite{manakul2023selfcheckgpt}, degradation \cite{holtzman2019curious} and meandering \cite{spangher2023sequentially}.
+Various approaches have been proposed to address this, e.g.: instruction-finetuning \cite{flan,sanhmultitask} and reinforcement learning \cite{instructgpt,alignment,bai2022constitutional}. These techniques are expensive and their compute and data cost may not be accessible to all users. In this paper we propose an \textit{inference time} methodology which, as shown in Figure \ref{fig:cfg-latent}, gives more importance to the user intent, expressed through the prompt. Our hypothesis in this paper is: \textit{focusing more on the prompt at inference-time will result in generations that better align with expected behavior.}
+
+Text-to-image-generation, too, has been shown to suffer from similar problems \cite{guidance}. Standard inference approaches can ignore parts of the prompt-conditioning, especially with specific or uncommon prompts \cite{glide}. Classifier Guidance \cite{guidance} was proposed to enhance the generative quality of diffusion models, by using a separate classifier to encourage desired characteristics in the output image. Classifier-Free Guidance (CFG) \cite{cfg} was later introduced, in which the classifier is removed and the generative model \textit{itself} is used as an implicit classifier. 
+
+Inspired by its effectiveness in the text-to-image-generation \cite{imagen,cfg,cfgfix}, we adapt CFG to unimodal text generation to increase the model alignment to the given prompt. While text-to-image models (which primarily utilize diffusion models) need to be specifically trained with conditioning dropout \cite{cfg} to utilize CFG, we show that, in text generation, we can use CFG out-of-the-box in many situations. We demonstrate the effectiveness of CFG to improve alignment on a wide range of prompting approaches including zero-shot prompting, Chain-of-Thought prompting, long-form generative prompting and complex chatbot-style prompting (see Table \ref{tbl:example}).
+
+We make the following contributions:
+
+\begin{enumerate}
+    \item We devise a framework for using CFG in language modeling and show significant improvements across a range of standard benchmarks. These benchmarks capture a variety of different prompting techniques: basic prompting, chain-of-thought prompting, long-text prompting and chatbot-style prompting.  Notably, we achieve SOTA on LAMBADA with LLaMA-7B over PaLM-540B.
+    \item We show that for the same inference cost, one can train a model that is half the size and obtain similar performance on those benchmarks;
+    \item By using a negative prompt, we demonstrate that we can have a more granular control over the aspects emphasized by CFG. In a blind human evaluation we show 75\% preference for GPT4All using CFG over the vanilla sampling;
+    \item We provide interpretations for the impact that CFG on text generation both (1)  qualitatively, by visualizing how CFG is upweighting words more related to the prompt (our visualization, we note, can be an integral part of effective prompt engineering) and (2) quantitatively, by showing that CFG decreases entropy in the sampling distribution.
+\end{enumerate}
+\begin{table}
+    \centering
+    \begin{NiceTabular}{p{6.4cm}p{6.4cm}}
+        \toprule
+        \rowcolor{blue!25} \multicolumn{2}{p{12.8cm}}{\textbf{\underline{Instruction:} \textit{``Respond \underline{enthusiastically} to the following user prompt.''} \newline
+        \underline{Prompt:} \textit{``What was the Cambridge Analytica scandal?''}}}\\
+        \midrule
+        \cellcolor{red!25}\textbf{\underline{Vanilla Sampling}} & \cellcolor{green!25}\textbf{\underline{Classifier Free Guidance-based Sampling}} \\
+        \midrule
+        The Cambridge Analytica scandal was a huge scandal in which it was revealed that Cambridge Analytica, a political consulting firm, had used personal data from Facebook to target and influence the 2016 US presidential election. This scandal raised questions about the role of social media in political campaigns...% and the misuse of data.
+        & 
+        Oh my goodness! What a scandal! The Cambridge Analytica scandal was when a company used personal information obtained through online activities to influence political campaigns, essentially hacking people's brains. It was a serious breach of trust and privacy, and rightfully so! It is a wake-up call for...% companies to prioritize user data and implement strong measures to prevent such unethical practices. Well done to the people who fought against this scandal and brought the perpetrators to justice!
+        \\
+        \bottomrule \\
+        \end{NiceTabular}
+        \caption{Demonstration of CFG-guided generation for an \textit{assistant-style} prompt (using GPT4All with $\gamma=5$). The assistant has a system-level prompt (``Instructions'') that is potentially out-of-distribution (e.g. ``\textit{write an enthusiastic response}'') and a user-level prompt (``Prompt''). In Vinalla Sampling, the model ignores the system-level directive, but with CFG, the model adheres to both the system-level and the user-level prompt.}
+    \label{tbl:example}
+\end{table}
+
+
+\section{Methodology}
+
+\label{sct:methodology}
+
+Autoregressive language models are trained to generate plausible continuations of sequences of text. Given a sequence of tokens $w_1,\cdots,w_T$, the model samples each subsequent token from the conditional probability distribution $\Prob_\theta(w|w_{t\leq{T}})$. It is now typical for some or all of the initial tokens to be considered a \textit{prompt}, which specifies information about the task or how it is to be solved. In practice, prompts are syntactically and semantically distinct from the initial text to be continued.
+
+However, standard generation methods for large language models do not differentiate between prompt text, $w_1...w_p$ and subsequent generations $w_{p+1}, ... w_{t-1}$. Directly sampling from $\Prob_\theta(w_{i+1}|w_{t\leq i})$ may result in continuations that lose adherence to the prompt (see Table \ref{tbl:example}, for example) over the course of the generation. 
+Inspired by successes with diffusion models, we propose to address this problem by applying Classifier-Free Guidance~\cite{cfg} to the decoding process in autoregressive language models.
+
+\subsection{Guidance in Text-to-Image Models} 
+\label{sct:methodology:guidance-t2i}
+
+Let $\Prob_\theta(x)$ be the unconditional generative model for an image $x$ with parameters $\theta$. During inference, we wish to condition the generation on a label or text description $c$ in order to model $\Prob(x|c)$. Generative models usually generate data from an abstract representation $z$ in semantic space that is decoded into an actual sample (e.g. the latent vectors in GANs or the intermediate sampling steps in diffusion models). Controlling the generation usually involves guiding or adding constraints to that semantic representation.
+In \textbf{Classifier Guidance} \cite{guidance}, an auxiliary classifier $\Prob_\phi(c | x)$ is introduced, which guides the sampling from $\Prob_\theta(x)$ with the gradients $\gamma \nabla_z \Prob_\phi(c | x)$ to increase the likelihood of $c$ for generation $x$.
+This modification results in approximate samples from the distribution:
+
+\begin{equation}
+\widehat{\Prob}(x|c) \propto \Prob_\theta(x)\cdot \Prob_\phi(c|x)^{\gamma}
+\label{eq:classifier-guidance}
+\end{equation}
+where $\gamma$ is called the guidance strength. This guidance results in a reweighting of the density according to the classifier likelihood. For $\gamma=0$, it reduces to the unconditional generation, while $\gamma=1$ reduces to the conditional generation. When $\gamma>1$ then $\widehat{\Prob}$ overemphasizes the conditioning, which as noticed by~\cite{guidance} results in a better inception score at the cost of diversity. This approach has been successfully used in a variety of works \cite{stylegannada,diffusionclip,vqganclip}
+
+\textbf{Classifier-Free Guidance}, \cite{cfg} observes that by using Bayes rule we can eliminate the necessity of an external classifier. By training the same model $\Prob_\theta$ to support both conditional and unconditional generation with conditioning dropout, we can thus rewrite the second term in Equation \ref{eq:classifier-guidance} as $\Prob_\theta(c|x) \propto \frac{\Prob_\theta(x|c)}{\Prob_\theta(x)}$. Then, the sampling is performed according to the probability: 
+
+\begin{equation}\label{eq:cfg_sampling}
+\widehat{\Prob_\theta}(x|c) \propto \frac{\Prob_\theta(x|c)^{\gamma}}{\Prob_\theta(x)^{\gamma-1}}. 
+\end{equation} 
+
+Modeling the diffusion process with $\widehat \Prob_\theta(x|c)$ effectively means predicting the PDF of the sample noise $\epsilon_t$ as
+
+\begin{equation}
+\label{eq:diffusion-cfg}
+    \log \widehat{\Prob_\theta}(\epsilon_t|x_{t+1},c) = \gamma \log \Prob_\theta(\epsilon_t | x_{t+1}, c) - (\gamma - 1) \log \Prob_\theta(\epsilon_t | x_{t+1}).
+\end{equation}
+
+An important tool with diffusion models is \textbf{Negative Prompting} \cite{compositionalprompts,negprompt,crowson2022vqgan,stablediffusion}. We can rewrite Equation \ref{eq:diffusion-cfg} as
+
+\begin{equation}
+    \log \widehat{\Prob_\theta}(\epsilon_t|x_{t+1},c) = \log \Prob_\theta(\epsilon_t | x_{t+1}) + \gamma \big(\log \Prob_\theta(\epsilon_t | x_{t+1}, c) - \log \Prob_\theta(\epsilon_t | x_{t+1})\big)
+\end{equation}
+
+Aside from its probabilistic interpretation, this equation also represents a vector arithmetic operation in latent space: we take a step of size $\gamma$ away from the unconditional vector in the direction of the conditioning. Semantic vector linear arithmetic has proven to be effective in many situations in vision: striking examples have been generated by interpolations in GANs or diffusion models \cite{editgan,ddim,neuralphotoshop}. 
+
+Moreover, the initial point does not have to be the unconditional latent, but any representation we want to move away from. We can introduce the "negative conditioning" or "negative prompt" $\overline{c}$, as well as a generalized equation resulting in Equation \ref{eq:diffusion-cfg} when $\overline{c}=\varnothing$:
+
+\begin{equation}
+    \log \widehat{\Prob_\theta}(\epsilon_t|x_{t+1}, c, \overline{c}) = \log \Prob_\theta(\epsilon_t | x_{t+1}, \overline{c}) + \gamma \big(\log \Prob_\theta(\epsilon_t | x_{t+1}, c) - \log \Prob_\theta(\epsilon_t | x_{t+1}, \overline{c})\big)
+    \label{eq:negative-prompting}
+\end{equation}
+
+\subsection{Classifier-Free Guidance of Language Models}
+\label{sct:methodology:guidance-llm}
+
+To apply Classifier-Free Guidance to language models, we first have to define the semantic space to operate in. As demonstrated in \cite{word2vec,glove} and \cite{bert,gpt1}, word embeddings and sentence embeddings have strong semantic structures. This makes the logits of token predictions a good choice of our latent space, due to its linear relationship with the last hidden layer. Using the logits avoids network editing \cite{leace} and is architecture agnostic.
+
+Next, we need to define what is considered conditioning, $c$, in decoder-only language models. In the common situations, a user provides a \textit{prompt} $c$ which can be a context, an instruction, or the beginning of some text, and uses a language model to sample a sequence of continuation tokens $w_i$ for the prompt $c$. Since a good continuation is expected to highly correlate to the prompt, we consider the prompt as our conditioning.
+
+Similarly to Classifier Guidance \cite{dathathri2019plug, yang2021fudge, spangher2023sequentially}, we wish to generate a text $w$ which has a high likelihood of starting with $c$. We define the $\gamma$-reweighted distribution $\widehat{\Prob}(w|c) \propto \Prob(w)\cdot\Prob(c|w)^\gamma$, and approximate it with CFG as $\widehat{\Prob}(w|c) \propto \frac{\Prob(w|c)^\gamma}{\Prob(w)^{\gamma-1}}$
+
+In the case of autoregressive language models modeling $\Prob_\theta(w)=\prod_i^N\Prob_\theta(w_i|w_{j<i})$, we can unroll the formulation and obtain Equation \ref{eq:cfg_sampling} again:
+
+\begin{equation}
+    \widehat{\Prob_\theta}(w | c) \propto \prod^T_{i=1} \widehat{\Prob_\theta}(w_i| w_{j<i}, c) \propto \prod^T_{i=1}\frac{\Prob_\theta(w_i|w_{j<i},c)^\gamma}{\Prob_\theta(w_i| w_{j<i})^{\gamma-1}} \propto \frac{\Prob_\theta(w|c)^\gamma}{\Prob_\theta(w)^{\gamma-1}}
+    \label{eq:lm-cfg}
+\end{equation}
+
+While conditioned diffusion models cannot predict unconditioned distributions without extra training, language models handle both $\Prob_\theta(w|c)$ and $\Prob_\theta(w)$ naturally due to being trained on finite context windows. Being able to drop the prefix $c$ is a natural feature. 
+We can thus sample the next $i$-th token $w_i$ in the logits space:
+
+\begin{equation}
+    \log \widehat{\Prob_\theta}(w_i|w_{j<i},c) = \log \Prob_\theta(w_i | w_{j<i}) + \gamma \big(\log \Prob_\theta(w_i | w_{i<j}, c) - \log \Prob_\theta(w_i | w_{j<i})\big)
+\end{equation}
+This formulation can be extended to accomodate ``negative prompting'', as in Equation \ref{eq:negative-prompting}. Negative prompting as applied in autoregressive LMs will be further addressed in Section \ref{sct:experiments:negative-prompting}. Now, we will continue on to the next section, where we introduce our experiments. In this section, we will explore the effects of CFG on different variations of prompting.
+
+
+
+\section{Experiments}
+
+\label{sct:experiments}
+
+In this section we show that Classifier-Free Guidance reliably boosts performance across a variety of common prompting approaches. In Section \ref{sct:experiments:benchmarks} we show that CFG boosts zero-shot performance on a variety of standard NLP benchmarks, including achieving state-of-the-art performance on LAMBADA with LLaMa-7B. In Section \ref{sct:experiments:cot} we apply CFG to  \textit{Chain-of-Thought prompts} \cite{nye2022show,COT} an approach to allows the model to reason first before answering the question. Next, we test the performance of CFG on \textit{text-to-text generation prompts} in Section \ref{sct:experiments:text-to-text-generation}. Finally, we show in Section \ref{sct:experiments:negative-prompting} that CFG can be applied to \textit{assistant} prompts (i.e. prompts with system-instructions).
+
+\subsection{Basic Prompting: Zero-Shot Prompts}
+\label{sct:experiments:benchmarks}
+
+To test \textit{basic, zero-shot prompting}, we consider a suite of zero-shot benchmarks implemented in the Language Model Evaluation Harness \cite{eval-harness}, which includes close-book QA \cite{auer2023sciqa, joshi2017triviaqa}, common sense reasoning tasks \cite{zellers2019hellaswag, sakaguchi2021winogrande, clark2019boolq, bisk2020piqa, cobbe2021training, basu2020aqua, arc}, and sentence completion-tasks \cite{paperno2016lambada}. In these settings, the desired completions are short (often 1-2 tokens), so risks of meandering \cite{spangher2023sequentially} or degradation \cite{holtzman2019curious} are low. We hypothesize that the main impact of CFG in these settings will be to reduce variance in output choices, as we explore more in Section \ref{sct:explanation}.
+
+We evaluate the GPT-2 model family\cite{radford2019language}, the Pythia model family \cite{biderman2023pythia} and the LLaMA model family\cite{llama} using different guidance strengths across a range of standard NLP benchmarks using EleutherAI's Language
+Model Evaluation Harness \cite{eval-harness} and implement CFG by starting the unconditional prompt at the last token of the initial prompt. The results are shown in Table \ref{tab:benchmark}. For better visualization, the charts for the GPT2 models, the Pythia models and the LLaMA models over the standard benchmarks are also shown in Figure \ref{fig:gpt2-split}, \ref{fig:pythia-split}, and \ref{fig:llama-split}, respectively. We observe that except ARC (challenge) and Winogrande, the boost of performances from CFG is nontrivial and consistent. The reasons for these discrepancies are still unknown.
+
+Furthermore, we note that even the smallest LLaMA 7B model achieves $81\%$ accuracy in Lambada (OpenAI) zero-shot benchmark with $\gamma = 1.5$, outperforming the current SOTA (zero-shot) of PaLM-540B ($77.9\%$). Despite the fact that CFG almost doubles the computation during inference, the comparison is still noteworthy given that other models with comparable performances on Lambada (OpenAI) have much more parameters and would still require more compute than LLaMA 7B with CFG. Taken together, we show that CFG increases performance in basic prompting settings significantly. %We explore more why in Section \ref{sct:explanation}.
+
+\begin{figure}[t]
+    \centering
+    \subfloat[][]{
+    \begin{tabular}{lllll}
+        \toprule
+        {} &        ARC-c &        ARC-e &        BoolQ &    HellaSwag \\
+        \midrule
+        GPT2-small &   22.7 / \textbf{ 23.0} &   39.5 / \textbf{ 42.1} &   48.7 / \textbf{ 57.0} &   31.1 / \textbf{ 31.9}\\
+        GPT2-medium &  \textbf{ 25.0} /  23.9 &   43.6 / \textbf{ 47.6} &   58.6 / \textbf{ 60.1} &   39.4 / \textbf{ 40.9}\\
+        GPT2-large &  \textbf{ 25.1} /  24.7 &   46.6 / \textbf{ 51.0} &   60.5 / \textbf{ 62.1} &   45.3 / \textbf{ 47.1}\\
+        GPT2-xl &   28.5 / \textbf{ 30.0} &   51.1 / \textbf{ 56.5} &   61.8 / \textbf{ 62.6} &   50.9 / \textbf{ 52.4}\\
+        \midrule
+        Pythia-160M &  \textbf{ 23.5} /  23.0 &   39.5 / \textbf{ 42.2} &   55.0 / \textbf{ 58.3} &   30.1 / \textbf{ 31.2}\\
+        Pythia-410M &  \textbf{ 24.1} /  23.8 &   45.7 / \textbf{ 50.3} &   60.6 / \textbf{ 61.2} &   40.6 / \textbf{ 41.6}\\
+        Pythia-1B &   27.0 / \textbf{ 28.0} &   49.0 / \textbf{ 54.9} &   60.7 / \textbf{ 61.8} &   47.1 / \textbf{ 48.9}\\
+        Pythia-1.4B &   28.6 / \textbf{ 29.6} &   53.8 / \textbf{ 59.6} &   63.0 / \textbf{ 63.8} &   52.1 / \textbf{ 54.3}\\
+        Pythia-2.8B &   33.1 / \textbf{ 34.5} &   58.8 / \textbf{ 65.4} &   64.7 / \textbf{ 64.7} &   59.3 / \textbf{ 61.9}\\
+        Pythia-6.9B &   35.2 / \textbf{ 36.1} &   61.3 / \textbf{ 67.4} &   63.7 / \textbf{ 64.6} &   64.0 / \textbf{ 66.5}\\
+        Pythia-12B &   36.9 / \textbf{ 38.7} &   64.1 / \textbf{ 72.6} &   67.6 / \textbf{ 67.8} &   67.3 / \textbf{ 69.6}\\
+        \midrule
+        LLaMA-7B &   41.5 / \textbf{ 43.9} &   52.5 / \textbf{ 58.9} &  \textbf{ 73.1} /  71.8 &   73.0 / \textbf{ 76.9}\\
+        LLaMA-13B &   47.8 / \textbf{ 54.2} &   74.8 / \textbf{ 79.1} &  \textbf{ 78.0} /  75.8 &   79.1 / \textbf{ 82.1}\\
+        LLaMA-30B &   52.9 / \textbf{ 57.4} &   78.9 / \textbf{ 83.2} &  \textbf{ 82.7} /  80.0 &   82.6 / \textbf{ 85.3}\\
+        LLaMA-65B &   55.6 / \textbf{ 59.0} &   79.7 / \textbf{ 84.2} &  \textbf{ 84.8} /  83.0 &   84.1 / \textbf{ 86.3}\\
+
+        \bottomrule
+    \end{tabular}
+    } \\ 
+    
+    \subfloat[][]{
+    \begin{tabular}{llllll}
+        \toprule
+        {} &         PIQA &         SCIQ &   TriviaQA & WinoGrande &      Lambada \\
+        \midrule
+        GPT2-small &   62.5 / \textbf{ 63.8} &   64.4 / \textbf{ 70.8} &    5.5 / \textbf{  6.5} &  \textbf{ 51.6} /  50.5 &   32.6 / \textbf{ 44.6}\\
+        GPT2-medium &   66.4 / \textbf{ 66.9} &   67.2 / \textbf{ 76.7} &    8.3 / \textbf{  9.3} &  \textbf{ 53.1} /  52.1 &   43.0 / \textbf{ 55.8}\\
+        GPT2-large &   69.2 / \textbf{ 70.2} &   69.4 / \textbf{ 78.8} &   11.1 / \textbf{ 12.0} &  \textbf{ 55.4} /  54.4 &   47.7 / \textbf{ 60.5}\\
+        GPT2-xl &   70.5 / \textbf{ 71.3} &   76.1 / \textbf{ 82.4} &   14.7 / \textbf{ 15.2} &  \textbf{ 58.3} /  55.6 &   51.2 / \textbf{ 62.5}\\
+        \midrule
+        Pythia-160M &   61.4 / \textbf{ 62.1} &   67.0 / \textbf{ 75.4} &    4.1 / \textbf{  5.3} &  \textbf{ 52.3} /  51.1 &   32.8 / \textbf{ 47.4}\\
+        Pythia-410M &   67.1 / \textbf{ 67.8} &   72.1 / \textbf{ 79.0} &    7.9 / \textbf{  9.1} &  \textbf{ 52.9} /  50.7 &   51.3 / \textbf{ 64.0}\\
+        Pythia-1B &   69.2 / \textbf{ 70.5} &   76.0 / \textbf{ 82.9} &  \textbf{ 12.3} /  12.3 &  \textbf{ 53.9} /  51.5 &   56.2 / \textbf{ 69.0}\\
+        Pythia-1.4B &   71.1 / \textbf{ 72.5} &   79.4 / \textbf{ 85.1} &   15.9 / \textbf{ 15.9} &  \textbf{ 57.4} /  56.0 &   61.6 / \textbf{ 72.7}\\
+        Pythia-2.8B &   73.6 / \textbf{ 75.8} &   83.3 / \textbf{ 88.2} &  \textbf{ 22.1} /  20.9 &  \textbf{ 60.1} /  57.9 &   64.6 / \textbf{ 76.5}\\
+        Pythia-6.9B &   76.3 / \textbf{ 77.4} &   84.3 / \textbf{ 89.7} &  \textbf{ 28.2} /  27.2 &  \textbf{ 61.1} /  60.3 &   67.1 / \textbf{ 78.8}\\
+        Pythia-12B &   77.0 / \textbf{ 78.4} &   87.7 / \textbf{ 91.9} &  \textbf{ 33.4} /  32.1 &  \textbf{ 65.0} /  63.4 &   70.4 / \textbf{ 80.6}\\
+        \midrule
+        LLaMA-7B &   77.4 / \textbf{ 79.8} &   66.3 / \textbf{ 75.4} &  \textbf{ 56.0} /  52.7 &  \textbf{ 67.1} /  65.5 &   73.6 / \textbf{ 81.3}\\
+        LLaMA-13B &   80.1 / \textbf{ 80.9} &   91.1 / \textbf{ 95.1} &  \textbf{ 62.4} /  59.8 &  \textbf{ 72.8} /  71.5 &   76.2 / \textbf{ 82.2}\\
+        LLaMA-30B &  \textbf{ 82.3} /  82.3 &   94.3 / \textbf{ 96.4} &  \textbf{ 69.7} /  67.9 &  \textbf{ 75.8} /  74.1 &   77.5 / \textbf{ 83.9}\\
+        LLaMA-65B &   82.3 / \textbf{ 82.6} &   95.1 / \textbf{ 96.6} &  \textbf{ 73.3} /  71.8 &  \textbf{ 77.4} /  76.1 &   79.1 / \textbf{ 84.0}\\
+        \bottomrule
+    \end{tabular}
+    }
+    \caption{Results of general natural language benchmarks. In each cell, the first value is the result for $\gamma = 1$ (baseline) and the second value is the result for $\gamma = 1.5$ (ours). LLaMA 7B with CFG on Lambada zero-shot already outperforms vanilla PaLM 540B, Chinchilla 70B, and GPT-3 175B, tops the \href{https://paperswithcode
+    \label{tab:benchmark}
+\end{figure}
+
+\subsection{Deliberative Prompting: Chain-of-Thought}
+\label{sct:experiments:cot}
+
+A variation on \textit{basic prompting} has emerged recently called \textit{Chain-of-Thought (CoT) prompting} \cite{COT}. In this setting, the model is prompted to generate a series of reasoning steps before giving an answer to the task: i.e. $p(w_{cot}, w_a| w_p)$, where $w_{cot} = w_{p+1}...w_{c-1}$ and $w_a$ is the answer. $w_{cot}$ is designed to mimic the human reasoning or deliberation process. CoT has been shown to perform well in complex reasoning tasks that can not be fully addressed by model- or data-scaling ~\cite{rae}, however, as observed by~\cite{COT}, long reasoning chains can diverge and either do not generate correct answers, or do not follow the expected result structure given by the prompt.
+
+This setting poses a variation on the prior \textit{base-case} setting: now, the continuation $w_c = \left[w_{cot}, w_{a}\right]$ is expected to be longer than 1-2 tokens. We hypothesize that compared to basic zero-shot prompting explored in Section \ref{sct:experiments:benchmarks}, CFG will \textit{also} be able to enforce better reasoning chains with less drift.
+
+ We evaluate the effectiveness of our proposed CFG method with respect to chain-of-thought prompting on two arithmetic reasoning tasks: GSM8K~\cite{gsm8k} and AQuA~\cite{aqua}. We follow~\cite{self-consistency} few-shot prompt and parsing setting, with respect to two open source LLM models: WizardLM-30B~\cite{xu2023wizardlm} and Guanaco-65B~\cite{guancano}.
+As can be seen in Figure~\ref{fig:cot_GSM8K},~\ref{fig:cot_aqua}, using CFG increases the percentage of CoT which results in a valid answer that could be parsed. For low guidance strengths, this results in boosting the model performances. However, for large values, although the model returns more valid results, the quality of the chains is also impacted, and overall the model performances degrade. A qualitative comparison is provided in Table~\ref{tbl:cot_qual1},~\ref{tbl:cot_qual2}.  
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=.4\linewidth]{CoT/gsm8_acc.png}
+    \includegraphics[width=.4\linewidth]{CoT/gsm8k_invalid.png}
+    \caption{CFG impact on chain-of-thought prompting with respect to GSM8K dataset. For small CFG values, using CFG increases the percentage of chains which end in a valid answer structure while increasing the model accuracy. For large values the invalid percentage remains small but the accuracy drop.  }\label{fig:cot_GSM8K}
+\end{figure}
+
+We have only scratched the surface of exploring CFG's interactions with CoT; for instance, instead of upweighting just $w_p$, we might upweight $w_p, w_{cot}$, or other variations. We anticipate in future work being able to more fully test variations of CFG-weighting on different parts of the CoT process.% (i.e. $w_p, w_{cot}, w_c$).
+\subsection{Text-to-Text Prompts: Generation}
+\label{sct:experiments:text-to-text-generation}
+In contrast to \textit{basic prompting} and \textit{CoT-prompting}, where we ultimately expect a short answer, $w_a$, many settings require lengthier continuations. In this section, we study a prompt setting where the quality of answers are highly dependent the ability to stay on target over long sequences of text (both prompt, $w_p$ and continuation, $w_c$). We hypothesize that, in contrast to Sections \ref{sct:experiments:benchmarks} and \ref{sct:experiments:cot}, these tasks require longer-form completions, which Classifier-Free Guidance's effectiveness in enforcing adherences to many different parts of the prompt. %We also note that previous work \cite{shi2023trusting}. 
+
+\subsubsection{Program synthesis evaluations}\label{sct:experiments:text-to-text-generation:program_synthesis}
+Computer programs represent an important language-modeling case, as formal language differs from natural language in many ways including the use of well-defined structures. Testing Classifier-Free Guidance on code-related tasks improves the robustness of our hypothesis over different distributions of data. And then we perform a thorough evaluation on the HumanEval benchmark \cite{chen2021codex}. 
+\subsubsection{HumanEval benchmark}
+
+To systematically investigate the impact of Classifier-Free Guidance on code completion abilities, we evaluate models using different CFG strengths on HumanEval benchmark \cite{chen2021codex}. HumanEval benchmark contains $164$ coding tasks in Python where the prompts are given by a function signature and a docstring. The model will generate continuations of the prompt, and the resulting programs will be tested against a set of unit tests for each task which evaluate the correctness of Python programs. We choose CodeGen-350M-mono, CodeGen-2B-mono and CodeGen-6B-mono (\cite{nijkamp2023codegen}) which are specialized in Python program synthesis.\footnote{\textit{Note: CodeGen-16B-mono is omitted due to the compute constraint.}}
+
+Various CFG strengths \footnote{$\gamma = 1.0, 1.1, 1.25, 1.5, 1.75, 2.0$} are tested on $3$ different temperatures $0.2, 0.6, 0.8$ with the evaluation metrics being pass@$k$ for $k=1, 10, 100$ \footnote{The definition of pass@$k$ according to \cite{chen2021codex}: ``$k$ code samples are generated
+per problem, a problem is considered solved if any sample passes the unit tests, and the total fraction of problems
+solved is reported."}. Here we show the results for temperature$=0.2$ in Table \ref{tab:codegen}.
+
+\begin{table}[t]
+    \centering
+    \begin{tabular}{llllllllll}
+        \toprule
+         & \multicolumn{3}{c}{CodeGen-350M} & \multicolumn{3}{c}{CodeGen-2B} & \multicolumn{3}{c}{CodeGen-6B} \\
+         \cmidrule(r){2-4} \cmidrule(r){5-7} \cmidrule(r){8-10}
+        $\gamma$ & k=1 & k=10 & k=100 & k=1 & k=10 & k=100 & k=1 & k=10 & k=100 \\
+        \midrule
+        1.0 & 11.0\% & 17.0\% & \textbf{22.0\%} & 19.5\% & 25.5\% & \textbf{29.8\%} & 19.5\% & 25.5\% & \textbf{29.8\%} \\
+        1.1 & \textbf{11.8\%} & \textbf{18.1\%} & 20.1\% & 20.4\% & 25.4\% & 28.0 & 20.4\% & 25.4\% & 28.0\% \\
+        1.25 & 11.4\% & 17.3\% & 18.9\% & 19.7\% & 25.4\% & 28.0 & 19.7\% & 25.4\% & 28.0\% \\
+        1.5 & 10.9\% & 16.7\% & 18.3\% & \textbf{20.9\%} & \textbf{26.7\%} & 29.2\% & \textbf{20.9\%} & \textbf{26.7\%} & 29.2\\
+        1.75 & 10.3\% & 16.0\% & 18.2\% & 20.4\% & 26.2\% & 28.6\% & 20.4\% & 26.2\% & 28.6\% \\
+        2.0 & 8.6\% & 14.6\% & 17.6\% & 16.5\% & 22.4\% & 24.4\% & 16.5\% & 22.4\% & 24.4\% \\
+        \bottomrule\\
+    \end{tabular}
+    \caption{CodeGen results with temperature$=0.2$. CFG in nearly all cases increases performance, but the optimal $\gamma$ value varies.}
+    \label{tab:codegen}
+\end{table}
+
+We observe that low CFG ($\gamma \leq 1.5 $) increases the pass@$1$ rate uniformly\footnote{Note that the effect of low CFG on the pass@$1$ rate is consistent with the results of the general benchmarks in the previous section.}. High CFG ($\gamma \geq 1.5$) leads to a deterioration of performance. We also note that the improvement from CFG diminishes or harms performance at pass@$k$ at high $k$.
+
+To further investigate the effect of CFG, we break down the pass@$1$ evaluations on CodeGen-350M-mono for $\gamma = 1, 1.25$ task-by-task \footnote{See the scatter plot at temperature $0.2, 0.6, 0.8}, \ref{fig:humaneval-tasks-0.6}, \ref{fig:humaneval-tasks-0.2}}. We notice that the number of tasks where CFG outperforms is still more than the one where CFG underperforms for all temperatures $0.2, 0.6, 0.8$ (See Table \ref{tab:codegen-350-task-count}). 
+\begin{figure}[htp]
+  \centering
+    \begin{minipage}{.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{codegen_350m_charts/task_count.png}
+        \caption{HumanEval task count comparison between $\gamma = 1, 1.25$ for CodeGen-350M-mono}
+        \label{tab:codegen-350-task-count}
+    \end{minipage} \hfill
+    \begin{minipage}{.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{gpt4all.png}
+        \caption{Evaluators (611 votes, 71 unique voters) significantly preferred the system-prompt with CFG (max at $\gamma=3$) . The user-prompt relevance, not subject to CFG, did not degrade until $\gamma\ge 4$, showing a clear win without tradeoff at $\gamma=3$.}
+        \label{fig:gpt4all-human}
+    \end{minipage}
+\end{figure}
+
+We also find that without CFG, many tasks exhibit small nonzero passing rates while having $0\%$ rate with CFG. This explains the decreasing improvement of CFG in pass@$k$ for large $k$, as larger $k$ significantly boosts the passing rate of difficult tasks where the rates are low but nonzero.
+
+Overall, the consistent improvement on pass@$1$ rates and the reduced effect on pass@$100$ rates support our hypothesis that CFG strengthens the adherence to the prompt at the small cost of reduced variability and creativity.
+
+\subsection{Negative Prompting: Improving Assistants}
+\label{sct:experiments:negative-prompting}
+
+Finally, we explore an addition to Classifier-Free Guidance called \textit{negative prompting}. With negative prompting, the user specifies what they do \textit{not} want in the output (e.g. ``low resolution'', ``bad hands, bad anatomy, amateur drawing'' in text-to-image), which is then used to improve generation quality.
+
+We explore this idea in the context of chatbots. Chatbots give us a setting where the \textit{prompt} is expanded into a \textit{multi-stage prompt}\footnote{We note that this extension to \textit{basic-prompting} stands as a mirror to \textit{CoT-prompting}'s extension (Section \ref{sct:experiments:cot}). In \textit{CoT-prompting}, the \textit{continuation} is expanded to a \textit{multi-stage completion}; here, the \textit{prompt} is expanded.}. In chatbots, the language model is prompted with a two-part prompt: (1) the instruction, $w_s$ (sometimes called "system prompt") which may give contextual information (e.g. the ``current date''), or behavioral guidelines (e.g. style, alignment, persona, etc.); and (2) $w_p$, the user-prompt, or the user's query. See Table \ref{tbl:example} for an example. Adherence becomes an even greater challenge, as our initial explorations shows. We observe systems like Alpaca \cite{alpaca,vicuna,gpt4all} often ignore changes to their default system-prompt, and may even expose models to attacks like prompt injection \cite{greshake2023more}. 
+
+We explore CFG with negative prompting to increase the success rate of different system prompts. We set the negative prompt $\overline{c}$ to be the default system-prompt for the models we use (i.e. ``The prompt below is a question to answer, a task to complete, or a conversation to respond to; decide which and write an appropriate response.'') and set $c$ to be the edited prompt (e.g. ``The prompt below is a question to answer, a task to complete, or a conversation to respond to; decide which and write \textit{a sad} response.''). This approach not only makes the sampling more prompt-aware in general, but directly emphasizes the difference between \textit{our} system-prompt and the model's default system-prompt. 
+
+To test this approach with chatbots, we generate system-prompts, $n_{c} = 25$, and user-prompts, $n_{p} = 46$, and sample $1740$ random combinations of them. We use \texttt{GPT4All-J v1.3-jazzy} to generate two completions for each sampled combination: the first is sampled without CFG, and the second is sampled with CFG, with a guidance strength randomly chosen $\in$ {1,2,3,4,5,6}. Our hypothesis is that CFG increases system-prompt following, ideally without hurting the relevance to the user input. 
+
+We run a human preference study on our sampled continuations, where participants are shown both, blindly, and asked to assess two things: A.  which output better follows the system-prompt, $c$ and B. which output better follows the user-prompt $p$. Our results in Figure \ref{fig:gpt4all-human} shows compelling evidence that CFG emphasized the difference between $c$ and $\overline{c}$ more than sampling with $c$ alone. There is a clear peak at $\gamma=3$ with 75\% of system-prompt following preference over $\gamma=1$ and undegraded user-prompt relevance (52\%). 
+
+
+\section{Computational Cost Analysis}
+
+
+In the previous section we showed improvements across a wide array of benchmarks and contexts. However, since classifier-free guidance requires two passes through the network, users who are compute-constrained rather than VRAM constrained might wonder if CFG is interesting to them at all, and if they should not run a model twice as big instead.
+To answer this question, we calculate the FLOP for each of the benchmark experiments that we ran in Section \ref{sct:experiments:benchmarks}. We then compare across model sizes, with and without CFG. We conclude with the surprising finding that, across 5 out of 9 tasks, there there is a statistically \textit{insignificant difference} between using CFG and using vanilla prompting with a model of twice the size at $p=.01$, according to ANCOVA regression analysis \cite{rutherford2011anova}. Of the significantly different tasks, 2 favor CFG and 2 favor vanilla. 
+
+In other words, and most significantly, this indicates that, overall, a model using CFG can generally perform just as well as a model twice as large. This has enormous implications for training budgets and inference latency due to limited VRAM usage, which we seek to explore in future work.
+
+
+
+\section{Explaining the Success of Classifier-Free Guidance}
+
+\label{sct:explanation}
+
+In this section, we try to derive insights on the impact of Classifier-Free Guidance on generation, both quantitatively and qualitatively. We sample a dataset of $32,902$ datapoints from the P3 dataset \cite{sanhmultitask} and use the Falcon-7b-Base model family \cite{falcon40b} as an exploratory model. Our goal is to analyze the logit distributions -- we describe how in the following sections. Many of our comparisons are done with reference to an instruction-tuned model, for which we use the Falcon-7b-Instruct version. We replicate our findings on other models and datasets as well: the Open-Assistant Dataset \cite{kopf2023openassistant} and Redpajama-3b model family\footnote{\url{https://www.together.xyz/blog/redpajama}}.
+
+\begin{figure}
+    \centering
+    \subfloat[Entropy of logits for the vanilla prompted distribution $\Prob(y|x)$, the unprompted distribution, $\Prob(x)$, the CFG-$\gamma=1.5$ distribution and an instruction-tuned model $\Prob_\text{instruct}(y|x)$.]{\includegraphics[width=.45\linewidth]{explanation/entropy.png}
+    \label{fig:entropy}
+    }
+    \hfill
+    \subfloat[Number of tokens overlapping in top-p=90\% of vocabulary distributions between that of: CFG, that of the vanilla prompted model, $p(y|x)$, and that of the unprompted model, $\Prob(x)$.]{\includegraphics[width=.45\linewidth]{explanation/p_cfg__token_overlap.png}
+    \label{fig:topp}}
+    \caption{We show into how CFG alters the logit distribution of the vanilla prompted model, $\Prob(y|x)$. CFG lowers the entropy to a level roughly similar to instruction-tuned model variant. CFG shares roughly 50\% of the tokens in top-p=$0.9$ as the vanilla $\Prob(y|x)$ model.}
+    \label{fig:single-model-comparisons}
+\end{figure}
+
+\subsection{Classifier-Free Guidance's Effect on Sampling Entropy}
+\label{sct:explanation:entropy}
+
+We suspect that CFG, by focusing $\Prob(y|x)$ on the prompt, will reduce the entropy of the logit distribution. CFG entropy distribution is significantly lower across generation time-steps  vanilla prompting, with a mean of 4.7 vs. 5.4. (See Figure \ref{fig:entropy}).
+The effect this has is to restrict the number of tokens in the top-p=90\% of the vocabulary distribution (See in Figure \ref{fig:topp}). We do observe qualitatively, shown in Section \ref{sct:explanation:visualizing}, that the top tokens to not shift too much, but they do re-order to some extent, which shows that CFG is not simply having the same effect as the temperature parameter.
+
+\subsection{CFG's Relation to Instruction Tuning}
+\label{sct:explanation:instruction}
+
+Our next question: \textit{how} is Classifier-Free Guidance affecting the vocabulary distribution? We attempt to answer this question quantitatively, hypothesizing that CFG has similar effects to instruction-tuning, which we assume trains a model to focus on the prompt.  We find that both CFG and Instruction-Tuned model variants have similar entropies across generation samples. However, as shown in Figure \ref{fig:topp} the vocabulary distributions across our samples are largely not overlapping. 
+
+\begin{figure}
+\centering
+\subfloat[Correlation between the perplexities of each model on P3.]{
+\begin{tabular}{llll}
+\toprule
+{} & PPL $p(y|x)$ & PPL cfg & PPL instruct \\
+\midrule
+PPL $p(y|x)$ &  \cellcolor{blue!100} \textcolor{white}{1.0} &  \cellcolor{blue!87} \textcolor{white}{0.94} &  \cellcolor{blue!65} \textcolor{white}{0.83} \\
+PPL cfg &  \cellcolor{blue!87} \textcolor{white}{0.94} &  \cellcolor{blue!100} \textcolor{white}{1.0} &   \cellcolor{blue!39} \textcolor{white}{0.7} \\
+PPL instruct  &  \cellcolor{blue!65} \textcolor{white}{0.83} &   \cellcolor{blue!39} \textcolor{white}{0.7} &  \cellcolor{blue!100} \textcolor{white}{1.0} \\
+\bottomrule
+\end{tabular}
+}\hspace{2em}
+\subfloat[Correlation between the perplexity and similarity between Instruction-Tuned and CFG.]{
+\begin{tabular}{lll}
+\toprule
+{} &        $r_s$ (sim) &     $p$-val. \\
+\midrule
+PPL $p(y|x)$          &   \cellcolor{blue!10}0.01 &   0.2 \\
+PPL cfg               &  \cellcolor{red!40}-0.04 &  <.001 \\
+PPL instruct  &   \cellcolor{blue!40}0.04 &  <.001 \\
+\bottomrule
+\end{tabular}
+}
+\caption{We seek to identify \textit{when} CFG is similar to instruction-tuning. Models mostly agree on the difficulty of input sentences, and in cases where they do not, CFG and Instruction-tuning have similar top-p overlaps.}
+\label{tbl:ppls_of_diff_models}
+\end{figure}
+
+We find that, overall, our hypothesis about the similarity is wrong: CFG is not having a similar effect on the vocabulary logits as instruction-tuning. To explore, we seek to derive insight from edge-cases where it does. We look for characteristics to explain when CFG \textit{is} similar to Instruction-Tuning (in terms of top-p overlap). One case pops out: when the prompt is longer, CFG agrees more -- we observe a significant spearman correlation of $r_s=.05$ between prompt-length and Instruction/CFG agreement. We also observe small but significant correlations between perplexity and agreement. As shown in Table \ref{tbl:ppls_of_diff_models}, harder phrases for Instruction-Tuned models are typically where CFG and Instruction-Tuned models align. We conclude that CFG is altering the model in ways that might complement instruction-tuning, opening the door to future explorations.
+
+\subsection{Visualizing Classifier-Free Guidance}
+\label{sct:explanation:visualizing}
+
+Finally, we provide qualitative insights into the reordering of the vocabulary, after Classifier-Free Guidance is applied. We note that the Equation can be rewritten as 
+
+\begin{equation}
+    \log \Prob_\gamma(w_t|w_{<t},c) = \log \Prob(w_t| w_{<t},\overline{c}) + \gamma (\log \Prob(w_t| w_{<t},c) - \log \Prob(w_T|w_{<t},\overline{c})
+\label{eq:cfg-2}
+\end{equation}
+
+We propose, at each timestep, to visualize the vocabulary ranked by the difference $\log \Prob(w_t| w_{<t}) - \log \Prob(w_T| \hat{w})$. This shows the impact of the method, qualitatively, by revealing the tokens that are encouraged or discouraged the most. In Figure \ref{fig:viz}, we prompt a model with $c=$``The dragon flew over Paris, France'',$\overline{c}=\emptyset$ and observe that tokens about dragons and Paris get upweighted while tokens about other locations (``Queensland''), dates (``1913''), or topics (``hostages'', ```voyages'') get downweighted. This confirms our initial assumptions, as we observe CFG encouraging tokens related to and discourages tokens unrelated to the prompt.
+
+\begin{table}
+  \centering
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{llllllllllll}
+    \toprule
+    \textbf{current} & top1 & top2 & top3 & top4 & top5 & ... & bottom5 & bottom4 & bottom3 & bottom2 & bottom1 \\
+    \midrule
+    \textbf{\ France} & \ flipping & \textcolor{red}{\ destroying} & \ waking & \ stopping & \ causing & ... & \ guiName & ufact & \ Outs & kees & "\}]," \\
+    \textbf{,} & \ \textcolor{red}{crashing} & \ \textcolor{red}{landing} & \ \textcolor{red}{soaring} & \ swoop & \ plummet & ... & soDeliveryDate & \ POLIT & \ Occupations & 568 & \textcolor{blue}{\ publishes} \\
+    \textbf{\ landing} & \ neigh & \ invis & \ atop & \ overhead & \ \textcolor{red}{omin} & ... & \textcolor{blue}{\ quotas} & \textcolor{blue}{\ Russo} & \textcolor{blue}{\ Germans} & \textcolor{blue}{\ passports} & \textcolor{blue}{\ hostages} \\
+    \textbf{\ on} & \ Buildings & \ skysc & \ rooft & \ Cheong & \ Plaza & ... & \ \begin{CJK}{UTF8}{gbsn}裏\end{CJK} & \ MFT & \begin{CJK}{UTF8}{gbsn}ゼ\end{CJK} & \ \begin{CJK}{UTF8}{gbsn}裏覚醒\end{CJK} & DragonMagazine \\
+    \textbf{\ Notre} & \textcolor{OliveGreen}{\ Basil} & \ Mos & \textcolor{OliveGreen}{\ Cathedral} & \textcolor{OliveGreen}{\ Mosque} & \ Eugene & ... & \textcolor{blue}{\ voyage} & alach & urse & arb & sb \\
+    \textbf{\ Dame} & \textcolor{OliveGreen}{\ Cathedral} & \ monument & \textcolor{OliveGreen}{\ cathedral} & \textcolor{OliveGreen}{\ Basil} & \ Mosque & ... & \textcolor{blue}{\ voyage} & aila & voy & aund & wk \\
+    \textbf{\ Cathedral} & .," & ."[ & \ slowing & \ blocking & ortex & ... & \textcolor{blue}{\ ashore} & \ seaf & aund & \ Tact & \ Wanted \\
+    \textbf{.} & \ \textcolor{red}{Dragon} & \textcolor{red}{\ dragons} & \ \textcolor{red}{dragon} & \textcolor{red}{Dragon} & \ \textcolor{red}{Dragons} & ... & \textcolor{blue}{\ 1915} & \textcolor{blue}{\ 1914} & \textcolor{blue}{\ 1944} & \textcolor{blue}{\ 1934} & \textcolor{blue}{\ 1913} \\
+    \textbf{\ It} & \ swoop & \textcolor{red}{\ circled} & \ dart & \ hopped & \ bolted & ... & \ concludes & reads & \ reads & \ culmin & \ marks \\
+    \textbf{\ circled} & \textcolor{red}{\ skysc} & \ pedestrians & \ architectural & \ hanging & \ skyline & ... & \textcolor{blue}{\ Newfoundland} & \textcolor{blue}{\ Ukrain} & \textcolor{blue}{\ Zamb} & \textcolor{blue}{\ Johnston} & \textcolor{blue}{\ Queensland} \\
+    \textbf{\ Paris} & night & amura & rum & anim & animate & ... & \ prematurely & \ capit & \textcolor{blue}{\ bombed} & \ Mé & \ owing \\
+    \textbf{\ a} & \ longer & \ while & \ long & \ awhile & \ length & ... & ims & chin & chel & ille & ller \\
+    \textbf{\ bit} & \ longer & MORE & \ awhile & again & \ more & ... & \ prematurely & hof & nw & \ arri & trop \\
+    \textbf{,} & \ startled & \textcolor{red}{\ feathers} & \textcolor{red}{\ dragon} & \textcolor{red}{\ wings} & \textcolor{red}{\ dragons} & ... & \ inval & \ \textcolor{blue}{Junction} & \ \textcolor{blue}{Palest} & endas & CVE \\
+    \textbf{\ and} & \textcolor{red}{\ dragon} & \textcolor{red}{\ dragons} & \ golden & \textcolor{red}{\ Winged} & \ perched & ... & CVE & \ inval & \ \textcolor{blue}{Ukrain} & onet & \ \textcolor{blue}{Commodore} \\
+    \textbf{\ then} & \textcolor{red}{\ dragon} & \ DRAG & \ \textcolor{red}{dragons} & \ neigh & \ \textcolor{red}{DRAGON} & ... & CVE & onet & \ Kear & TPS & Tags \\
+    \textbf{\ flew} & ukong & \ skelet & rum & \ swoop & acles & ... & RG & thouse & NJ & \ 444 & \ programmes \\
+    \textbf{\ over} & rium & \textcolor{blue}{\ Rockefeller} & \textcolor{blue}{\ Plaza} & \textcolor{blue}{\ Times} & \textcolor{blue}{\ Symphony} & ... & \ \textcolor{blue}{Brittany} & \ \textcolor{blue}{Newfoundland} & \textcolor{blue}{Balt} & \textcolor{blue}{isconsin} & \ \textcolor{blue}{Yugoslavia} \\
+    \textbf{\ the} & \ Griffith & \ Zeus & \ Hag & \ Science & \ Raphael & ... & shire & \ \textcolor{blue}{Midlands} & \ \textcolor{blue}{frontier} & \ \textcolor{blue}{deserts} & \ Balkans \\
+    \textbf{\ E} & BI & \ Rowe & \ ident & \ Methodist & allah & ... & \ \textcolor{blue}{coasts} & ento & bys & seys & \ Desire \\
+    \textbf{iff} & \ Armory & \ Library & \ restrooms & \ Mansion & \ Mahmoud & ... & \ indo & onne & Off & itime & Norm \\
+    \textbf{el} & \textcolor{OliveGreen}{\ restaurant} & \ Middle & \textcolor{OliveGreen}{\ restroom} & \textcolor{OliveGreen}{\ boutique} & \textcolor{OliveGreen}{\ museum} & ... & iband & \ \textcolor{blue}{throats} & \ centres & \ detach & rift \\
+    \textbf{\ Tower} & \ Property & omin & \ Foundation & \ Creature & >" & ... & gee & \ thence & pheus & \ hither & \ favourable \\
+    \textbf{.} & \textcolor{red}{\ dragons} & \textcolor{red}{\ dragon} & \textcolor{red}{\ Dragons} & \textcolor{red}{\ Dragon} & \textcolor{red}{\ DRAGON} & ... & \ \textcolor{blue}{1944} & \ \textcolor{blue}{1942} & \ Instrument & \textcolor{blue}{Balt} & \ \textcolor{blue}{1943} \\
+    \textbf{\ Then} & \textcolor{red}{\ dragons} & \textcolor{red}{\ dragon} & \textcolor{red}{dragon} & \textcolor{red}{\ Dragons} & \textcolor{red}{Dragon} & ... & \ Manz & \ \textcolor{blue}{Hopkins} & CVE & \ \textcolor{blue}{Instrument} & \ \textcolor{blue}{Squadron} \\
+    \textbf{\ it} & \textcolor{red}{\ dragon} & \textcolor{red}{\ dragons} & \ neigh & \ \textcolor{red}{Winged} & \ Draco & ... & CVE & udder & services & \ corrections & obbies \\
+    \textbf{\ flew} & \ upro & ukong & rum & \ walked & \ …" & ... & INC & inary & lein & \ auxiliary & CVE \\
+    \textbf{\ over} & \textcolor{blue}{\ Chinatown} & \textcolor{blue}{\ Financial} & Spider & \ tallest & \textcolor{blue}{Financial} & ... & \ warr &  & quickShip & \ \textcolor{blue}{Newfoundland} & \\
+    \bottomrule\\
+    \end{tabular}
+    }
+    \caption{Given the prompt \textbf{The dragon flew over Paris, France} we display, at each sampling step, the vocabulary ranked for $\Prob(w_t| w_{<t}) - \log \Prob(w_T| \hat{w})$ for the next step. We can see CFG encouraging tokens about \textcolor{red}{flying dragons} and \textcolor{OliveGreen}{Paris}, and discouraging other \textcolor{blue}{topics or regions}}
+\label{fig:viz}
+\end{table}
+
+We find this visualization approach to be a useful prompt engineering tool, by using the new prompt under testing as $c$ and setting $\overline{c}$ as the current baseline prompt. The visualization shows the differential impact over the whole vocabulary on the next token prediction, in an interpretable way.
+
+
+
+\section{Conclusion}
+
+
+We have shown that Classifier-Free Guidance, which was originally conceived of in text-to-image applications, can be an effective way of increasing adherence to the prompt in autoregressive language modeling. In contrast to text-to-vision, CFG in autoregressive language modeling works out-of-the-box, without the need to further train the model. We have shown that CFG can boost performance across an array of canonical benchmarks in NLP that involve variations of the prompt: \textit{basic prompting}, \textit{chain-of-thought prompting}, \textit{text-to-text prompting} and \textit{chatbot prompting}. Finally, we sought to explain the effects of CFG by showing it decreased sampling entropy, but not in the same ways that Instruction-tuned models do. Ultimately, we leave for future work the exact effects that CFG is having, but we propose qualitative visualizations that confirm our intuitions around prompt adherence.
+
+Our work also integrates into a growing body of inference techniques aimed at perturbing the logit distributions of an LM \cite{li2022contrastive, shi2023trusting}. We demonstrate that by doubling the inference FLOP using CFG brings performances of a model about twice the size. This allows training smaller models, which can be ran on smaller hardware, and are cheaper to train.
+
+Our work faces the following limitations: CFG requires tweaking and exploration: $\gamma$ values that might work in one context (i.e. long-form generation) might be poorly suited for another context. It's also possible that CFG might be misused. We have not tested the effects of CFG if used in conjunction with malicious strategies for hacking language models, including but not limited to: prompt injection and prompts aimed at overriding alignment. It's possible that there are unforeseen effects induced by an increased adherence to parts of the prompt. We tried to explore this at length, both quantitatively and qualitatively, and we designed tasks that might reveal such behavior. However, we cannot conclude this method is risk-free. We advocate for standardized benchmarks aimed more squarely at language-model risk (including, possibly, pairs of models along with known prompt injections). Such standardized benchmarks could help us unit-test an advancement like CFG before releasing it into the wild. 
+
+\subsection*{Acknowledgements}
+
+We are grateful to Stability and CoreWeave for providing the compute to run the evaluations.
+
+We also thank the volunteers who took part in the GPT4All experiment.
+
+Alexander Spangher would like to thank Bloomberg News for a 4 year PhD fellowship that generously funds his research.
+
+
+
+
+

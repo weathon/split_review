@@ -1,0 +1,358 @@
+\title{DePT: Decomposed Prompt Tuning for Parameter-Efficient Fine-tuning}
+
+\begin{abstract}
+Prompt tuning (\pt), where a small amount of trainable soft (continuous) prompt vectors is affixed to the model input, has shown promising results across various tasks and model architecture for parameter-efficient fine-tuning (\peft).
+\pt stands out from other \peft approaches because it maintains competitive performance with fewer trainable parameters and does not drastically scale up its parameters as the model size expands. 
+However, \pt introduces extra soft prompt tokens, leading to longer input sequences, which significantly impacts training/inference time and memory usage due to the Transformer's quadratic complexity. 
+Particularly concerning for Large Language Models (LLMs) that face heavy daily querying. 
+To address this issue, we propose \textbf{De}composed \textbf{P}rompt \textbf{T}uning (\ours), which decomposes the soft prompt into a shorter soft prompt and a pair of low-rank matrices that are then optimised with two different learning rates. 
+This allows \ours to achieve better performance while saving substantial memory and time costs compared to vanilla \pt and its variants, without changing trainable parameter sizes.
+Through extensive experiments on 23 natural language processing (\nlp) and vision-language (VL) tasks, we demonstrate that \ours outperforms state-of-the-art \peft approaches, including the full fine-tuning baseline, in some scenarios.
+Additionally, we empirically show that \ours grows more efficient as the model size increases.
+Our further study reveals that \ours integrates seamlessly with parameter-efficient transfer learning in the few-shot learning setting and highlights its adaptability to various model architectures and sizes. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+\begin{wrapfigure}{r}{0.6\textwidth}
+\includegraphics[width=0.6\textwidth]{figure/pt.pdf}
+\caption{
+The overview of Fine Tuning (\ft), Prompt Tuning (\pt), and Prompting Engineering.
+\pt increases the length of the input sequence, leading to much greater computational demands during train and inference phrases.
+}
+\label{fig:overview}
+\end{wrapfigure}
+
+Fine-tuning (\ft) language models (LMs) \citep{t5,touvron2023llama} on downstream tasks offers large performance improvements across various natural language processing (\nlp) tasks, but it requires updating and storing full parameters of the LMs  (see Figure \ref{fig:overview}a), which is especially expensive when LMs contain hundreds of millions or even billions of parameters. 
+Prompt engineering \citep{10.5555/3495724.3495883} does not update any parameters while it is typically hard to design and has a high-performance variance \citep{wang2023selfconsistency} (see Figure \ref{fig:overview}c).
+Consequently, parameter-efficient fine-tuning (\peft) approaches \citep{NEURIPS2022_0cde695b} have attracted growing interest, aiming to learn only a small number of parameters per task while maintaining performance levels comparable to full fine-tuning.
+
+Prompt Tuning (\pt) \citep{lester-etal-2021-power} has emerged as a promising \peft approach, which appends trainable continuous prompt vectors to the input (see Figure \ref{fig:overview}b).
+\pt stands out from other \peft approaches as it maintains competitive performance with fewer trainable parameters and does not drastically scale up its trainable parameters as the model size expands.
+Recent works suggest that the majority of the LM's knowledge is acquired during its pretraining phase \citep{zhou2023lima}, and that in-context learning (ICL) with just a few carefully designed stylistic examples and a carefully designed system prompt can achieve impressive alignment results \citep{lin2023unlocking}. 
+Considering scenarios where tasks have already been somewhat understood by LMs and the key challenge is just to properly prompt the LMs, PT emerges as a potentially better option to other \peft approaches.
+
+While \pt has shown promising results across various tasks and models, it has two major limitations: 
+(1)  \pt often suffers from slow convergence and is sensitive to the initialization \citep{lester-etal-2021-power,vu-etal-2022-spot,wang2023multitask}; and
+(2) \pt extends the total length of the input sequence, consequently exacerbating the computation demand (\ie train/inference time and memory cost), due to the quadratic complexity of the Transformer \citep{NIPS2017_3f5ee243}. This is further accentuated given the slow convergence issue.
+Recent studies \citep{su-etal-2022-transferability,vu-etal-2022-spot,li-etal-2022-learning-transfer} have proposed the variants of the vanilla \pt to tackle the first issue by initially pre-training soft prompts on a variety of source tasks, which is known as \textit{Parameter-Efficient Transfer Learning} (\petl), as depicted in Figure \ref{fig:preview}a. 
+Some studies \citep{,asai-etal-2022-attempt,wang2023multitask} also improve the performance of the \pt by jointly training learned prompts from these source tasks on multiple target tasks (referred to as \textit{Multi-task Learning}).
+However, the issue of increased computational load due to the extension of sequence length remains largely unaddressed.
+While \petl approaches can reduce the training steps for model convergence, each optimization step remains computationally expensive in terms of time and memory. 
+Most importantly, it does not enhance the efficiency during the inference phase, which is particularly crucial in the era of Large Language Models (LLMs), considering that the trained models may be queried millions of times per day.
+
+\begin{wrapfigure}{r}{0.6\textwidth}
+\includegraphics[width=0.56\textwidth]{figure/ours.pdf}
+\caption{
+The overview of the \petl framework ({\em\textbf{Top}}) and our method \ours ({\em\textbf{Bottom}}).
+\ours decomposes a trainable soft prompt of the vanilla \pt into a shorter soft prompt and a couple of low-rank matrices, where the multiplication of low-rank matrices serves to update frozen word embedding.
+}
+\label{fig:preview}
+\end{wrapfigure}
+
+In this work, we propose \textbf{De}composed \textbf{P}rompt \textbf{T}uning (\ours), which decomposes a trainable soft prompt into a shorter soft prompt and a couple of low-rank matrices, where the multiplication of low-rank matrices is then added element-wise to frozen word embeddings, as shown in Figure \ref{fig:preview}b (\sect{sec:ours}). 
+This shorter soft prompt and the updated word embedding matrix are then optimised using two different learning rates - a crucial step for model convergence (\sect{para:two_speed_lr}). 
+The intuition of this design is to enable representation updates within the frozen word embedding, thereby increasing the adaptability of input representations that were previously unavailable.
+Experimental results on 23 natural language processing (\nlp) and vision-language (VL) tasks demonstrate \ours outperforms the state-of-the-art \peft approaches, including the full fine-tuning baseline in certain scenarios (\sect{sec:main_results}). 
+Our study empirically shows that \ours largely improves the training efficiency across various model architectures and sizes, saving more than 20\% (using \tfbase) in both training time and memory costs compared to the vanilla \pt.
+Importantly, \ours becomes increasingly efficient as the model size grows, making it particularly advantageous and suitable for LLMs (\sect{sec:training_efficiency}).
+Furthermore, our additional analysis in the few-shot learning setting reveals the \ours's compatibility with \petl approaches  (\sect{sec:few_shot}).
+
+In summary, the main contributions of this paper are as follows:
+\begin{itemize}
+    \item We propose \ours method, which addresses a key efficiency limitation of Prompt Tuning by decomposing its soft prompt to reduce input sequence length. \ours largely improves the training and inference efficiency, in terms of both time and memory costs;
+    \item Our comprehensive evaluation on 23 \nlp and VL tasks demonstrates that \ours outperforms state-of-the-art \peft approaches, including the full fine-tuning in some scenarios. Additionally, our experiments show that \ours smoothly integrates with \petl approaches and the advantage of \ours persists in the few-shot learning setting;
+    \item We empirically show that \ours becomes increasingly efficient as the model size grows, making it particularly well-suited for LLMs. Furthermore, \ours is orthogonal to various \peft approaches (\ie Adapter, LoRA) and can be easily combined together.
+\end{itemize}
+
+
+
+\section{Method}
+
+In this section, we first revisit background of Prompt Tuning (\pt) in \sect{sec:background} and then introduce our proposed method, \textbf{De}composed \textbf{P}rompt \textbf{T}uning (\ours) in \sect{sec:ours}.
+
+\subsection{Background: Prompt Tuning (\pt)}
+\label{sec:background}
+Let $L \triangleq \{\bm{x}_i, \bm{y}_i\}_{i=1}^{N}$ denote $N$ labelled training data for the target task $\mathcal{T}$.
+Given a backbone model parameterised by $\Theta$, each input text $\bm{x}_i$ is mapped into a sequence of word embeddings $\mW_i \in \mathbb{R}^{s \times d}$, where $s$ and $d$ represent the maximum sequence length and the dimension of word embeddings.
+\pt appends a trainable prompt matrix $\mP\in \mathbb{R}^{l \times d}$ to the frozen word embedding matrix $\mW_i$, where $l$ is a hyper-parameter for the number of virtual tokens.
+The soft prompt $\mP$ can be initialised either randomly or by sampling word embeddings from the vocabulary.
+Consequently, the model's input becomes the combined matrix $[\mP ; \mW_i] \in \mathbb{R}^{(l + s) \times d}$.
+The targeted loss function is formulated as:
+\begin{align}
+    \label{eq:pt_loss}
+    \mathcal{L}_{\text{\pt}}= -\sum_i \log P(\bm{y}_i \, | \, [\mP, \mW_i] \,; \Theta),
+\end{align}
+where the loss function is only optimised with respect to the soft prompt matrix $\mP$.
+
+\subsection{Our Approach: Decomposed Prompt Tuning (\ours)}
+\label{sec:ours}
+
+\paragraph{The decomposition of the soft prompt.}
+\ours differs from the vanilla \pt method in the aspect of inputs.
+As shown in Figure \ref{fig:preview}b, we decompose a trainable prompt matrix $\mP\in \mathbb{R}^{l \times d}$ from the vanilla \pt into two components:
+(1) a shorter trainable prompt matrix $\mP{_s} \in \mathbb{R}^{m \times d}$; and
+(2) a pair of low-rank matrices, $\mA \in \mathbb{R}^{s \times r}$ and $\mB \in \mathbb{R}^{r \times d}$, where typically the rank of the matrices $r \ll \min(s, d)$.
+The first component, the smaller trainable prompt matrix, is appended to the word embedding matrix in a similar manner as in the vanilla \pt.
+The second component uses the multiplication of two low-rank matrices to represent the update of the word embedding through a coordinate-wise sum:
+\begin{equation}
+\mW_i^{'} = \mW_i + \Delta \mW_i = \mW_i + \mB\mA \in \mathbb{R}^{s \times d},
+\label{eq:low_rank_mul}
+\end{equation}
+where $\mW_i$ is frozen and does not receive gradient updates during the training, whereas $\mA$ and $\mB$ are trainable.
+Following \cite{hu2021lora}, we use a random Gaussian initialization for $A$ and zero for $B$, so $\Delta W=BA$ is zero when the training starts.
+The loss function is then optimised as follows:
+\begin{align}
+    \label{eq:dept_loss}
+    \mathcal{L}_{\text{\ours}}= -\sum_i \log P(\bm{y}_i \, | \, [\mP{_s}, \mW_i^{'}] \,; \Theta)
+\end{align}
+In our experiment, we choose the values of $m$ and $r$ to satisfy the equation $l \times d = m \times d + (s + d) \times r$ for maintaining the exact size of trainable parameters as in the vanilla \pt. 
+Consequently, $m$ is always less than $l$ when $r > 0$. 
+This design improves memory efficiency and reduces computational expense compared to the vanilla \pt, as the shorter input sequence length (\ie $m + s < l + s$) substantially reduces computation due to the quadratic complexity of the Transformer \citep{NIPS2017_3f5ee243}. 
+
+\paragraph{Two rates of learning.}
+\ours also differs from the vanilla \pt in training.
+We train the shorter trainable prompt matrix, $\mP{_s}$, with the learning rate $\alpha_{1}$ and the pair of low-rank matrices, $\mA$ and $\mB$, with the learning rate $\alpha_{2}$, rather than use a single learning rate as in the vanilla \pt. The $\alpha_{1}$ is typically much larger than the $\alpha_{2}$. We will empirically validate the importance of this choice in \sect{para:two_speed_lr}.
+However, \ours may introduces extra training costs for the hyperparameter optimization (see \sect{para:limitations}).
+
+
+\section{Experiments and Results}
+
+In this section, we introduce our experimental setup (see \sect{sec:setup}), evaluate the performance of \ours across 23 different \nlp and VL tasks (see \sect{sec:main_results}), and assess relative train/inference time and memory cost of \ours (see \sect{sec:training_efficiency}), and explore the effectiveness of \ours in the few-shot learning setting and importance of two different learning rates for training \ours (see \sect{sec:analysis}).
+\subsection{Experimental Setup}
+\label{sec:setup}
+
+\textbf{Datasets and tasks.} We evaluate our proposed method \ours on 21 \nlp tasks and 2 vision-language tasks.
+For \nlp tasks, we follow the previous works \citep{vu-etal-2022-spot,sunglst,asai-etal-2022-attempt,wang2023multitask} and use various datasets sourced from:
+(1) GLUE \citep{wang-etal-2018-glue} benchmark, including MNLI \citep{williams-etal-2018-broad}, QQP\footnote{\url{https://www.quora
+(2) SuperGLUE benchmark \citep{wang2019superglue}, including MultiRC \citep{khashabi-etal-2018-looking}, BoolQ \citep{clark-etal-2019-boolq}, WiC \citep{pilehvar-camacho-collados-2019-wic}, WSC \citep{levesque2012winograd_wnli}, and CB \citep{de2019commitmentbank}; 
+(3) MRQA 2019 Shared Task \citep{fisch-etal-2019-mrqa}, including Natural Questions \citep{kwiatkowski-etal-2019-natural}, HotpotQA \citep{yang-etal-2018-hotpotqa}, SearchQA \citep{dunn2017searchqa} and NewsQA \citep{trischler-etal-2017-newsqa};
+(4) other datasets, including WinoGrande \citep{10.1145/3474381}, Yelp-2 \citep{10.5555/2969239.2969312}, SciTail \citep{Khot_Sabharwal_Clark_2018} and PAWS-Wiki \citep{zhang-etal-2019-paws}.
+For vision-language tasks, we follow prior works \citep{sung2022vl,sunglst} to experiment with the visual question-answering task, VQA \citep{goyal2017making}, and the image caption generation task, MSCOCO \citep{chen2015microsoft}.
+
+\textbf{Baselines.} We compare \ours with a variety of baselines: 
+(1) fine-tuning (FT), where all the model parameters are tuned during adaptation on each downstream task;
+(2) the vanilla \pt \citep{lester-etal-2021-power}, where target prompt vectors are initialized by randomly sampled top vocabularies, and its variants using additional transfer and multi-task learning, including SPoT \citep{vu-etal-2022-spot}, ATTEMPT \citep{asai-etal-2022-attempt}, and MPT \citep{wang2023multitask};
+(3) state-of-the-art \peft approaches including 
+Adapters \citep{houlsby2019parameter}, 
+AdapterDrop \citep{ruckle-etal-2021-adapterdrop},
+BitFit \citep{zaken2021bitfit}, 
+HyperFomer \citep{mahabadi2021parameter}, 
+HyperDecoder \citep{ivison-peters-2022-hyperdecoders},
+P-tuning \citep{liu2021gpt},
+LoRA \citep{hu2021lora}, 
+LST \citep{sunglst}, 
+and their multi-task learning variants.
+For a fair comparison, we directly quote performance metrics from published papers \citep{karimi2021compacter,mahabadi2021parameter,asai-etal-2022-attempt,wang2023multitask,sunglst} for a fair comparison, where all these baselines using the \tfbase as the backbone and adhere to the train, validation and test splits used by \citet{mahabadi2021parameter,karimi2021compacter} for \nlp tasks and by \cite{sunglst} for vision-language tasks.
+
+\textbf{Implementation details.}
+In our study, we mainly experiment using the \tfbase model with $220$M parameters \citep{t5}.
+We consistently set the number of virtual tokens $l$ as 100 across all tasks for the vanilla \pt and adjust the hyper-parameters of \ours accordingly to maintain the equivalent number of trainable parameters.
+For instance, the vanilla \pt contains $l \times d$ trainable parameters where the hidden size $d$ is 768 for the \tfbase, and \ours can configure the number of virtual tokens $m$ as 40 and the rank of low matrices $r$ as 45, resulting in $m \times d + (s + d) \times r$ trainable parameters. This yields a total of $76,800$ trainable parameters, aligning with the vanilla \pt.
+For VL tasks, we utilise the CLIP-T5 architecture which combines CLIP \citep{radford2021learning} and \tfbase \citep{t5}, with the CLIP frozen. 
+We follow the prior work \citep{sunglst} to concatenate the visual representation from CLIP with the text embedding from the \tfbase, where a trainable visual projection layer is used between CLIP and T5 to align the visual representation to the same dimension as the text embedding.
+
+We also extend our evaluation to include
+\tfsmall ($60$M), \tflarge ($770$M),
+\gptsmall ($110$M), \gptmedium ($345$M), and \gptlarge ($774$M) 
+models.
+In the few-shot experiments, we randomly select $k$ examples three times from the training set and report the mean and standard deviations for each $k$-shot experiment. 
+Following the prior works in \petl for \pt \citep{vu-etal-2022-spot,su-etal-2022-transferability,asai-etal-2022-attempt}, we use 
+MNLI,
+QQP,
+SST-2,
+SQUAD \citep{rajpurkar-etal-2016-squad}, and
+ReCoRD \citep{zhang2018record}
+as five source tasks. 
+Our soft prompt and low-rank matrix pairs are initialized from the soft prompts derived from one of these selected source tasks.
+\input{table/glue_and_superglue_table}
+
+\subsection{Main Results}
+\label{sec:main_results}
+This section shows the empirical evidence supporting the effectiveness of our proposed method \ours across 23 \nlp and VL tasks. 
+Table \ref{table:main_results_glue}, \ref{table:mrqa}, and \ref{table:vlt} present our experimental results on GLUE and SuperGLUE benchmarks, MRQA 2019 Shared Task and four other \nlp datasets, as well as two VL tasks. 
+Experimental results reveal three key findings: 
+(1) \ours consistently outperforms the vanilla \pt and its \petl variants;
+(2) \ours achieves competitive or even better performance than state-of-the-art \peft approaches while using fewer trainable parameters; and
+(3) \ours falls short in some certain tasks.
+Below we delve deeper with respect to various tasks.
+
+\paragraph{\#1. Performance on GLUE and SuperGLUE benchmarks.}
+As shown in Table \ref{table:main_results_glue}, our experimental result indicates that \ours outperforms state-of-the-art \peft approaches, such as Adapter, LoRA and LST on the GLUE and SuperGLUE benchmarks, while using fewer trainable parameters.
+Remarkably, \ours also outperforms the full fine-tuning baseline on both benchmarks.
+In addition, \ours outperforms vanilla \pt and all the variants of \pt that introduce additional transfer learning and multi-task learning.
+For example, ATTEMPT, which requires additional training for the soft prompt on the source tasks, achieves an average score of 83.4 on the GLUE benchmark and 70.5 on the SuperGLUE benchmark.
+Meanwhile, \ours outperforms ATTEMPT with scores of 85.9 and 76.5 on GLUE and SuperGLUE, despite training fewer parameters. 
+Similarly, \ours surpasses MPT with 0.1\% on the GLUE benchmark and 0.4\% on the SuperGLUE benchmark, without utilizing additional transfer learning or multi-task learning.
+These results are achieved with less inference time and reduced memory resources (refer to \sect{sec:training_efficiency} for specifics), which validates the effectiveness of \ours.
+As the \pt often underperforms in scenarios with limited labelled data \citep{gu-etal-2022-ppt}, we investigate the compatibility of \ours and \petl later in the few-shot learning setting (\sect{sec:few_shot}).
+
+\input{table/mpqa_table}
+
+\paragraph{\#2. Performance on MRQA 2019 Shared Task and other \nlp datasets.}
+Table \ref{table:mrqa} presents the performance of various \peft approaches, including \ours, on the MRQA 2019 Shared Task and four other datasets.
+We observe that \ours improves the average performance of the vanilla \pt by a substantial margin of +3.6\% on MRQA and +14.2\% on the other datasets. 
+\ours exceeds the performance of the \pt variants that leverage additional transfer and multi-task learning, without introducing extra trainable parameters to the vanilla \pt or relying on any \petl approaches.
+While \ours improves over the vanilla \pt and its variants are promising, there remains a disparity in performance when compared to the full fine-tuning baseline.
+Investigating ways to incorporate \ours with other \peft methods, such as LoRA and Adapter, may provide a valuable direction for future research towards narrowing this performance gap.
+
+\input{table/vlt}
+
+\paragraph{\#3. Performance on Vision-Language tasks.}
+Table \ref{table:vlt} provides an overview of the performance of various \peft approaches on two VL tasks, specifically VQA and MS COCO Caption Generation. 
+Results show that \ours, while updating much fewer parameters, achieves a CIDEr score of 113.7 on the MS COCO Caption Generation task, outperforming state-of-the-art \peft approaches. 
+This suggests the effectiveness of our proposed method.
+However, while \ours outperforms methods such as P-tuning and BitFit on the VQA dataset, it still falls short of the full fine-tuning performance. 
+This suggests that in certain tasks, the use of a greater number of trainable parameters could be beneficial. 
+
+\subsection{Time and Memory Efficiency}
+\label{sec:training_efficiency}
+This section shows the empirical evidence supporting the efficiency of \ours, spanning over diverse model architectures of varying scales on the GLUE benchmark.
+To ensure a fair comparison, we consistently keep the number of trainable parameters in \ours the same as that in the vanilla \pt ($l=100$). 
+As a result, once we choose the length of the soft prompt $m$ in \ours, the rank of the low-rank matrices $r$ becomes determined.
+In our experiments, we primarily compare \ours with the vanilla \pt using 5 different lengths of soft prompt  $m$ (\ie 0, 20, 40, 60, 80).
+Figure \ref{fig:ablation_study_m} and \ref{fig:inference_speed} depict the average GLUE performance of \ours, along with the associated training/inference time and memory cost compared to the vanilla \pt.
+Below we discuss two key findings.
+\paragraph{\# 1. \ours improves time and memory efficiency substantially.}
+Figure \ref{fig:ablation_study_m} presents the mean performance of \ours, associated with average training time and memory, on the GLUE benchmarks, against different lengths of soft prompt $m$. 
+The average training time and memory costs are computed across 8 tasks on the GLUE benchmark and three different model sizes.
+Both the encoder-decoder (T5) and decoder-only (GPT-2) models are evaluated across three different model sizes.
+The study reveals that decomposing the soft prompt ($l=100$) into a small soft prompt and low-rank matrices delivers comparable or even better performance while substantially enhancing the efficiency of training and reducing memory utilization. 
+Specifically, using a soft prompt length greater than 20 in \ours with the T5 model leads to a better average performance on the GLUE benchmark to vanilla \pt, while improving the efficiency of training and reducing memory utilization by approximately 25\%.
+This improvement is more pronounced (37\% on the SST-2 dataset) when we test \ours (with $m=60$) using the T5-3B model (see \sect{para:t5-3b} for details).
+Similar observations are also found when the GPT model is used, suggesting the adaptability of \ours for different model architectures.
+It is worth noting that \ours may have a notable performance drop regardless of using T5 or GPT-2, when the soft prompt is eliminated ($m=0$) and the model solely depends on the pair of low-rank matrices.
+
+\begin{figure*}[t!]
+\centering
+\includegraphics[width=0.85\textwidth]{figure/model_size.pdf}
+\caption{
+Performance on the GLUE benchmark for different soft prompt lengths $m$ in \ours, associated with corresponding relative train time and memory cost.
+The time and memory are averaged over different model sizes using batch size as 16.
+\ours consistently uses the same number of trainable parameters as the vanilla \pt ($m$=100).
+}
+\label{fig:ablation_study_m}
+\end{figure*}
+\definecolor{tableblue}{HTML}{1D5D9B}
+\definecolor{tablebrown}{HTML}{e8c49c}
+
+\begin{figure*}[!t]
+\includegraphics[width=\textwidth]{figure/inference_speed.pdf}
+\caption{
+Average inference speed on GLUE benchmark using varying soft prompt length $m$ and the rank of low-rank matrices $r$, keeping the total number of trainable parameters constant.
+Small texts in {\color{tableblue} blue} indicate the speed relative to the vanilla \pt (represented by {\color{tablebrown} brown}) ($m$=100).
+}
+\label{fig:inference_speed}
+\end{figure*}
+
+\paragraph{\# 2. \ours grows more efficient as the model size increases.}
+Figure \ref{fig:inference_speed} represents the inference speed, measured by the average number of samples evaluated per second on the GLUE benchmark using a single RTX 3090 GPU. 
+The inference time is computed using the Huggingface Trainer Class.
+We observe that the relative improvement in the number of inference samples per second over vanilla \pt grows as the model size increases.
+For example, when using the \tfsmall model, the vanilla \pt evaluates 167.3 samples per second, while \ours ($m=20$) evaluates 178.3 samples per second, resulting in a 6.5\% boost in inference speed.
+In contrast, when the \tflarge is utilized, the vanilla \pt evaluates 21.0 samples per second and \ours ($m=20$) evaluates 24.8 samples per second, resulting in an 18.1\% increase in inference speed, a substantial rise from the previous 6.5\%.
+This indicates that \ours is particularly beneficial and more applicable in the context of LLMs.
+\subsection{Further Analysis}
+\label{sec:analysis}
+\paragraph{Few-shot Learning.}
+\label{sec:few_shot}
+The vanilla \pt often underperforms in the few-shot learning tasks \citep{gu-etal-2022-ppt} due to the first limitation discussed in \sect{sec:intro}.
+To evaluate the performance of \ours in the few-shot setting, we employ the transfer learning method inspired by the recent \petl studies, as illustrated in Figure \ref{fig:preview}a.
+Specifically, we pre-train both the soft prompt and the low-rank pair on source tasks and select the best checkpoint before proceeding with the target task.
+Following prior works \citep{mahabadi2021parameter,asai-etal-2022-attempt,wang2023multitask}, we evaluate the effectiveness of \ours across 14 \nlp tasks, with $k$ training examples where k = 4, 16, 32.
+Our experimental findings reveal two key observations as follows:
+(1) \ours integrates seamlessly with \petl approaches; and
+(2) \ours attains competitive or even better performance than state-of-the-art \peft approaches in the few-shot learning setting.
+
+Table \ref{table:few_Shot} compares the effectiveness of our proposed method \ours with various \peft approaches in few-shot experiments,
+including full fine-tuning (FT), Adapters (AD), vanilla \pt (PT), SPoT (ST), HyperFormer (HF), (IA)$^3$, ATTEMPT (ATP), and MPT on BoolQ, CB, and SciTail datasets.
+Table \ref{table:few_glues} presents the performance of \ours against the vanilla \pt and MPT on the GLUE and SuperGLUE benchmark.
+Experimental results show that vanilla \pt struggles with few-shot tasks, indicating the importance of \petl for the \pt in few-shot learning tasks as suggested in previous works \citep{vu-etal-2022-spot,su-etal-2022-transferability}. 
+Nevertheless, the performance of \ours largely benefits from the \petl framework (see Figure \ref{fig:preview}a). 
+For example, while the vanilla \pt obtains an accuracy of 53.5\% on SuperGLUE CB dataset and 57.7\% on the SciTail dataset when $k$=4, \ours with \petl achieves an accuracy of 75.0\% on SuperGLUE CB dataset and 78.1\% on the SciTail dataset, for the same $k$ value.
+This result supports our first observation about the compatibility of \ours and \petl approaches. 
+Furthermore, \ours with transfer learning achieves comparable performance with the variant of the \pt, MPT across 14 \nlp tasks.
+Notably, \ours surpasses the performance of all other variants of the \pt (\ie SPoT, ATTEMPT) and other \peft approaches, demonstrating our method's efficacy and endorsing our second observation.
+
+\input{table/few_shot}
+\input{table/glue_few_shot}
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+\includegraphics[width=0.4\textwidth]{figure/lr_ablation_study.pdf}
+\caption{
+Test results on GLUE benchmark using \tfbase,
+showing the importance of training \ours with different learning rates.
+}
+\label{fig:lr_ablation_study}
+\end{wrapfigure}
+
+\paragraph{The importance of different learning rates.}
+\label{para:two_speed_lr}
+Figure \ref{fig:lr_ablation_study} presents the experimental results from 3 different learning rate settings to train the soft prompt and the pair of low-rank matrices as follows: 
+(1) use a singular learning rate of 3e-1;
+(2) use a singular learning rate of 5e-4;
+(3) apply mixed learning rates (with grid search), where the soft prompt is trained with a larger rate and the pair of low-rank matrices is trained with a lower rate.
+In our experiments, the first option obtains an average performance of 40.8 on the GLUE benchmark.
+The second option exhibits an average performance of 54.7, while the third option demonstrates a largely improved average performance of 85.7 on the GLUE benchmark.
+This indicates the importance of training \ours with two different learning rates.
+
+
+\section{Related Works}
+
+\paragraph{Parameter-efficient Fine-tuning.} 
+In contrast to standard fine-tuning and prompt-based fine-tuning \citep{devlin2018bert,schick-schutze-2021-exploiting,shi2023don} where full parameters are updated, 
+parameter-efficient fine-tuning (\peft) approaches have demonstrated remarkable performance across a wide range of tasks \citep{wang-etal-2018-glue,shi-etal-2022-learning,pmlr-v202-wu23d,10.1007/978-3-030-99736-6_20,10.1145/3609225,yang2023theory}
+while updating only a limited number of parameters.
+Adapters \citep{houlsby2019parameter}, along with its variants, HyperFormer \citep{mahabadi2021parameter} and Compacter \citep{karimi2021compacter}, add new trainable modules (adapters) to each transformer block of the T5 model \citep{t5}.
+BitFit \citep{zaken2021bitfit} limits updates only to the bias parameters, while this method tends to underperform on larger networks \citep{lialin2023scaling}.
+Prefix-tuning \citep{li-liang-2021-prefix} adds a soft prompt, parameterized by a feed-forward network, to the model input.
+Diff pruning \citep{guo2021diff} learns a sparse update of a neural network’s weights at the cost of more memory usage. 
+FishMask \citep{NEURIPS2021_cb2653f5} also performs sparse updates, but it is computationally intensive and inefficient on contemporary deep learning hardware \citep{lialin2023scaling}.
+LoRA \citep{hu2021lora,yang2023bayesian} employs a straightforward low-rank matrix decomposition to parameterise the weight update. 
+(IA)$^3$ \citep{NEURIPS2022_0cde695b} scales activations by learned vectors for few-shot learning.
+LST \citep{sunglst} operates a small transformer network on the side of the pre-trained network, aiming to decrease the training memory.
+Prompt Tuning (\pt) \citep{lester-etal-2021-power} appends a trainable soft prompt to the model input embeddings. 
+In comparison to the above-mentioned \peft approaches, \pt uses fewer trainable parameters, which do not proliferate as the model size expands.
+\cite{mao-etal-2022-unipelt} introduces a method that combines Prefix-tuning, Adapters, and LoRA through a gating mechanism. 
+\ours is also applicable to this method and can be easily integrated with other \peft approaches.
+\paragraph{Transfer Learning for \pt.}
+Recent works aim to enhance the performance of \pt through \petl.
+PPT \citep{gu-etal-2022-ppt} strives to improve the performance of \pt \citep{lester-etal-2021-power} by further pre-training \citep{gururangan-etal-2020-dont,shi-etal-2023-rethinking}, which necessitates a set of hand-crafted, task-specific designs and considerable computational cost.
+\cite{su-etal-2022-transferability} improves \pt via prompt transfer across different tasks and models.
+SPoT \citep{vu-etal-2022-spot} adopts a single prompt, chosen based on a similarity measure at the cost of a massive search.
+ATTEMPT \citep{asai-etal-2022-attempt} employs an attention mechanism over the source prompts to initialize the prompt for target tasks at the cost of extra parameters.
+MPT \citep{wang2023multitask} applies a shared soft prompt across different tasks, while its effectiveness for a broad range of source tasks remains untested.
+We find that \petl for \pt \citep{asai-etal-2022-attempt,wang2023multitask} can efficiently accelerate training convergence, and that \petl for \pt is more useful for improving the model performance in the few-shot learning setting for PT \citep{gu-etal-2022-ppt,10.1145/3485447.3512036}. 
+However, when extensive labelled datasets are available, training \pt or \ours for additional steps typically leads to performance improvements. 
+
+
+\section{Epilogue}
+
+\paragraph{Conclusion.} 
+In this work, we propose Decomposed Prompt Tuning (\ours), which substantially improves the efficiency of the vanilla \pt in terms of time and memory while delivering competitive or even superior performance compared to the state-of-the-art \peft methods.
+Remarkably, \ours efficiency amplifies with increasing model sizes, making it exceptionally apt for LLMs.
+Our further analysis shows the compatibility of \ours with \petl approaches and highlights its versatility across diverse model architectures and scales.
+
+\paragraph{Limitations and Future Work.}
+\label{para:limitations}
+We outline several limitations in our work:
+(1) the main limitation of \ours is the introduction of extra hyperparameters for tuning, \eg the learning rate of the low-rank matrices. 
+This might introduce some additional computational overhead during the hyperparameter optimization phase of model training. 
+In our work, we train \ours up to 300k steps (in a data-rich setting) following \citep{vu-etal-2022-spot} with a careful search for optimal learning rates, which may increase training costs.
+However, the number of training steps might be efficiently reduced by \petl, which we plan to investigate in future work.
+In addition, it is important to note that the model training process is a one-time event, while model inference is not. In this context, the efficiency benefits of \ours become especially valuable;
+(2) the number of trainable parameters in \ours depends on the maximum sequence length $s$. In this work, we have limited our evaluation to tasks with hundreds of input tokens. Future work could explore the performance of \ours when $s$ is extremely large; and 
+(3) our research focuses on leveraging prompting techniques for LMs, where previous studies \citep{bender-koller-2020-climbing,10.5555/3495724.3495883,10.1145/3442188.3445922} have already addressed concerns and potential hazards linked to LMs. 
+
+
+
+
+
+
+
+

@@ -1,0 +1,314 @@
+\title{ClusterGen: Token Generation in Sublinear Time and Memory with Clustering KV Cache}
+
+\begin{abstract}
+Despite the significant success of large language models (LLMs), their extensive memory requirements pose challenges for deploying them in long-context token generation. The substantial memory footprint of LLM decoders arises from the necessity to store all previous tokens in the attention module, a requirement imposed by key-value (KV) caching. In this work, our focus is on developing an efficient compression technique for the KV cache. Empirical evidence indicates a significant clustering tendency within key embeddings in the attention module. Building on this key insight, we have devised a novel caching method with sublinear complexity, employing online clustering on key tokens and online 
+ sampling on values. The result is a provably accurate and efficient attention decoding algorithm, termed ClusterGen. Not only does this algorithm ensure a sublinear memory footprint and sublinear time complexity, but we also establish a tight error bound for our approach. Empirical evaluations on long-context question-answering tasks demonstrate that ClusterGen significantly outperforms existing and state-of-the-art KV cache compression methods in terms of performance and efficiency.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs) (Achiam et al., 2023; Touvron et al., 2023) play a crucial role in various natural language processing applications, including dialog systems (Taori et al., 2023; Chiang et al., 2023), coding assistance (Chen et al., 2021; Roziere et al., 2023), and image/video generations from text (Radford et al., 2021; Ho et al., 2022). All of these models rely on the transformer architecture, with the attention mechanism serving as the key component.  
+
+To fully harness the capabilities of LLMs, they must demonstrate both efficiency and accuracy in generating long sequences. In practical applications, deploying LLMs to generate tokens in an autoregressive manner involves a sequential decoding process, where attention is dynamically applied to each newly generated token. This process effectively constructs the output sequence in a streaming manner, one token at a time. Therefore, as the sequence grows, the model has to produce contextually relevant and coherent content.  
+
+A common method for autoregressive attention decoding involves the use of key-value (KV) caching, where key and value pairs from all preceding tokens are cached and reused to prevent redundant computations. However, this approach faces memory constraints, particularly when handling long sequences. In particular, the memory requirements and runtime for generating each new token increase linearly with context size, posing a significant challenge for efficient processing of extensive sequences. This linear scaling directly impedes practical applicability in real-world scenarios, such as chat systems, where large contexts are often encountered.  
+
+In this work, we delve into the primary computational and memory bottleneck of token generation. We propose CLUSTERGEN, a novel approach designed to significantly reduce the memory and runtime complexity of token generation, moving from conventional linear growth to sublinear scale. To summarize, our goal is to answer the following question:  
+
+1.1 RELATED WORK  
+
+Recent studies have underscored the need for efficient token generation, particularly with the rise of long-range context datasets. Several recent works have developed efficient strategies for compressing the KV cache. Zhang et al. (2023) proposed a greedy-type eviction algorithm that dynamically keeps at most $k\ll n$ token embeddings based on the accumulated attention scores where they refer to the Heavy Hitter Oracle (H2O). Liu et al. (2023a) empirically observed that tokens with initially high attention scores tend to stay high during the future generation process. Motivated by this observation, the authors proposed a strategy that only keeps the most recent and pivotal tokens whose attention scores are higher than a threshold. Ge et al. (2023) proposed an adaptive method of KV cache compression which identifies the intrinsic structures of attention heads and uses them to determine the optimal compression policy. Xiao et al. (2023) observed that a simple eviction mechanism that keeps only first few and last few tokens does not degrade much the decoding quality. They additionally proposed a fine-tuning method to solve performance degradation from their method. Liu et al. (2023b) developed an algorithm that reduces the generation latency by exploiting contextual sparsity. In addition to algorithmic acceleration, there has also been a line of work optimizing hardware resource configurations (Sheng et al., 2023; Hong et al., 2023). However, to the best of our knowledge, none of these works have achieved an efficient method for KV cache with fully sublinear-time memory space.  
+
+On the lower bound side, achieving subquadratic amortized runtime for producing output embeddings for $n$ tokens in the worst-case instances is likely impossible without making assumptions about the input tokens (Alman & Song, 2023; Sarlos et al., 2023). Therefore, to achieve fast runtime, it is necessary to rely on certain assumptions about the input tokens.  
+
+
+
+\section{1.2 STREAMING ATTENTION PROBLEM  }
+
+
+Deployment of LLMs involves computing attention output in a streaming fashion, where at each phase of token generation a triplet of vectors is given. More precisely, at $i$ -th token generation phase, three vectors $\mathbf{\Delta}q_{i},\mathbf{k}_{i},\mathbf{v}_{i}\;\in\;\mathbb{R}^{d}$ are streamed where they are called by query, key and value, respectively. Suppose that $n$ of tokens have been streamed so far either in prompt encoding or token generation phase. The objective of streaming attention decoding is to compute the following:  
+
+$$
+\mathrm{Attn}(q_{n},K_{n},V_{n})=\mathsf{s o f}\tan\!{\boldsymbol{\kappa}}(K_{n}\cdot q_{n})^{\top}\cdot V_{n},
+$$  
+
+where $\b{K_{n}},\b{V_{n}}\ \in\ \mathbb{R}^{n\times d}$ are matrices defined by stacking the keys and values in their respective rows:  
+
+$$
+\begin{array}{r}{K_{n}:=\left[\!\!\begin{array}{c}{k_{1}^{\top}}\\ {k_{2}^{\top}}\\ {\vdots}\\ {k_{n}^{\top}}\end{array}\!\!\right],\ \ V_{n}:=\left[\!\!\begin{array}{c}{v_{1}^{\top}}\\ {v_{2}^{\top}}\\ {\vdots}\\ {v_{n}^{\top}}\end{array}\!\!\right].}\end{array}
+$$  
+
+The output $\mathrm{Attn}(\pmb q_{n},\pmb K_{n},\pmb V_{n})$ is then used for predicting the next token and its token embedding is applied to a transformer model and introduce a new stream pair $(\pmb{q}_{n+1},\pmb{k}_{n+1},\pmb{v}_{n+1})$ is generated. However, storing these values and keys requires $O(n d)$ memory, posing a significant space complexity challenge for long-context models with large $n$ .  
+
+1.3 OVERVIEW OF CONTRIBUTIONS  
+
+We propose CLUSTERGEN, an efficient method that accurately approximates the attention decoder’s output in Eq. (1) while retaining only a small (sublinear) subset of keys and values in the cache. In particular, CLUSTERGEN computes an estimator $z_{n}$ for $\mathrm{Attn}(\pmb q_{n},\pmb K_{n},\pmb V_{n})$ in sublinear time and memory such that the error is bounded as follows:  
+
+$$
+\begin{array}{r}{\left\|\boldsymbol{z}_{n}-\mathrm{Attn}(\boldsymbol{q}_{n},\boldsymbol{K}_{n},\boldsymbol{V}_{n})\right\|_{2}\leq\varepsilon\left\|\mathrm{sof}\,\mathrm{tmax}(\boldsymbol{K}_{n}\cdot\boldsymbol{q}_{n})\right\|_{2}\left\|\boldsymbol{V}_{n}\right\|_{\mathrm{op}},}\end{array}
+$$  
+
+where $\lVert\cdot\rVert_{\mathrm{op}}$ represents the matrix operator norm. This error bound is in line with the spectral errors studied in previous works (Zandieh et al., 2023; Han et al., 2024).  
+
+We begin by observing that $\mathrm{Attn}(\pmb q_{n},\pmb K_{n},\pmb V_{n})$ in Eq. (1) is the product of the softmax vector softmax $(\dot{K_{n}}\cdot q_{n})$ and value matrix $V_{n}$ . This matrix-vector product can be approximated by subsampling only $O(\dot{\varepsilon}^{-2}d\log n)$ key-value pairs according to the vector and matrix according to the squared norms of value tokens. This can be implemented in a streaming setting using some variants of reservoir sampling.  
+
+The other major computational challenge is computing the partition function in the denominator of the softmax function, i.e., $\textstyle\sum_{i\in[n]}\exp(\langle{\bar{\pmb k}}_{i},\pmb q_{n}\rangle)$ . To solve this, we construct a data structure that can be stored in sublinear memory and efficiently approximate $\textstyle\sum_{i\in[n]}\exp(\langle k_{i},\pmb q_{n}\rangle)$ up to $1\pm\varepsilon$ factor for any query $\textstyle\pmb q_{n}$ . Our method assumes that the key tokens can be covered by a sublinear number of bounded diameter clusters. This assumption is indeed weaker than the one made in Han et al. (2024), which in the decoding setting translates to having key tokens belong to only one cluster with a bounded diameter, while our approach allows for any sublinear number of clusters. So, if the keys are composed of bounded diameter clusters then we only need a small number of uniformly sampled keys from each cluster to approximate the softmax normalizer efficiently and accurately. The central task is to find these clusters in a streaming setting, and we achieve this using an algorithm that is inspired by the streaming $\mathbf{k}$ -center algorithm of Charikar et al. (1997).  
+
+In Theorem 2.4 and Corollary 2.5 we demonstrate that if the keys can be clustered into some sublinear number $m=n^{1-\Omega(1)}$ of clusters with some bounded diameters, then CLUSTERGEN operates with sublinear $O\left({\varepsilon}^{-2}m d\right)=O\left({\varepsilon}^{-2}d n^{1-\Omega\left(1\right)}\right)$ memory and runtime and its output satisfies the approximation guarantee in Eq. (3). In Section 4, we empirically compare CLUSTERGEN to other KV cache compression methods including the attention-score-based algorithm of Zhang et al. (2023) and the deterministic eviction policy from Xiao et al. (2023). Our results confirm that CLUSTERGEN outperforms these methods, particularly in question-answering tasks with various sequence lengths.  
+
+
+
+\section{2 SUBLINEAR TIME AND MEMORY ALGORITHM  }
+
+
+Our goal is to approximate the attention output in Eq. (1) with a space complexity that is sublinear in context length $n$ . To achieve this objective, we aim to design the following data structure (DS) for efficiently approximating the streaming attention mechanism:  
+
+2.1 STREAMING ATTENTION DATA STRUCTURE  
+
+For every positive integer $n$ and every stream of token triplets $(\pmb{q}_{1},\pmb{k}_{1},\pmb{v}_{1}),\dots,(\pmb{q}_{n},\pmb{k}_{n},\pmb{v}_{n})$ where $\mathbf{q}_{i},k_{i},\pmb{v}_{i}\in\mathbb{R}^{d}$ , we aim to construct an efficient DS with the following properties:  
+
+• Upon the arrival of a new triplet $(\pmb{q}_{n+1},\pmb{k}_{n+1},\pmb{v}_{n+1})$ in the stream, the time complexity to update is sublinear in $n$ , i.e., $o(n)$ .  
+
+• Given such data structure, there exists an algorithm that outputs an estimator $z_{n}\in\mathbb{R}^{d}$ in sublinear time $o(n)$ such that:  
+
+$$
+\begin{array}{r}{\left\|\boldsymbol z_{n}-\mathtt{s o f t m a x}(\boldsymbol K_{n}\cdot\boldsymbol q_{n})^{\top}\cdot\boldsymbol V_{n}\right\|_{2}\leq\varepsilon\left\|\mathtt{s o f t m a x}(\boldsymbol K_{n}\cdot\boldsymbol q_{n})\right\|_{2}\left\|\boldsymbol V_{n}\right\|_{\mathrm{op}}.}\end{array}
+$$  
+
+In the rest of this section, our focus is on developing an algorithm to satisfy the above properties. Note that the attention output in Eq. (1), using the definition of softmax, is equivalent to the following expression:  
+
+$$
+\mathrm{Attn}(\pmb{q}_{n},\pmb{K}_{n},\pmb{V}_{n})=\frac{\exp(\pmb{K}_{n}\cdot\pmb{q}_{n})^{\top}\cdot\pmb{V}_{n}}{\sum_{i\in[n]}\exp(\langle\pmb{k}_{i},\pmb{q}_{n}\rangle)}.
+$$  
+
+Thus, to compute the attention output we need to calculate:  
+
+1. The matrix-vector product between $V_{n}$ and $\exp(K_{n}\cdot q_{n})$ .   
+2. The partition function $\textstyle\sum_{i\in[n]}\exp(\langle k_{i},\pmb q_{n}\rangle)$ .  
+
+Thus, our DS needs to efficiently approximate each of these two operations. The matrix-vector product $\exp(K_{n}\cdot q_{n})^{\top}\cdot V_{n}$ can be approximated efficiently using standard sampling-based techniques. Specifically, we make use of the row norm sampling approach (Drineas & Kannan, 2001; Cohen et al., 2016). When multiplying two matrices $\bar{A}\in\mathbf{\bar{R}}^{\bar{m}\bar{\times}n}$ and $\b{B}\in\mathbb{R}^{n\times p}$ , we randomly sample an i.i.d. index $i\in[n]$ with probability proportional to the $\ell_{2}$ norm of the $i$ -th row in $_B$ . Then, we estimate $A\cdot B$ by the average of the product between $i$ -th column in $\pmb{A}$ and $i$ -th row in $_B$ . With this approximation, we need only $O(\dot{\varepsilon}^{-2}d\log n)$ samples to guarantee an $\varepsilon$ multiplicative error in spectral norm for $\exp(K_{n}\cdot q_{n})^{\top}\!\!\cdot V_{n}$ . Luckily, it can be implemented in a streaming setting through a variant of reservoir sampling (Vitter, 1985).  
+
+The more challenging task is the sublinear-time approximation of the partition function $\textstyle\sum_{i\in[n]}\exp(\langle k_{i},\pmb q_{n}\rangle)$ . We construct a DS for computing this under the assumption that the keys in the token stream are organized into $o(n)$ of clusters. To be more precise, we introduce the following notion of clusterability:  
+
+Definition 2.1 (Clusterability). For a positive integer $m$ and a real-valued $\delta\ >\ 0$ , a dataset of points $\mathbf{\Deltax}_{1},\mathbf{\Deltax}_{2},\dots...\mathbf{\Deltax}_{n}\ \in\ \mathbb{R}^{\bar{d}}$ is considered $(m,\delta)$ -clusterable if there exists a size- $^{\cdot m}$ partition ${\mathcal{C}}_{1},{\mathcal{C}}_{2},...{\mathcal{C}}_{m}\subseteq\{\pmb{x}_{i}\}_{i=1}^{n}$ of the dataset satisfying the following conditions:  
+
+• $\begin{array}{r}{\mathcal{C}_{i}\cap\mathcal{C}_{j}=\emptyset\mathrm{~for~every~}i\neq j\mathrm{~and~}\bigcup_{j=1}^{m}\mathcal{C}_{j}=\{x_{i}\}_{i=1}^{n}.}\end{array}$ • for every $j\in[m]$ and every distinct pair $\pmb{\mathscr{y}},\pmb{\mathscr{z}}\in\mathcal{C}_{j}$ , $\|\pmb{\mathscr{y}}-\pmb{\mathscr{z}}\|_{2}\leq\delta$ .  
+
+We demonstrate that under the assumption that the stream of keys $k_{1},k_{2},\ldots.k_{n}$ is $(m,\delta)$ -clusterable as defined in Definition 2.1, with the number of clusters scaling sublinearly in stream length ${\bf\zeta}^{m}={\bf\zeta}$ $o(n))$ , it is possible to construct a DS with sublinear memory space. The procedure for this DS is presented in Algorithm 1 which we refer to as CLUSTERGEN.  
+
+To verify this in the practical settings, we plot key embeddings from open-source LLMs in Section 3.1 and observe that they are indeed well clusterable on their embedding space. This motivates us to utilize an efficient stream clustering algorithm on key embeddings. In the remainder of this section, we provide a detailed explanation for the execution of the algorithm while simultaneously analyzing it through a series of lemmas.  
+
+2.2 MATRIX PRODUCT DATA STRUCTURE  
+
+Here, we focus on the UPDATEMATRIXPRODUCT primitive and establish its correctness by introducing invariants that are maintained throughout the stream processing. This primitive maintains and updates a list of $s$ elements denoted by $\mathcal{M}$ in CLUSTERGEN (Algorithm 1). Initially, this list is filled with null values. After processing the first token tuple $(q_{1},k_{1},v_{1})$ , this list is populated with $s$ copies of the first key and value $(k_{1},v_{1})$ . The procedure UPDATEMATRIXPRODUCT performs a variant of reservoir sampling upon observing any new token in the stream. At any iteration $n$ of the stream, $\mathcal{M}$ is ensured to contain $s$ i.i.d. samples chosen at random from $(\pmb{k}_{1},\pmb{v}_{1}),\dots,(\pmb{k}_{n},\pmb{v}_{n})$ with probabilities proportional to $\|\pmb{k}_{i}\|_{2}^{2}$ . More precisely, the following invariants hold:  
+
+Lemma 2.2 (Correctness of UPDATEMATRIXPRODUCT). For any positive integer s, at any iteration n of the stream in Algorithm $^{l}$ the following properties are maintained:  
+
+$$
+\begin{array}{r}{I.\ \ \mu=\sum_{i\in[n]}\left\|\pmb{v}_{i}\right\|_{2}^{2}.}\end{array}
+$$  
+
+1.  
+
+
+
+\section{2.3 SOFTMAX NORMALIZER (PARTITION FUNCTION) DS  }
+
+
+Here we delve into a detailed discussion of the UPDATESOFTMAXNORMALIZER primitive. This primitive constructs and maintains a DS denoted by $\mathcal{D}$ , enabling accurate approximation of the partition function in the softmax denominator for any query. A crucial requirement for the efficiency of this primitive is that the key tokens must be $(m,\delta)$ -clusterable, as per Definition 2.1. Our algorithm locates and stores a subsampled representation of each cluster in $\mathcal{D}$ in a small memory. Particularly, to achieve sublinear memory complexity, instead of keeping all keys in each cluster which would require $O(n)$ memory space, we maintain only a random subset of $t$ samples from each cluster.  
+
+Initially, $\mathcal{D}$ is an empty set. As new tokens in the stream are processed, new clusters get added to this set. Each cluster is characterized by a representative point, which is the first key assigned to  
+
+216   
+217   
+218   
+219   
+220   
+221   
+222   
+223   
+224   
+225   
+226   
+227   
+228   
+229   
+230   
+231   
+232   
+233   
+234   
+235   
+236   
+237   
+238   
+239   
+240   
+241   
+242   
+243   
+244   
+245   
+246   
+247   
+248   
+249   
+250   
+251   
+252   
+253   
+254   
+255   
+256   
+257   
+258   
+259   
+260   
+261   
+262   
+263   
+264   
+265   
+266   
+267   
+268   
+269  
+
+Algorithm 1 CLUSTERGEN: Sublinear Streaming Attention via Clustering 1: inputs: stream of token embeddings $(\pmb{q}_{n},\pmb{k}_{n},\pmb{v}_{n})$ , parameter $\delta>0$ , positive integers $s,t$   
+2: Initialize $\mu\leftarrow0$ , $\mathcal{D}\gets\emptyset$ , $\mathcal{M}\gets\left[\mathrm{nu11},\cdots\cdot\cdot\cdot\right]$ 3: repeat 4: $\begin{array}{r l}&{\mathcal{D}\gets\cup\mathrm{pDATESOFTMAXNORMALIZER}(\mathcal{D},\delta,t,k_{n})}\\ &{\mathcal{M}\gets\cup\mathrm{IPDATEMATRIXPRODUCT}(\mathcal{M},s,\mu,k_{n},{\boldsymbol v}_{n})}\\ &{\mu\gets\mu+\lVert{\boldsymbol v}_{n}\rVert_{2}^{2}}\\ &{z_{n}\gets\mathrm{QUERYSTREAMATTN}(\mathcal{D},\mathcal{M},s,t,\mu,{\boldsymbol q}_{n})}\\ &{n\gets n+1}\end{array}$ 5: 6: 7: 8: 9: output $z_{n}$   
+10: until Token stream ends   
+Procedure UPDATESOFTMAXNORMALIZER $(\boldsymbol{\mathcal{D}},\boldsymbol{\delta},t,\boldsymbol{k})$   
+11: Initialize $\mathcal{D}\leftarrow\{(x_{i},S_{i},n_{i}):i\in[m]\}$ and $i^{*}\gets$ arg $\operatorname*{min}_{i\in[m]}\left\|\pmb{x}_{i}-\pmb{k}\|_{2}$   
+12: if $\|\pmb{k}-\pmb{x}_{i^{*}}\|_{2}\leq\delta$ then   
+13: $n_{i^{*}}\gets n_{i^{*}}+1$   
+14: Suppose $\boldsymbol{S}_{i^{*}}$ is a list of $t$ vectors in $\mathbb{R}^{d}$   
+15: for $j\in[t]$ do   
+16: Flip a coin and with probability $\begin{array}{r}{p=\frac{1}{n_{i^{*}}}}\end{array}$ , update the $j^{t h}$ entry of $\boldsymbol{S}_{i^{*}}$ as $S_{i^{*}}(j)\gets k$   
+17: end for   
+18: else   
+19: $\begin{array}{r l}&{S^{\prime}\leftarrow\left[k,\cdot\,\cdot\,\cdot\,\cdot\,\cdot\right]\,(\mathrm{contains}\;t\,\mathrm{copies\;of}\;k)}\\ &{D=\mathcal{D}\cup\{(k,S^{\prime},1)\}}\end{array}$   
+20:   
+21: end if   
+22: return $\mathcal{D}$   
+Procedure UPDATEMATRIXPRODUCT $(\mathcal{M},s,\mu,\pmb{k},\pmb{v})$   
+23: Suppose $\mathcal{M}$ is a list of $s$ tuples of vectors in $\mathbb{R}^{d}$   
+24: for $i\in[s]$ do   
+25: Flip a coin and with probability $\begin{array}{r}{p=\frac{\|\pmb{v}\|_{2}^{2}}{\mu+\|\pmb{v}\|_{2}^{2}}}\end{array}$ , update the $i^{t h}$ entry of $\mathcal{M}$ as $\mathcal{M}(i)\leftarrow(\pmb{k},\pmb{v})$   
+26: end for   
+27: return $\mathcal{M}$   
+Procedure QUERYSTREAMATTN $(\mathcal{D},\mathcal{M},s,t,\mu,\pmb{q})$   
+28: $\begin{array}{r}{z\gets\sum_{({\boldsymbol k},{\boldsymbol v})\in{\mathcal{M}}}\frac{\mu}{s\cdot\|{\boldsymbol v}\|_{2}^{2}}\cdot\exp(\langle\boldsymbol q,{\boldsymbol k}\rangle)\cdot{\boldsymbol v}}\end{array}$   
+29: $\begin{array}{r}{\tau\leftarrow\sum_{(\pmb{x},S,n^{\prime})\in\mathcal{D}}\frac{n^{\prime}}{t}\cdot\sum_{\pmb{k}\in S}\exp(\langle\pmb{q},\pmb{k}\rangle)}\end{array}$   
+30: return $z/\tau$  
+
+that cluster by our algorithm. Throughout stream processing, we compute the distance between the new key token and each existing cluster. Here the distance to an existing cluster is defined as the distance to the aforementioned representative of the cluster. If there is a cluster whose distance is less than $\delta$ , then the token is assigned to the nearest cluster, and we update our random samples of keys from this cluster using reservoir sampling. If the distance from all existing clusters is more than $\delta$ , we introduce a new cluster in $\mathcal{D}$ , and the new key becomes the representative of this new cluster. At any point in the stream, this algorithm identifies at most $m$ clusters if the keys so far are $(m,\delta)$ -clusterable. If $m$ grows sublinearly in the stream length $n$ , the memory and update time of our algorithm will be sublinear as well. Formally, we prove that the following invariant holds:  
+
+Lemma 2.3 (Correctness of UPDATESOFTMAXNORMALIZER). For any $\delta>0$ , any positive integer $t_{\perp}$ , at any iteration n of the stream in Algorithm 1 the following properties are maintained. $\mathcal{D}$ is a set of m items of the form $\bar{\cal D}=\{(x_{i},S_{i},\bar{n}_{i}):i\in[m]\}$ , where there exists a partition of keys into $m$ disjoint subsets $\mathcal{C}_{1},\mathcal{C}_{2},..\cdot\mathcal{C}_{m}\subseteq\{k_{i}\}_{i=1}^{n}\,s$ satisfying $\textstyle\bigcup_{j=1}^{m}{\mathcal{C}}_{j}=\{k_{i}\}_{i=1}^{n}$ and $\mathcal{C}_{i}\cap\mathcal{C}_{j}=\emptyset$ for every $i\neq j$ , such that for every $i\in[m]$ :  
+
+$$
+\begin{array}{l}{{l.\;\,{\pmb x}_{i}\in{\mathcal C}_{i},}}\\ {{2.\;\,n_{i}=|{\mathcal C}_{i}|,}}\end{array}
+$$  
+
+3. $\|\pmb{x}_{i}-\pmb{k}^{\prime}\|_{2}\leq\delta$ for every $k^{\prime}\in\mathcal{C}_{i}$ ,   
+4. $\|\pmb{x}_{i}-\pmb{x}_{j}\|_{2}>\delta$ for every $i\neq j$ ,   
+5. $\mathcal{S}_{i}$ is a set of $t$ i.i.d. uniform samples from the set $\mathcal{C}_{i}$ .  
+
+The proof of Lemma 2.2.  
+
+2.4 STREAMING ATTENTION: MAIN THEOREM  
+
+Now we are ready to analyze the end-to-end performance of CLUSTERGEN and prove the main theorem. We show that, given the data structures created throughout the stream and analyzed in Lemma 2.2 and Lemma 2.3, the primitive QUERYSTREAMATTN can efficiently output an accurate approximation to the streaming attention, satisfying Eq. (1).  
+
+Our analysis unfolds in two steps. First, we establish that the data structures created by UPDATESOFTMAXNORMALIZER and UPDATEMATRIXPRODUCT can be stored in small memory and updated very quickly if the sequence of keys is clusterable into a sublinear number of clusters. Then we show that the QUERYSTREAMATTN can use these data structures to produce an accurate attention output for any given query. Our main result is as follows:  
+
+Theorem 2.4 (Efficiency and Correctness of Algorithm 1). For any $\delta,r,\varepsilon>0,$ , any positive integers $n,d,$ and any sequence of tokens $(q_{1},k_{1},v_{1}),(q_{2},k_{2},v_{2}),\ldots(q_{n},k_{n},v_{n})$ where $\mathbf{\bar{q}}_{i},\mathbf{k}_{i},\mathbf{v}_{i}\in\mathbb{R}^{d}$ , suppose that the followings hold  
+
+$$
+\begin{array}{r l}&{\bullet t=\Omega\,\big(\varepsilon^{-2}\cdot e^{2\delta\cdot r}\log n\big),}\\ &{\bullet s=\Omega(\varepsilon^{-2}\cdot d),}\\ &{\bullet\ \|q_{n}\|_{2}\leq r.}\end{array}
+$$  
+
+Then, CLUSTERGEN (Algorithm $^{\,l}$ ) at $n$ -th step of the stream processing outputs a vector $z_{n}\in\mathbb{R}^{d}$ that satisfies Eq. (1) with probability at least 0.99. Furthermore, if the keys $k_{1},k_{2},\ldots k_{n}$ are $(m,\delta)$ - clusterable as per Definition 2.1, then both the total memory of the algorithm and its runtime during the $n$ -th iteration is bounded by $O(d\cdot(m t+s))$ .  
+
+The proof of Theorem 2.3.  
+
+Memory and Runtime. First, note that the memory requirement for storing the list $\mathcal{M}$ in Algorithm 1 is $O(s d)$ because it contains $s$ pairs of $d$ -dimensional vectors. Next, to bound the memory requirement for storing $\mathcal{D}$ we need to bound the size of this set which we denoted by $m^{\prime}$ . According to properties (1) and (4) in Lemma 2.3, for every $i\in[m^{\prime}]$ there exist $\pmb{x}_{i}\,\in\,\{\pmb{k}_{1},\mathbf{\dot{k}}_{2},...\,\pmb{k}_{n}\}$ such that $\|\pmb{x}_{i}-\pmb{x}_{j}\|_{2}>\delta$ for $i\neq j$ . Given the assumption in the theorem statement that keys are $(m,\delta)$ - clusterable, by the definition of clusterability in Definition 2.1 along with the pigeonhole principle, we must have $m^{\prime}\leq m$ . Therefore storing $\mathcal{D}$ will require $O(m^{\prime}t d)\stackrel{=}{=}O(m t d)$ because it is a set of $m^{\prime}$ elements, and each element of this set is a list of $t$ vectors in dimension $d$ .  
+
+Three major operations dominate the runtime of the $n$ -th iteration. Firstly, executing UPDATESOFTMAXNORMALIZER requires computing $m^{\prime}$ distances in line 12 that takes $O(m d)$ time. Additionally, the for loop in line 16 takes $O(t d)$ time. Secondly, UPDATEMATRIXPRODUCT has a runtime bounded by $\bar{O(s d)}$ . Thirdly, running QUERYSTREAMATTN involves $O(s d)$ operations in line 26 and $O(m^{\prime}t d)=O(m t d)$ operations in line 27. As a result, the total runtime of Algorithm 1 in $n$ -th iteration is $O(m t d+s d)$ .  
+
+Theorem 2.4 demonstrates that if the keys can be clustered into some sublinear number $m=n^{1-\Omega(1)}$ of clusters with diameters at most $\delta$ , and the queries have bounded $\ell_{2}$ norms of at most $r$ such that the product of the cluster diameter and maximum $\ell_{2}$ norm of queries is bounded by $\delta r=o(\log n)$ , then Algorithm 1 operates with sublinear $O\left(\varepsilon^{-2}\cdot m d n^{o\left(1\right)}\right)\,=\,O\left(\varepsilon^{-2}\cdot d n^{1-\Omega\left(1\right)}\right)$ memory and runtime. We summarize this in the following corollary:  
+
+Corollary 2.5. Suppose the preconditions of Theorem 2.4 hold. If the diameter of key token clusters $\delta$ and the maximum $\ell_{2}$ norm of queries $r$ satisfy $\delta r=o(\log n)$ , then the total memory and runtime  
+
+325 326 327 328 329 330 331 332 333 334 335 336 337 338 339 340 341 342 343 344 345 346 347 348 349 350 351 352 353 354 355 356 357 358 359 360 361 362 363 364 365 366 367 368 369 370 371 372 373 374 375 376 377   
+
+![](images/dfc3ff1dc6eaa2e46c0b2993c27aecac9b019c6bb27117e4025538edd4a65832.jpg)  
+
+![](images/3170b042b36bdaeee5e9849dd6f0a9e5686054344a00403bb1afc6715992219d.jpg)  
+Figure 1: A t-SNE plot of cached keys (first row) and values (second row) embeddings from 4 opensource models; (a) OPT-6.7B, (b) MPT-7B, (c) Llama-3.1-8B and (d) Gemma-2-9B using TriviaQA dataset. Key embeddings are more clusterable than value ones. The green dots represent the centers from the greedy $\mathbf{k}$ -center algorithm (Dyer & Frieze, 1985) where $k{=}16$ .  
+
+Table 1: Language models with various positional encodings and their clusterability, performance scores from open llm leaderboard (Fourrier et al., 2024) (higher is better) and average $\ell_{2}$ - norm of the query embeddings. The RoPE makes model performance strong and the corresponding key embeddings shows strong clusterabilities. All models have bounded query norms regardless of the sequence length.  
+
+of Theorem 2.4 are bounded by $O\left(\varepsilon^{-2}\cdot d m n^{o(1)}\right)$ . Moreover, if the number of key token clusters m grows as a sublinear function of $n_{i}$ , i.e., as $m=n^{1-\Omega(1)}$ , then the memory and runtime are bounded by $O\left(\varepsilon^{-2}\cdot d n^{1-\Omega(1)}\right)$ . The above results require that the key embeddings are well clusterable in their space, and the cluster centers should cover all keys with a small radius. In the next section, we empirically explore distributions on key and value embeddings and verify that the keys are indeed distributed in their embedding space. This supports that our assumption of clusterability on keys is reasonable in practical settings.  
+
+
+
+\section{3 ABLATION STUDY  }
+
+
+3.1 CLUSTERABILITY ON KEY AND VALUE EMBEDDINGS  
+
+We first demonstrate the clusterability of cached embeddings from long-range tokens. To this end, we collect key and value embeddings from 4 popular open-source language models; OPT-6.7B, MPT7B, Llama-3.1-8B and Gemma-2-9B, where each adopts different positional encoding methods across absolute positional encoding (AbsPE), Attention with Linear Biases (ALiBi) (Press et al., 2021) and Rotational Positional Encodding (RoPE) (Su et al., 2024). We use prompts from TriviaQA dataset in LongBench (Li et al., 2023), and the length of input tokens is approximately 5,600 tokens, except for OPT-6.7B, which has a maximum sequence length of 2048. We then visualize the cached embeddings (at randomly selected layer/head) using t-SNE (Van der Maaten & Hinton, 2008), identifying cluster center points through the greedy $\boldsymbol{\mathrm{k}}$ -center algorithm (Dyer & Frieze, 1985). The benchmark models are summarized in Table 1, and their embeddings are illustrated in Fig. 1.  
+
+First, we observe that the key embeddings (first rows in Fig. 1) exhibit a higher degree of clusterability compared to value embeddings. Furthermore, we note that the cluster centers (indicated by green dots) corresponding to the key embeddings are evenly distributed across the entire embedding space. In particular, the key embeddings demonstrate significant dispersion across different time steps, and their cluster centers are distributed over the entire embedding space.1.  
+
+Second, it is clearly observed that the key embeddings in Llama-3.1-8B and Gemma-2-9B, both incorporating RoPE, show strong clusterability. On the other hand, MPT-7B (using ALiBi) and OPT-6.7B (using AbsPE) demonstrate weaker clusterability. Notably, models utilizing RoPE have consistently outperformed those using other positional encoding methods across various benchmarks. For example, from open llm leaderboard (Fourrier et al., 2024), we observe that the performance ranking followed order of Gemma-2-9 $\mathrm{B}>\mathrm{L}\mathrm{Lama}{-3.1{-}8\mathrm{B}}\gg\mathrm{OPT}{-}30\mathrm{B}>\mathrm{MPT}{-}7\mathrm{B}$ (score for OPT-6.7B has not been submitted). These observations strongly support the validity and practicality of our clusterability assumption (Definition 2.1) for high-performing open-source LLMs.  
+
+
+
+\section{3.2 BOUNDED NORM ON QUERY EMBEDDINGS  }
+
+
+We additionally investigate assumption on the upper bound of query embeddings in Theorem 2.4, i.e., $\|\pmb{q}_{n}\|_{2}\leq\dot{r}$ for some constant $r\,>\,0$ . Essentially, query embeddings are obtained by multiplying weights by the input embeddings, and they are typically passed through the Layer Normalization (Ba, 2016). Therefore, entries of query embeddings are expected to be small assuming the weight matrices have small eigenvalues, and the norms of query embeddings in our case after Layer Normalization are expected to be small constants. We empirically compute $\ell_{2}$ norms of query embeddings from the same models used in Section 3.1 using the first 20 prompts from TriviaQA dataset. The average $\ell_{2}$ -norms of the query (with $95\%$ confidence interval) is reported in Table 1, which are mostly constant and upper-bounded regardless of the length of the input prompt. This strongly supports our assumption on upper bound of query embeddings.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+In this section, we report the empirical results of the proposed algorithm with memory footprint reduction and performance on various downstream question-answering tasks. For all experiments, we use a single NVIDIA A100 GPU with 80 GB VRAM .  
+
+
+
+\section{4.1 LINE RETRIEVAL  }
+
+
+We first evaluate our proposed algorithm on long-context line retrieval task in LongEval (Li et al., $2023)^{2}$ benchmark. The task involves long-context line retrieval from extensive documents, each comprising multiple lines, complete with line numbers and topics. The objective is to precisely retrieve a specified number of lines corresponding to a target topic. We vary the number of lines, representing the number of targets, to 200, 300, and 400 and they correspond to sequence lengths of $n=5{,}000$ , 7,000, and 9,000, respectively. Each dataset contains 50 distinct questions, and we systematically extract the number from the generated answers and compute accuracies. The answers are generated employing the longchat-7B model3, which is a fine-tuned version of the Llama-2-7B model with long-range context length.  
+
+We compare our method to two KV cache compression algorithms; H2O (Zhang et al., 2023), which retains cached tokens with high cumulative attention scores, and AttentionSink (Xiao et al., 2023), a method that deterministically selects some initial and recent tokens. Specifically, both of these prior works have highlighted the significance of recent token embeddings in generating meaningful responses. To leverage this insight, we integrate it with our clustering approach. More precisely, our strategy consistently retains the most recent $\ell$ token embeddings, in addition to $k$ centers selected from the remaining tokens. In a streaming context, this strategy is often referred to as a sliding window. We apply the greedy $\mathbf{k}$ -center clustering algorithm once to compress the entire KV caches. To make comparisons fair, we set cache memory budgets of all algorithms identical (i.e., $\ell+k)$ , which scales sublinearly with the context length denoted as $n$ . We set the compression ratio $(\ell{+}k)/n$ to fixed number, e.g., 0.35 for $n=5\mathrm{k}$ , and report the highest accuracy among all combinations of $(r,k)$ where $r\in\{2048,3072\}$ as long as $r$ does not exceed the compressed length.  
+
+![](images/8f27004172fa265ec905ce9185c843c327bd76a67f36e6a22cebe0b4b192fbdf.jpg)  
+Table 2: Results on accuracy of line retrieval from LongEval (Li et al., 2023) dataset with context length ranging $5\mathbf{k}$ to $9\mathbf{k}$ . Under the sublinear cache budgets in terms of the sequence length, the proposed approach based on greedy $\mathbf{k}$ -center outperforms other methods over all sequence lengths.  
+
+Table 3: Results on generation tasks for long-range prompts from LongBench (Li et al., 2023) datasets. The prompt length is at most $20\mathbf{k}$ and the cache size budget is set to 2k, i.e., $\ell=k=1\small{,}024$   
+
+![](images/1a06ea2d298dbec046c87573ba6625c80c6da54b3f2e2052762bd71869b23f20.jpg)  
+
+The results are reported in Table 2. We observe that our clustering-based method consistently outperforms other algorithms across all sequence lengths. For instance, we achieve an accuracy of $44\%$ while utilizing only half of the cached KV embeddings with a length of $9\mathbf{k}$ tokens, whereas both H2O and AttentionSink can achieve accuracies $10\%$ lower. This finding suggests that maintaining the embedding information holds greater significance in sustaining the performance of LLMs compared to attention scores and positional information.  
+
+
+
+\section{4.2 TEXT GENERATION ON LONG-RANGE INPUTS  }
+
+
+We evaluate our method on various tasks from LongBench (Li et al., 2023) datasets including summarization, single/multi-document question-answering, few-shot learning, and code completion. As in Section 4.1, we choose longchat-7B model and apply AttentionSink and CLUSTERGEN to the token generation process. The generated texts are evaluated using metrics from the original code Li et al. (2023). Specifically, we omit H2O because its open-source version implementation does not support memory-efficient computation for long sequences and leads the memory overflow errors. We set the maximum input length to 20,000 for all datasets and truncate the middle prompts when it overflows (i.e., first and last 10,000 tokens are appended). We fix hyperparameters $\ell,r$ to 1,024 for all datasets and both cache methods. The results are summarized in Table 2. As a result, our algorithm shows better performance scores on single-document QA and code completion tasks.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this work, we develop CLUSTERGEN, an efficient KV cache compression algorithm via stream clustering. Our motivation is that cached keys are well clusterable in their embedding space and we apply a greedy-type clustering algorithm to find the most representative embeddings. Under assumptions on bounded query norm and clusterability, we analyze that our algorithm can guarantee a spectral error bound with sublinear time and memory. We further integrate keeping recent tokens to the proposed clustering approach. For zero-shot line retrieval tasks, our algorithm outperforms other KV cache compression algorithms with the same memory budget.  
+
+
+

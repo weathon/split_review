@@ -1,0 +1,169 @@
+# Quantifying the Plausibility of Context Reliance in Neural Machine Translation
+
+- Decision: Accept
+- Avg Score: 5.50
+- Scores: 5, 8, 3, 6
+
+## Abstract
+Establishing whether language models can use contextual information in a human-plausible way is important to ensure their trustworthiness in real-world settings. However, the questions of \textit{when} and \textit{which parts} of the context affect model generations are typically tackled separately, with current plausibility evaluations being practically limited to a handful of artificial benchmarks. To address this, we introduce \textbf{P}lausibility \textbf{E}valuation of \textbf{Co}ntext \textbf{Re}liance (\pecore), an end-to-end interpretability framework designed to quantify context usage in language models' generations. Our approach leverages model internals to (i) contrastively identify context-sensitive target tokens in generated texts and (ii) link them to contextual cues justifying their prediction. We use \pecore to quantify the plausibility of context-aware machine translation models, comparing model rationales with human annotations across several discourse-level phenomena. Finally, we apply our method to unannotated model translations to identify context-mediated predictions and highlight instances of (im)plausible context usage throughout generation.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper presents a comprehensive framework for assessing the plausibility of context reliance in the context of machine translation tasks. More specifically, this framework facilitates the extraction of cue-target token pairs from language model outputs, enabling the identification of context-sensitive target tokens and their associated influential contextual cues. The primary objective of this approach is to systematically evaluate the credibility of context utilization within the domain of machine translation, and notably, it can be applied in the absence of reference translations. Ultimately, the authors substantiate the framework's accuracy across diverse datasets and underscore its effectiveness
+
+### Strengths
+- The topic is very interesting
+- A comprehensive explanation of the proposed algorithms is provided, along with supplementary materials for additional insight.
+- The evaluation is encompassing a wide range of models.
+- This model can be utilized without the need for reference.
+
+### Weaknesses
+ - The authors introduce incremental methods, highlighting their proposed unified framework as a distinguishing feature compared to previous work[1]. The unified framework aims to enable an end-to-end evaluation of the plausibility of context reliance. However, it raises questions regarding the advantages of such unification. For instance, the Detection component (CTI) and CCI component could potentially function independently, and the potential synergy of combining them within a unified framework remains unclear. Additionally, each component closely resembles existing methodologies[1], with the experimentation primarily focused on various detection metrics. Notably, the paper's most advanced aspect, compared to existing methods, is its omission of reference translations, which may be perceived as somewhat lacking in novelty for an ICLR paper.
+
+- The authors acknowledge limited performance, as indicated by the data presented in Table 1 and Figure 3. They attribute the suboptimal performance to domain shift issues affecting lexical choice. This suggests that the proposed methodology predominantly excels in handling anaphora cases. However, from my perspective, it's worth noting that lexical choice in context-aware translation is a significant aspect, and it's not entirely clear if the approach can effectively diagnose and interpret the model in practical context-aware translation research.
+
+### Questions
+- I find several typos in page 4 
+     - P_{c}tx (y^t)-> P_{ctx}(y^t)
+     - P_{c}tx (y^*)-> P_{ctx}(y^*)
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper introduces PECORE, a novel interpretability framework for analyzing context usage in language models' generations. For any (contextual) generation model, PECORE proposes extracting sets of (target, cue) corresponding to what parts of the generation were reliant on context, and what parts of the context they relied on.
+
+The framework has two main steps:
+
+1. Context-sensitive target identification (CTI): This step identifies which tokens in the model's generated text were likely influenced by the preceding context. It does this by comparing the model's predictions with and without context using contrastive metrics. 
+2. Contextual cues imputation (CCI): This step traces the generation of context-sensitive tokens (for “gold” context-sensitive words or end-to-end from the CTI step) back to specific words in the input context that influenced their prediction. It uses attribution methods to identify influential contextual cues.
+
+The (target,cue) outputs can then be compared to human rationales to evaluate the *plausability*. Importantly, the PECORE framework is agnostic to the specific method used in the CTI step and CCI step, and authors investigate the plausability of PECORE using different combinations of methods.
+
+The authors apply PECORE to specific task of contextual machine translation. Experiments on discourse phenomena datasets show the PECORE can identify context-sensitive outputs and trace them back to contextual cues with reasonable accuracy (when compared to human-rationales), particularly when using simple distributional metrics on both steps (like CXMI or KL-divergence). The framework is also applied to unannotated examples in FLORES dataset, revealing interesting cases of context usage in translations.
+
+### Strengths
+- I really liked this paper! It is well written and the presentation is quite clear, and the problem of interpretability/context-attribution is understudied given how relevant it is. They also show understanding of the current problems in the interpretability literature, by explicitly mentioning that they only measuring plausibility (similarity to human rationales)
+- I find their CTI step quite ingenious: they side-step some of the problems of previous context-usage metrics that rely on references (like CXMI) by basically decoding with context and assuming that as “contextualized reference”. This means that they can use these “probabilistic” metrics to measure context on actual decodings/translations of the model rather than on references (which might not be representative of real use of the model).
+- I find the comparison of different contrastive metrics and selectors through PECORE quite relevant, and a useful resource for future intepretability research. The finding that simple probabilistic metrics like CXMI/KL work well and that using the full-distribuion (like KL) can be beneficial quite relevant
+
+### Weaknesses
+ - The main thing that could make this paper have a significantly bigger impact would be testing the use of PECORE for tasks other than contextual MT: as authors point out, PECORE is general enough to be applicable to any (contextual) LM, and some experiments on other tasks (like summarization or even other modalities) could make this even more suitable to conference like ICLR (doing something like what was done for FLORES if human rationales don’t exist).
+- While I think the authors did well in side-stepping the issues with the faithfulness/plausibility argument, I think some parts of the writing still hint that these explanations reflect the model’s internal behaviour (e.g. “leaving space for improvement through the adoption of more faithful attribution” this implies that more faithful atribbution will lead to more plausible explanations, which might not be the case). Some extra care about this sort of statements could be useful (but overall I found that the authors were already quite careful).
+
+### Questions
+- Is it possible that $\tilde{y}^\star$ ends up being the same as the contextual prediction $\hat{y}$ (in remark 3.1)? Or does a high selector score imply that the highest probability token is gonna be different?
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+It is an important topic to evaluate if NLP models can correctly make use of context information in a plausible way, which is called plausibility. It is widely studied in classification tasks but relatively challenging for language generation tasks. Previous works confines on the assessment to a small, handcrafted benchmarks. In this paper, the authors propose an interpretability framework called PECoRE. PECoRe extracts cue-target token pairs, which are used to uncover context dependence in generation. Comparing the uncovered dependence with human annotation, PECoRE can quantify the plausibility of language models. The authors apply PECoRE to evaluate contextual machine translation tasks, using the metrics or context sensitive target token identification and contextual cues imputation, as well as detecting context reliance in the wild, showing the effectiveness of PECoRE.
+
+### Strengths
+1. The topic (whether NLP models can correctly make use of context information in a plausible way) is important for trustworthy AI.
+
+### Weaknesses
+1. This paper is hard to read. The logic and the main message of each paragraph are hard to follow. The writing is not friendly for the reader that does not familiar to plausibility study. Also, the examples are not hard to understand for the reader that cannot understand French.
+2.	The scope is narrow. The proposed interpretability method seems only suitable for encoder-decoder based machine translation models. But the focus of the language generation field has move to more general decoder-based language generation, such as GPT-style.
+3.	Lack of comparation. The proposed method are not compared with other SOTA methods for plausibility.
+
+### Questions
+1.	Although your method is for generative language models, it seems that it is more suitable for seq2seq generation tasks, such as machine translation, rather than pure generation tasks, such as story generation. Also, it seems only works for encoder-decoder structure, rather than currently widely used decoder-only language model. Can your method work in such scenarios?
+
+2.	Where is the comparison between your method and other SOTA method? Correct me if I am wrong, it seems that you only evaluate the performance of different metrics on different models.
+
+### Soundness
+2 fair
+
+### Presentation
+1 poor
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This work proposes an evaluation method for context aware machine translation to quantify how a model is looking at words in the input for their decision for translation. Basically, the evaluation is carried out in two steps, the first step (CTI) to detect the target tokens which are sensitive to context information by differentiating a model with and without context, and the second step (CCI) to perform attribution to the input tokens using the detected target tokens.
+
+### Strengths
+- This work is investigating an important problem in context aware machine translation evaluation in that a context aware model usually ignore important signals in the context by explain-away effects. The evaluation protocol presented in this paper might be a way to give us an insight to a particular problem in a model, and thus, might lead to a solution in the future.
+
+- The proposed method is a combination of two, one to isolate the particular tokens for context awareness by comparing two systems, and the other for attribution to find the import inputs to investigate the connection. It simple but sound, and easy to interpret the outputs.
+
+### Weaknesses
+ - Experiments are not very systematic in that OpenMT was mainly employed in section 4 for evaluating each step, but section 5 used mBART-50 in an end-to-end evaluation setting. I'd expect two settings in the end-to-end experiments for completeness.
+
+### Questions
+- I'd like to know the reason for not running OpenMT for the end-to-end experiment in section 5.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+3 good

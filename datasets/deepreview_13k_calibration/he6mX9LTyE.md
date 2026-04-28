@@ -1,0 +1,125 @@
+# Kosmos-G: Generating Images in Context with Multimodal Large Language Models
+
+- Decision: Accept
+- Avg Score: 6.00
+- Scores: 6, 6, 6
+
+## Abstract
+Recent advancements in subject-driven image generation have made significant strides. However, current methods still fall short in diverse application scenarios, as they require test-time tuning and cannot accept interleaved multi-image and text input. These limitations keep them far from the ultimate goal of ``image as a foreign language in image generation.'' This paper presents \our{}, a model that leverages the advanced multimodal perception capabilities of Multimodal Large Language Models (MLLMs) to tackle the aforementioned challenge. Our approach aligns the output space of MLLM with CLIP using the textual modality as an anchor and performs compositional instruction tuning on curated data. \our{} demonstrates an impressive capability of zero-shot subject-driven generation with interleaved multi-image and text input. Notably, the score distillation instruction tuning requires no modifications to the image decoder. This allows for a seamless substitution of CLIP and effortless integration with a myriad of U-Net techniques ranging from fine-grained controls to personalized image decoder variants. We posit \our{} as an initial attempt towards the goal of ``image as a foreign language in image generation.'' The code can be found at \url{https://aka.ms/Kosmos-G}
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+Kosmos-G aligns the outputs of MLLM to the embedding space of CLIP text encoder, which can be fed into Stable Diffusion model for image generation with context of any form.
+
+### Strengths
+1. The KOSMOS-G's ability to achieve zero-shot multi-entity subject-driven generation is notable. The method addresses an underexplored area in image generation by focusing on generalized vision-language inputs and multiple images, the method leverage existing advancements in both multimodal language models and image generation. 
+
+2. By the alignment of the output space of MLLMs with CLIP and Score distillation instruction tuning, KOSMOS-G can achieve subject-driven generation and image editing without any training on diffusion models, highlighting its potential for integration into different frameworks.
+
+### Weaknesses
+1. The paper repeatedly mentions KOSMOS-G's ability to master zero-shot multi-entity generation and handle interleaved image-text input. However, the practical cases presented in the paper seem to focus primarily on image editing capabilities. Look forward to showing more cases with complex and rich scenarios to further illustrate the capabilities of the model. : 1）the paper only demonstrates cases with a maximum of two images, failing to showcases with more than two images as inputs.  2) the paper predominantly showcases and evaluates image-text-image input scenarios, leaving more diverse multi-image and text interleaving cases unexplored. 
+
+2. Section 2.3 discusses the "Score distillation instruction tuning" technique, but the description lacks clarity. The paper should provide a more precise definition of the entities involved in calculating the KL divergence, along with any specific mathematical formulas or equations for better understanding.  In addition, is KL divergence loss necessary? Is it feasible to directly apply diffusion model's loss for training?
+
+3. The paper highlights the exceptional subject-driven generation capabilities of KOSMOS-G, particularly when not training the diffusion model.   I would like to ask if the authors have explored the possibility of further enhancing subject-driven generation, like training the diffusion model.
+
+### Questions
+See above.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper explores image generation from generalized vision-language inputs, especially involving multiple images. Named KOSMOS-G, a model that leverages the advanced perception capabilities of MLLMs, and aligns the output space of MLLM with CLIP using the textual modality as an anchor and performs compositional instruction tuning on curated data.
+
+### Strengths
+The problem of image generation conditioning on generalized vision-language inputs is an interesting problem, and the proposed approach seems to show some promising results.
+The idea of aligning KOSMOS-G Space with the CLIP-T Space and then directly leveraging the stable diffusion models seems a valid approach.
+The qualitative results show some good capabilities of the proposed method.
+
+### Weaknesses
+The ablation study seems not very comprehensive, for example, if the goal is to align the two representation spaces, there should be other options to achieve the alignment design, so why is the current AlignerNet design the best, maybe more justification and ablation study are needed here.
+
+### Questions
+see the weakness part.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes a framework that combines MLLM and SD to perform image generation/editing with multimodal input. To better bridge the MLLM output space and SD input space, AlignerNet is introduced for feature alignment. Additionally, a large-scale object compositional image generation data is collected and used for training.
+
+### Strengths
+1. The idea of bridging MLLM and SD for versatile image generation is interesting. MLLM naturally can accept both image and text input, which can provide a more diverse signal to the image generation module and therefore enable new applications.
+2. The newly collected compositional image generation dataset should be useful to the community.
+
+### Weaknesses
+1. I don't see much novelty from AlignerNet.  Compared with GlueNet, AlignerNet merely replaces the MLP with encoder-decoder Transformers but they have the same loss and the same domains (both aligning text embedding). AlignerNet is useful from the experiments, but not novel IMO.
+2. Since the training data includes the image editing dataset from InstructPix2Pix. A comparison between previous works on image editing benchmarks should also be conducted. Similarly how is kosmos-g compared with GILL in visual storytelling?
+3. In AlignerNet, both MSE and REC losses are used. However, no ablation is done about those two losses. 
+4. In Tab2, it seems the E2E Fine-tuning fails. However, recent works such as BLIP-Diffusion, EMU, and MGIE can successfully connect MLLM with SD via E2E fine-tuning without any specific alignment. Why Kosmos-G's behavior is different from others and relies on additional alignment?
+
+### Questions
+1. When constructing the compositional generation dataset, what if multiple objects of the same class exist in the same image? Would the corresponding segmentation mask cover multiple instances in the same mask?
+
+-------------- After rebuttal ----------------
+Thank the authors for the last-minute efforts. I have raised the rating to 6. Please stick to this new manuscript and the new title in the camera-ready version if accepted, and further improvement in corresponding writing is also encouraged.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+3 good

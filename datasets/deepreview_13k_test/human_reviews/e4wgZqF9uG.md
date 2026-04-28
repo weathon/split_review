@@ -1,0 +1,173 @@
+# On the Viability of Monocular Depth Pre-training for Semantic Segmentation
+
+- Decision: Reject
+- Scores: 5, 6, 5, 3
+
+## Abstract
+The question of whether pre-training on geometric tasks is viable for downstream transfer to semantic tasks is important for two reasons, one practical and the other scientific. If the answer is positive, we may be able to reduce pre-training costs and bias from human annotators significantly. If the answer is negative, it may shed light on the role of embodiment in the emergence of language and other cognitive functions in evolutionary history. To frame the question in a way that is testable with current means, we pre-train a model on a geometric task, and test whether that can be used to prime a notion of “object” that enables inference of semantics as soon as symbols (labels) are assigned.  We choose monocular depth prediction as the geometric task, and semantic segmentation as the downstream semantic task, and design a collection of empirical tests by exploring different forms of supervision, training pipelines, and data sources for both depth pre-training and semantic fine-tuning. We find that monocular depth \emph{is} a viable form of pre-training for semantic segmentation, validated by improvements over common baselines. Based on the findings, we propose several possible mechanisms behind the improvements, including their relation to dataset size, resolution, architecture, in/out-of-domain source data, and validate them through a wide range of ablation studies. We also find that optical flow, which at first glance may seem as good as depth prediction since it optimizes the same photometric reprojection error, is considerably less effective, as it does not explicitly aim to infer the latent structure of the scene, but rather the raw phenomenology of temporally adjacent images.
+  \keywords{Depth estimation \and semantic segmentation \and pre-training}
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper explores leveraging monocular depth estimation as a pre-training objective and discusses its impact on downstream tasks of semantic segmentation. To validate the pre-training effectiveness, it takes ImageNet as pre-training baseline and three segmentation benchmarks (KITTI, NYU-V2, and Cityscapes) as downstream tasks.
+
+### Strengths
+1. The idea of pre-training (representation learning) on the geometry task (monocular depth estimation) is novel. The authors prove that the pre-training of depth estimation is beneficial for downstream semantic segmentation.
+2. The quantitative results on the given three segmentation benchmarks are valid (KITTI, NYU-V2, Cityscapes), demonstrating the effectiveness of depth estimation as the pre-training objective.
+
+### Weaknesses
+1. The authors provided many experimental results. However, many key details are missed.
+    -  How many training images are used for fine-tuning in the CityScape experiments in Section 4.2? Did the authors use all 20000 images for pre-training? Which backbone models are used for these experiments (ResNet18 or ResNet50)? 
+    - Similar questions for Section 4.3 for the NYU-V2 dataset.
+    - Table 3 (COCO), I assume it reports the results over the testing set of KITTI (rather than COCO)? Also, which dataset do authors use for monocular depth pre-training (KITTI or COCO)?  Did all methods (Depth, MAE, DINO, MOCO v2) use the same pre-training data? Which backbone models are used for these experiments (ResNet18 or ResNet50)? These serve as important references for evaluation and reproduction, which are not clearly specified in this paper.
+ 2. Where is Table 4.1 (Page 6)?
+ 3. Potential unfairness in comparison. 
+    - In Table 2, "Depth" used KITTI as pre-training set while testing on the same dataset. This comparison to the baseline (ImageNet pre-training) is unfair. This is because the training distribution is much closer to the testing distribution for "Depth". In contrast, ImageNet is characterized as object-centric and thus has a pretty large domain gap to KITTI collected by autonomous cars. What about performance comparison on COCO between ImageNet pre-train and Depth pre-train?
+    - In Table 3, the "Supervised Segmentation" performance should be results that trained on KITTI instead of MS-COCO if the authors used KITTI as pre-training and testing data. 
+ 4. Lack of analysis on representation transferability. For example, how is the performance of Depth Pre-train over other segmentation datasets such as COCO and ADE20K? How about transferring to object detection? Transferability is one of the major functions of pre-training. The authors should present relevant experimental results.
+ 5. Despite the authors proving the effectiveness of pre-training with depth estimation, it still requires significant RGB-D data which cannot be collected online for large-scale pre-training data. Compared to self-supervised studies, e.g. MoCo-variants and MAE, this method has limited application scope.
+
+### Questions
+Please see the weakness.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+In this paper, the authors explore how pre-training a model to infer depth from a single image compares to pre-training the model for a semantic task for the purpose of downstream transfer to semantic segmentation. The intuition of their work is to avoid human annotation by pre-training a model on the depth estimation task in which the Ground Truth can be acquired through video, multi-view stereo, or range sensor. They carefully design experiments to prove that depth pre-training exceeds performance relative to ImageNet pre-training, and optical flow estimation is less effective.
+
+### Strengths
+1. This paper is well-organized, which help readers easy to read and understand. Expecially, the intuition of this paper is described clearly and sounds make sense. The topic studied in this paper is critical to the industry. It is a good practice guidline. 
+2. The experiments on multiple datasets are extensive, which covers almost all potential variations. It helps the authors conclude multiple guidances and helps convince readers. The conclusions are usefual to industry. 
+3. More details are reported in the appendix. These information is a good addition to the main paper. Implementation details, training details, more results analysis are clear and should be able to help other researchers to duplicate their work.
+
+### Weaknesses
+The whole paper sounds like a experimental report. My biggest concern about this paper is its lack of innovation. Many existing work has explored ways to combine depth and segmentation, while this paper did more extensive experiments to summarize a more helpful pipeline. Beside that, there is no other contribution.
+
+### Questions
+1. Almost all experiments in this paper assume the depth ground truth are reliable and calibrated with the RGB images. What if the depth  ground truths are not reliable (have noises, does not calibrated with RGB images)? How does it impact the performance of the proposed pipeline?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper shows that depth pre-training exceeds performance relative to ImageNet pre-training on various downstreaming tasks (segmentation / depth prediction). The authors conduct extensive experiments with various architectures and settings.
+
+### Strengths
+1. The paper conducts extensive experiments to demonstrate that pre-training on depth images is beneficial to downstream tasks (depth / segmentation).
+
+2. It’s interesting to see depth pre-training helps for some downstreaming tasks in a few-shot manner.
+
+3. The paper is in general easy to understand.
+
+### Weaknesses
+1. The paper studies how depth-pretraining helps for downstreaming tasks. Since the main downstreaming task is still depth prediction, I feel that pre-training on depth prediction shows some improvements that are not that impressive to the community. Though segmentation is also studied on CityScape, maybe testing on more datasets would be more convincing.
+
+2. Regarding optical flow, I wonder if there is more clarification on why optical flow is not a good choice for pre-training? Is it because the prediction is more inaccurate / harder? Furthermore, how about optical flow as a downstreaming task? Does depth pre-training still help? 
+
+3. In Figure 2, I wonder why Depth-rand is on par with ImageNet pre-trained for ResNet-18, but the observation is very different for ResNet-50. I wonder if the authors have any thoughts on this?
+
+4. Suppose more images are available, would the pre-training in depth still be beneficial? For example, in Figure 3, what if there are hundreds of images, maybe using the full training set? Similarly, for segmentation, how much gain could the model obtain if there are more images? Is it also the case that only 16 images are used for fine-tuning for the results obtained?
+
+5. It would be helpful to clarify the experiment settings in Table 1 at the beginning of the experiment section. I wonder if the authors may further clarify the difference between  ‘Depth-Rand’ and ‘Depth’?
+
+6. Since this is mainly a paper comparing different existing strategies, in general it is of little technical novelty.
+
+### Questions
+Please see my questions above. In general, I feel the paper shows some interesting findings, but I am not sure if there is enough contribution to the community.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper is about using monocular depth estimation training as pre-training for the semantic segmentation task. The idea is quite simple, whether such a pre-training can be better than pretraining with classification task on ImageNet. Extensive experiments are carried out to verify the hypothesis. The conclusion of this paper is that compared to classification, using depth estimation as pretraining on average improves the segmentation performance.
+
+### Strengths
++ The idea to use monocular depth estimation as pretraining for semantic segmentation is sensible, considering that it is relatively easy to collect depth data. 
++ The experimental results support the hypothesis.
+
+### Weaknesses
+- It would be interesting to see the segmentation performance on PASCAL VOC and COCO with the depth pretraining. 
+- The writing is poor, sometimes the notations are not well defined or clarified. For instance, in EQ.1, since we are doing pretraining for depth estimation, why in the loss function, the depth term is missing?  Instead, there is the wrapped image? Similarly, the input of the loss function in EQ.2 is not clarified as well. 
+-  Some results are not sufficiently analyzed. For example, in the left figure of Fig.3, it seems that with larger training size, the bigger gain could be obtained.  However, this is counter-intuition, which needs proper explanations.
+
+### Questions
+We see the the main comparisons are between ImageNet classification-based pre-training vs Depth pre-training. One thing to consider is that depth pre-training happens in-domain with the same data to be fine-tuned. My question is whether the superiority of depth pre-training over ImageNet pre-training mainly relies on in-domain knowledge or data distribution. What if the depth pre-training is conducted on a different dataset rather than the one to be fine-tuned. Will it still has such significant improvement over classification pre-training?
+
+### Soundness
+3 good
+
+### Presentation
+1 poor
+
+### Contribution
+2 fair

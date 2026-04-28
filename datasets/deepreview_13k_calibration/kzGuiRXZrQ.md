@@ -1,0 +1,199 @@
+# Navigating the Design Space of Equivariant Diffusion-Based Generative Models for De Novo 3D Molecule Generation
+
+- Decision: Accept
+- Avg Score: 5.75
+- Scores: 6, 8, 6, 3
+
+## Abstract
+Deep generative diffusion models are a promising avenue for 3D de novo molecular design in materials science and drug discovery.
+However, their utility is still limited by suboptimal performance on large molecular structures and limited training data.
+To address this gap, we explore the design space of E(3)-equivariant diffusion models, focusing on previously unexplored areas.
+Our extensive comparative analysis evaluates the interplay between continuous and discrete state spaces.
+From this investigation, we present the EQGAT-diff model, which consistently outperforms established models for the QM9 and GEOM-Drugs datasets.
+Significantly, EQGAT-diff takes continuous atom positions, while chemical elements and bond types are categorical and uses time-dependent loss weighting, substantially increasing training convergence, the quality of generated samples, and inference time. We also showcase that including chemically motivated additional features like hybridization states in the diffusion process enhances the validity of generated molecules.
+To further strengthen the applicability of diffusion models to limited training data, we investigate the transferability of EQGAT-diff trained on the large PubChem3D dataset with implicit hydrogen atoms to target different data distributions. Fine-tuning EQGAT-diff for just a few iterations shows an efficient distribution shift, further improving performance throughout data sets. 
+\edit{Finally, we test our model on the Crossdocked data set for structure-based de novo ligand generation, underlining the importance of our findings showing state-of-the-art performance on Vina docking scores.}
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper explores the design space of equivariant diffusion-based generative models for de novo 3D molecule generation, including various parameterizations, loss weightings and data modalities. The authors then introduce EQGAT-Diff, which can achieve SOTA results in shorter training time and with less trainable parameters.
+
+### Strengths
+This is an empirical paper. The experiments part is solid: various metics are computed, many ablation studies are performed and standard deviations are reported.  The explored design is helpful for future model design in the community of ML + chemistry.
+
+### Weaknesses
+ - The novelty is limited. Most explored designs are easy to think about, like time-dependent loss weight, modeling discrete or continuous atom/bond types, parameterizing to match noise or x0, etc. The authors didn't come up with new designs.
+- It would be better to summarize useful designs / helpful findings clearly somewhere.
+- One important baseline MolDiff [1] is not compared with, although it has been cited.
+
+### Questions
+N/A
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper describes EQGAT-diff, an improvement to the EQGAT architecture (a 3D small-molecule generator) that includes diffusion. The paper explores a couple of design choices in the formulation of the diffusion part of this updated method, such as the addition or not of the truncated SNR loss term, and the inclusion of a discrete loss term for the molecular graph construction. The paper shows that their improved model is better than MiDi, the method that introduced diffusion on the molecular graphs jointly with the coordinate reconstruction.
+
+### Strengths
+The method is a significant advance compared to the EQGAT method. The exploration of the design choices is reasonable and of some interest, even though the results are not surprising based on the existing literature or simple logic. 
+
+The introduction and method is well written and clear. Aspects of sections 5 and 6 could improve, in particular the figures.
+
+The datasets that the authors use are standard in this line of study, and they have well know limitations, and it is surprising to me that the community has not yet moved to better data, which should be reasonably easy as QM calculations are not that hard to perform.
+
+The overall significance of this work appears more specialized than a usual contribution to ICLR, however, the paper would be of some interest to the growing number of drug discovery researchers that apply ML to small molecules.
+
+### Weaknesses
+The novelty of the approach is more specialized than a typical ICLR as it is more of a collection of good ideas from a narrow field of study. The authors didn't discuss or try to draw ideas from recent efforts in generative diffusion models for images or for protein structure prediction that may have strong analogies and lessons to the study of small molecules as well.
+
+The fonts in all the figure labels are unreadably (unpublishably?) small. If space is the main concern, then there certainly exist small chunks of text (e.g. the last paragraph of section 4) and some figure panels (e.g. most from Fig 2) that could move to the supplement, and some parts that could be rewritten concisely (e.g. intro to sec 5, which could also be clarified as it was not clear what "these three aspects" meant in paragraph 2, top of page 5).
+
+The dataset is a weakness for this paper and most other papers in this area.  I disagree with the premise of the authors that the availability of molecular data is not as abundant, though I agree that the community has been stuck on trivial and no longer meaningful datasets (it feels similar to ML in vision prior to imagenet). The authors mention the catalogue of Enamine Real in the supplement which scales to the 10s of billions of molecular graphs (albeit limited in complexity, but there are also computational enumerations of valid molecules that can be much bigger), the published patent literature probably scales to the multiple 10s of millions.  QM methods of relatively reasonable accuracy exist that are not exceedingly expensive and datasets of 10s of millions of published 3D structures with simpler methods also exist.
+
+The paper uses E3 symmetries which includes the reflection group and can therefore mix chiralities, in principle changing the input distribution of molecular graphs.  The authors seem to not address the possible distribution shifts due to chiral transformations.
+
+Small molecules with 3D coordinates often have specific chirality.  Although this chirality is specified in the full set of 3D positions, the authors model is using E3 symmetries in its core so I wonder if it will mix chiral molecule in ways that would result in a distribution shift.  Have the authors checked the chirality of the generated molecular distributions by keeping say only one kind of stereo isomer and validating that their model would construct both? Would implementing the SE3 group allow the authors to also including chiral flags on the bonds, in the way that shown in the typical 2D representations of molecular graphs?
+
+It was not clear to me why the inclusion of the eps-parameterization does not use a composite loss as did the x0-parameterization.  Is it not a priori clear a priori that the addition of a categorical loss for categorical data will outperform a mean squared error on categorical data?  I may be misunderstanding something simple here, so perhaps you can explain here and possibly reformulate the early parts of section 5.
+
+The lack of the reproduction of the MiDi code benchmarks that the authors report in the supplement is interesting, though it probably would not change the results in the paper in a qualitative way.  Did the authors contact the authors of MiDi to resolve this issue and did they receive any feedback on that question?
+
+The observation by the authors regarding deteriorating performance upon pretraining on explicit hydrogen on a larger molecular set is an interesting point that gets buried in the supplement. Is there a generalizable lesson and perhaps a better/different way to overcome this problem than dropping the hydrogens, or is this observation too close to the level of noise?
+
+### Questions
+The paper uses E3 symmetries which includes the reflection group and can therefore mix chiralities, in principle changing the input distribution of molecular graphs.  The authors seem to not address the possible distribution shifts due to chiral transformations.
+
+Small molecules with 3D coordinates often have specific chirality.  Although this chirality is specified in the full set of 3D positions, the authors model is using E3 symmetries in its core so I wonder if it will mix chiral molecule in ways that would result in a distribution shift.  Have the authors checked the chirality of the generated molecular distributions by keeping say only one kind of stereo isomer and validating that their model would construct both? Would implementing the SE3 group allow the authors to also including chiral flags on the bonds, in the way that shown in the typical 2D representations of molecular graphs?
+
+It was not clear to me why the inclusion of the eps-parameterization does not use a composite loss as did the x0-parameterization.  Is it not a priori clear a priori that the addition of a categorical loss for categorical data will outperform a mean squared error on categorical data?  I may be misunderstanding something simple here, so perhaps you can explain here and possibly reformulate the early parts of section 5.
+
+The lack of the reproduction of the MiDi code benchmarks that the authors report in the supplement is interesting, though it probably would not change the results in the paper in a qualitative way.  Did the authors contact the authors of MiDi to resolve this issue and did they receive any feedback on that question? 
+
+The observation by the authors regarding deteriorating performance upon pretraining on explicit hydrogen on a larger molecular set is an interesting point that gets buried in the supplement. Is there a generalizable lesson and perhaps a better/different way to overcome this problem than dropping the hydrogens, or is this observation too close to the level of noise?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+In this work, the authors investigate the design space of equivariant diffusion generative model for de novo molecular design. The work applies EQGAT-diff, a modification from EQ-GAT as the score network. It mainly explores three aspects of equiavriant diffusion model: 1) fixed vs. time-dependent loss weighting 2) $\sigma$ vs. $x_0$ parametrization 3) discrete vs. continuous diffusion. Experiments on GEOM-QM9 and GEOM-DRUGS show a recipe for better de novo molecular design with equivariant diffusion model. By navigating through the design spaces, the model also achieves SOTA performance than previous baselines.
+
+### Strengths
+1. The work is well-motivated. It is valuable to investigate the design space of equivariant diffusion model and provide a general recipe. 
+2. The proposed EQGAT-diff achieves superior performance through navigating through the design space. 
+3. The paper is well-written and easy to follow.
+
+### Weaknesses
+1. The work proposes to navigate through the design space of equivariant diffusion model for de novo 3D molecule design. However, there are still other design choices that are omitted, e.g., different diffusion kernels, such as those based on stochastic differential equations or alternative noise schedules, and different backbone architectures beyond EQGAT. While it's acknowledged that exhausting the entire design space is infeasible, a more thorough discussion of these limitations and their potential impact on the results would be beneficial. For example, the choice of a Gaussian diffusion kernel might not be optimal for all molecular systems, and exploring alternative kernels could lead to improved performance. Furthermore, the reliance on a single backbone architecture limits the generalizability of the findings.
+2. It seems why EQ-GAT is chosen to model score network is missing. While the authors mention it is an equivariant graph neural network, a more detailed justification is needed. Specifically, a comparison to other equivariant architectures, such as EGNN or other attention-based models, would strengthen the rationale for this choice. The specific advantages of EQ-GAT in the context of molecular property prediction and its suitability for modeling the score function in diffusion models should be elaborated.
+
+### Questions
+1. Will different settings (like discrete vs continuous) lead to significantly different training time till convergence as well as inference time?
+2. In section 6, the authors use OMEGA to generate ground truth. However, the conformers from OMEGA may be inaccurate. Did the authors consider pretrain on DFT datasets like PCQM4Mv2 (>3M data)? Though it's much smaller than PubChem3D, the model may benefit from higher data quality. 
+3. Following the previous question, Fig. 2 shows that with sufficient training data, the advantage of pretrained model is trivial. In fact, in some metrics, the pretrained model is doing slightly worse than training from scratch. What could be the reason? Could it be related to OMEGA generated pretraining data?
+4. One question about the big scope of this work is what the benefits of direct de novo 3D molecule generative model vs. two-stage model where first generate SMILES/graphs and then predict the conformers? I can see the advantages for structure-conditioned molecule design. However, this paper mostly investigate unconditional 3D molecule generation. 
+5. Torsional diffusion (https://arxiv.org/abs/2206.01729) introduces a GEOM-XL dataset including large molecules (>100 atoms). It may also be interesting to see how the proposed method transfer to such OOD datasets.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The manuscript introduces the EQGAT-diff model, an adaptation of the previously proposed EQGAT network, to model denoising diffusion generation. While there isn't a significant technical innovation, the model does exhibit enhanced empirical performance based on the provided metrics. The primary focus of the model is the unconditional semi de novo generation of 3D molecular structures. Notably, the relevance of generating valence-correct molecular structures without specific conditions is not clear. The authors highlight potential applications in structure-based drug design, yet the model's current format doesn't seem optimized for this purpose. Additionally, there is no mention of code availability. The presentation and writing of the article require improvement. In its current state, the manuscript lacks a meaningful technical contribution and seems to address an ill-defined task. I suggest that the authors refine their model for structure-based drug design and consider resubmitting for a future conference.
+
+### Strengths
+## Empirical Performance
+The model demonstrates superior performance based on the evaluation metrics presented.
+
+### Weaknesses
+## Task Relevance
+The de novo generation of 3D molecular structures, as currently presented, appears to lack inherent value. The manuscript does not clearly articulate the utility of generating valence-correct 3D structures without specific conditions or constraints. While the authors allude to structure-based drug design, the current unconditional generation approach does not directly address this problem. The relevance of this task is further diminished by the fact that many existing methods can generate 3D molecular structures, making the contribution of this specific approach unclear.
+
+## Lack of Technical Novelty
+The work does not introduce new technical advancements. The adaptation of the EQGAT network to a diffusion framework, while demonstrating empirical improvements, does not represent a significant technical leap. The core methodology relies on established techniques, and the manuscript does not present any novel architectural components or theoretical insights. The lack of technical innovation undermines the overall contribution of the work.
+
+## Code Unavailability
+Absence of open-source code hinders replication and comparison efforts. The lack of publicly available code makes it difficult for other researchers to validate the reported results and build upon the proposed approach. This limits the impact and reproducibility of the work.
+
+## Writing Quality
+The referencing is inconsistent, with many citations missing journal or conference details. There are incorrect uses of quotation marks, and figure clarity is compromised, diminishing the manuscript's overall professionalism. The presentation of the results is not clear, and the overall writing quality needs significant improvement.
+
+### Questions
+It would be beneficial for the authors to compare their 3D molecule generation model with a 2D molecule generation, specifically using OpenEye’s OMEGA, which is cited as the ground truth for conformation generation. Would the EQGAT-diff model maintain its efficiency advantage in such a comparison?
+
+### Soundness
+2 fair
+
+### Presentation
+1 poor
+
+### Contribution
+1 poor
