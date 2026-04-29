@@ -14,7 +14,4 @@ export MERGE_LOG="pipeline_whole_deepreview.log"
 export CONCURRENCY=5
 export MAX_PAPERS=200
 
-python code/main.py \
-  --n_samples 200 \
-  --benchmark datasets/deepreview_13k_test/ \
-  --seed "$(cksum <<< "$(date +%s)" | cut -f1 -d' ')"
+python code/main.py --n_samples 200 --benchmark datasets/deepreview_13k_test/ --seed $(cksum <<< '45678654567875456' | cut -f 1 -d ' ')
