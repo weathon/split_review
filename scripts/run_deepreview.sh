@@ -5,14 +5,14 @@ set -e
 cd "$(dirname "$0")/.."
 
 export OPENAI_DEFAULT_MODEL="glm-5.1"
-export HARSH_MODEL="ollama:glm-5.1:cloud"
-export MERGER_MODEL="ollama:glm-5.1:cloud"
-export NEUTRAL_MODEL="ollama:glm-5.1:cloud"
-export SUBAGENT_MODEL="ollama:glm-5.1:cloud"
+export HARSH_MODEL="gpt-5.5"
+export MERGER_MODEL="gpt-5.5"
+export NEUTRAL_MODEL="gpt-5.5"
+export SUBAGENT_MODEL="gpt-5.5"
 export OUTPUT_CSV="bench_scores_deepreview.csv"
 export MERGE_LOG="pipeline_whole_deepreview.log"
 export CONCURRENCY=5
-export MAX_PAPERS=200
+export MAX_PAPERS=100
 
 ollama serve &
 OLLAMA_PID=$!

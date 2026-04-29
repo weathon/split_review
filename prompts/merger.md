@@ -146,8 +146,8 @@ DO differentiate between papers of varying quality clearly.
 
 Do NOT be afraid to be harsh if the paper is very weak and do not be afraid to be nice if the paper is actually good.
 
-&& Do evaluate the paper on these axis using language first, do NOT be afraid to be harsh if the paper is very weak and do not be afraid to be nice if the paper is actually good.
-&& Originality, importance of research question addressed, whether the claims are well supported, soundness of experiments, clarity of writing, and value to the research community
+Do evaluate the paper on these axis using language first, do NOT be afraid to be harsh if the paper is very weak and do not be afraid to be nice if the paper is actually good.
+Originality, importance of research question addressed, whether the claims are well supported, soundness of experiments, clarity of writing, and value to the research community
 
 ## Score and Decision
 After you finish writing a review, assign a score to the review. 
