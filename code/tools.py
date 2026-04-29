@@ -3,10 +3,17 @@ import os
 
 from paths import DATASETS_DIR, ensure_hf_file
 
-CALIBRATION_REVIEW_DIR = str((DATASETS_DIR / "deepreview_13k_calibration").resolve())
-_embeddings_path = ensure_hf_file("human_reviews_embeddings_deepreview.pkl")
-_score_index_path = ensure_hf_file("human_review_score_index_deepreview.pkl")
-_calibration_set = "deepreview"
+_position_mode = os.getenv("POSITION_MODE", "").strip().lower() in ("1", "true", "yes")
+if _position_mode:
+    CALIBRATION_REVIEW_DIR = str((DATASETS_DIR / "neurips_position_human_review").resolve())
+    _embeddings_path = ensure_hf_file("human_reviews_embeddings_position.pkl")
+    _score_index_path = ensure_hf_file("human_review_score_index_position.pkl")
+    _calibration_set = "position"
+else:
+    CALIBRATION_REVIEW_DIR = str((DATASETS_DIR / "deepreview_13k_calibration").resolve())
+    _embeddings_path = ensure_hf_file("human_reviews_embeddings_deepreview.pkl")
+    _score_index_path = ensure_hf_file("human_review_score_index_deepreview.pkl")
+    _calibration_set = "deepreview"
 
 ALLOWED_PATHS = [CALIBRATION_REVIEW_DIR]
 

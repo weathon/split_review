@@ -16,8 +16,11 @@ import dotenv
 dotenv.load_dotenv()
 
 from paths import DATASETS_DIR, prompt_path as _prompt_path
-_position_mode = False
-HUMAN_REVIEW_DIR = str((DATASETS_DIR / "deepreview_13k_calibration").resolve())
+_position_mode = os.environ.get("POSITION_MODE", "").strip().lower() in ("1", "true", "yes")
+if _position_mode:
+    HUMAN_REVIEW_DIR = str((DATASETS_DIR / "neurips_position_human_review").resolve())
+else:
+    HUMAN_REVIEW_DIR = str((DATASETS_DIR / "deepreview_13k_calibration").resolve())
 
 # ── Build indexes (mirrors tools.py) ──────────────────────────────────
 _bm25_db: dict = {}
@@ -43,8 +46,12 @@ def _ensure_indexes():
     _bm25_db["files"] = all_file_paths
 
     from paths import ensure_hf_file
-    _emb_path = ensure_hf_file("human_reviews_embeddings_deepreview.pkl")
-    _idx_path = ensure_hf_file("human_review_score_index_deepreview.pkl")
+    if _position_mode:
+        _emb_path = ensure_hf_file("human_reviews_embeddings_position.pkl")
+        _idx_path = ensure_hf_file("human_review_score_index_position.pkl")
+    else:
+        _emb_path = ensure_hf_file("human_reviews_embeddings_deepreview.pkl")
+        _idx_path = ensure_hf_file("human_review_score_index_deepreview.pkl")
     with open(_emb_path, "rb") as f:
         db = pickle.load(f)
     _bm25_db["filenames"] = list(db.keys())
@@ -346,7 +353,7 @@ async def run_merger_claude_sdk(model_id: str, merger_prompt: str, paper_dir: st
     Run the merger agent via Claude Agent SDK.
     Returns (final merged review text, usage dict with cost/tokens/turns).
     """
-    _merger_prompt_file = _prompt_path("merger.md")
+    _merger_prompt_file = _prompt_path("merger_position.md") if _position_mode else _prompt_path("merger.md")
     with open(_merger_prompt_file, "r") as f:
         system_prompt = f.read()
     system_prompt = system_prompt.replace(
