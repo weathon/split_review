@@ -1,13 +1,79 @@
+Now I have enough calibration data. Let me carefully analyze the key weaknesses raised by the harsh critic and verify each against the actual paper content.
+
+## Verification of Key Weaknesses
+
+### 1. View-dependent geometry in deformation (Fatal/Major?)
+
+The paper clearly states in Equation (5)-(6) that the deformation predictor takes the view direction as input:
+- Eq. (5): `F_θ(γ(sg(μ_{4D})), γ(sg(d_v)), γ(t))` — note that `d_v` is the view direction
+- Eq. (6): This produces view-conditioned deformations for the center, scale, and rotations
+
+This is indeed view-dependent geometry modification — the same Gaussian at the same time gets different positions, scales, and rotations depending on the viewpoint. This is a valid and substantive criticism. The paper does not acknowledge this design choice as problematic for 3D consistency. However, I should note:
+
+- The view-dependent deformation only goes through the per-Gaussian transformation BEFORE the temporal slicing step. After temporal slicing and projection, the 3D Gaussians still go through standard alpha-blending rasterization.
+- This is somewhat analogous to how NeRF uses view-dependent inputs — but NeRF only modifies color, not geometry.
+- The paper calls this "temporal-viewpoint aware" and the deformation module is described as modeling "motion, shape, and transience changes" — but making geometry change with viewpoint is fundamentally different from modeling physical motion.
+- However, in practice, for novel view synthesis from training views, this may work well and the deformation might learn a mostly time-dependent signal since the training loss is applied across different viewpoints.
+
+This is a **major** weakness but not necessarily **fatal**. The method can still produce good image metrics while having a representation that is not a proper 4D scene. The severity depends on whether, in practice, the method actually learns significant view-dependent geometry or whether the MLP mainly learns time-dependent deformation. The ablation study doesn't disentangle this.
+
+### 2. Storage comparison fairness
+
+The paper states (line 164): "During the optimization phase, we adopt half-precision training. After obtaining the optimized MEGA representation, we store these learnable parameters in the FP16 format, then apply the zip delta compression algorithm."
+
+The ablation table (Table 3) reports parameter counts — not storage sizes — which partially addresses this. The paper shows parameter count reductions from ~831M (4DGS) to ~18M (MEGA), which is a ~46× reduction. But the 190× storage reduction comes from combining: (1) parameter reduction + (2) FP16 storage + (3) zip delta compression. The paper doesn't clarify whether the 4DGS storage numbers use the same FP16 + zip treatment. Looking at Table 1, 4DGS storage is listed as 6107.07MB — this is likely the raw FP32 unzipped size. The MEGA 32.45MB includes FP16 + zip. So the 190× ratio conflates representation compression with generic data compression. This is a valid concern.
+
+This is a **major** weakness — the headline compression ratio is not apples-to-apples. But the parameter count reduction (~46×) is still very impressive and real.
+
+### 3. Missing consistency evaluations
+
+Valid point. The paper uses standard PSNR/DSSIM/LPIPS on held-out views. Given that the deformation is view-conditioned, testing for multi-view consistency would be valuable. However, this is a known limitation that should be acknowledged, not necessarily a rejection-level issue if the method still produces good results on novel views. The ablation shows it maintains quality on held-out views, which provides *some* evidence of consistency. But stereo consistency rendering is a legitimate concern.
+
+I'd rate this as **minor-to-moderate** since the standard evaluation protocol for novel view synthesis does implicitly test view consistency (different test views need to agree on what they see).
+
+### 4. Under-specified architectural details
+
+The paper says "lightweight MLP" but doesn't specify hidden dimensions, positional encoding length L, etc. Looking at the implementation details section (lines 241-242), the learning rates are given but not MLP architecture details. This is a minor reproducibility concern but not unusual for this venue — the method could be reproduced with reasonable choices.
+
+I'd rate this as **minor**.
+
+Now let me also check: does the ablation actually show a notable quality drop?
+
+Looking at Table 3 (Neu3DV ablation):
+- On Flame Steak: 4DGS gets 33.19, w/ DAC+Deformation+L_opa gets 32.27. That's ~0.9 dB drop.
+- On Sear Steak: 4DGS gets 33.44, w/ DAC+Deformation+L_opa gets 33.67. Actually improves!
+
+So there IS a quality drop on some scenes with the full method. On Birthday, the full method gets 32.02 vs 31.00 for 4DGS, so it actually improves. On Fabien, 34.89 vs 33.57, big improvement.
+
+The quality is scene-dependent. This is a valid observation.
+
+Now let me write the consolidated review.</think>Now I have enough information to write the final review. Let me verify one more critical claim from the harsh critic about the ablation and quality drops.
+
+The key factual findings from reading the paper:
+
+1. **View-dependent geometry in deformation** — Confirmed. Eq. (5)-(6) takes view direction `d_v` as input for deformation of center, scale, and rotations. This is not acknowledged as a design choice that departs from standard 4D scene representation.
+
+2. **Storage accounting** — Confirmed. MEGA uses FP16 + zip delta compression, while 4DGS baselines appear to use raw storage. The parameter count reduction (~46× on Flame Steak) is real but the 190× headline conflates representation changes with generic compression.
+
+3. **Ablation quality drops** — Confirmed for some scenes. Flame Steak: 33.19 (4DGS) → 32.27 (MEGA), an ~0.9 dB drop. But Birthday improves 31.00 → 32.02.
+
+4. **Opaque "×" notation in Eq. (6)** — Confirmed ambiguous. Not clear if it's element-wise or quaternion multiplication.
+
+5. **No time-only vs view-conditioned deformation ablation** — Confirmed. Missing and important.
+
+---
+
 ## Summary
 
-The paper proposes MEGA, a memory-efficient variant of 4D Gaussian Splatting for dynamic scenes. It reduces per-Gaussian color storage by replacing 4D spherical harmonics with a per-Gaussian DC color and a shared temporal/view-dependent AC predictor, and reduces the number of Gaussians through a temporal-viewpoint-aware deformation field plus opacity entropy regularization. The empirical results show very large disk-storage reductions relative to the original 4DGS baseline while maintaining roughly comparable rendering quality and real-time FPS, but several claims are overstated and the deformation design raises a substantive representation-consistency concern.
+MEGA proposes a memory-efficient framework for 4D Gaussian Splatting that achieves dramatic storage reductions (~190× on Technicolor, ~125× on Neural 3D Video vs. original 4DGS) through two key innovations: (1) a DC-AC color decomposition that replaces 144 per-Gaussian SH coefficients with a 3-parameter DC component plus a shared MLP predictor, and (2) an entropy-constrained deformation technique that expands each Gaussian's action range while aggressively pruning via opacity entropy regularization.
 
 ## Strengths
 
-- **Very strong storage reduction relative to the original 4DGS baseline, with competitive quality.** On Technicolor, Table 1 reports 4DGS at 6107.07MB versus MEGA at 32.45MB, while PSNR improves from 32.07 to 33.57 and FPS from 55.26 to 83.14. On Neu3DV, Table 2 reports 3128.00MB for 4DGS versus 25.05MB for MEGA, with very similar average PSNR/LPIPS: 31.57/0.0573 for 4DGS versus 31.49/0.0568 for MEGA.
-- **The DC/AC color decomposition is concrete, simple, and empirically well supported.** The method replaces the 144-parameter 4D SH color representation with a 3-parameter DC component plus a shared MLP predictor, and Table 3 shows that “w/ DAC” preserves or improves quality much better than the grid-based compact replacement: e.g., Birthday PSNR 31.60 for DAC versus 30.49 for grid, and Flame Steak 33.34 versus 31.07.
-- **The paper evaluates on two relevant dynamic-scene benchmarks and reports multiple practical metrics.** The experiments cover Technicolor and Neural 3D Video, and the tables include PSNR, DSSIM, LPIPS, FPS, and storage, which are the right axes for a compression-oriented dynamic rendering paper.
-- **The combined deformation/opacity mechanism does substantially reduce Gaussian counts in the reported ablations.** For example, on Birthday, Table 3 reduces 15.43M Gaussians / 308.65M parameters for DAC to 0.91M / 18.48M for DAC+Deformation+\(\mathcal{L}_{opa}\), while PSNR increases from 31.60 to 32.02. This is meaningful evidence that the method is not only compressing attributes but also reducing representation size structurally.
+- **Large, real storage reduction with competitive or improved quality**: The parameter count drops from ~831M (4DGS on Flame Steak) to ~18M while maintaining comparable PSNR, verified in the ablation table. On Technicolor, MEGA improves PSNR over 4DGS (33.57 vs 32.07) with a 190× storage reduction (Table 1). The ablation table (Table 3) shows that the DAC representation alone achieves an ~8× per-Gaussian parameter reduction without quality loss, and the full method reduces Gaussian counts from 13M to 0.91M on Birthday while improving PSNR from 31.00 to 32.02.
+
+- **Well-motivated decomposition of SH coefficients**: The DC-AC color decomposition correctly identifies that 144/161 parameters are SH coefficients and proposes a sensible alternative. The ablation shows the grid-based replacement from prior work degrades PSNR (30.49 vs 31.00 on Birthday), while DAC improves it (31.60), validating the design.
+
+- **Comprehensive baseline comparisons**: The paper compares against both NeRF-based (DyNeRF, HexPlane, MixVoxels, etc.) and Gaussian-based methods (Deformable 3DGS, STG, E-D3DGS, 4DGS) on two established benchmarks, and reruns key baselines on the same GPU.
 
 ## Weaknesses
 
@@ -17,87 +83,72 @@ None.
 
 ### Major
 
-- **The deformation field makes geometry view-dependent, which weakens the claim that MEGA is simply a compact 4D scene representation.** In Eq. (5), the deformation predictor is conditioned on the view direction \(\gamma(\mathrm{sg}(\boldsymbol d_v))\), and in Eq. (6) this predicted deformation is applied to the 4D center, scale, and rotations. Thus, not only color but also the Gaussian geometry changes with camera viewpoint. This may be effective for image synthesis, but it is a stronger modeling choice than compressing a view-independent dynamic 4D scene representation. The paper does not evaluate multi-view consistency or compare against a time-only deformation field, so it is unclear how much of the compression/quality gain comes from a coherent dynamic representation versus a compact view-conditioned renderer.
+- **View-conditioned deformation changes the nature of the representation, and this is neither disclosed nor evaluated for consistency consequences.** The deformation predictor (Eq. 5) takes the view direction `d_v` as input and modifies Gaussian center, scale, and rotations — meaning the same scene at the same time instant is represented by different geometry depending on the observing camera. This is a significant conceptual departure from a coherent 4D scene representation. While NeRF also conditions on view direction, it only modifies color; modifying geometry with the viewpoint means MEGA is closer to a view-conditioned renderer than a 4D scene representation. The paper never acknowledges this distinction and frames MEGA as a "memory-efficient 4D Gaussian scene representation." The lack of any time-only-deformation ablation makes it impossible to assess how much of the compression/quality gain comes from this non-physical degree of freedom. This matters because if view-dependent deformation is doing heavy lifting in reducing Gaussian count (by letting each Gaussian warp differently per view), the method's core claim of "efficiently representing dynamic 3D scenes" is weakened.
 
-- **The headline compression ratios are not fully established under a common accounting protocol.** The paper states that, after optimization, MEGA parameters are stored in FP16 and then zip delta compressed, and the abstract claims approximately \(190\times\) and \(125\times\) reductions compared with 4DGS. However, the paper does not clearly state that the same FP16/lossless-compression protocol is applied to the 4DGS baseline and other Gaussian baselines in Tables 1–2. The results still show that MEGA is much smaller, but the precise headline ratios mix learned representation changes with serialization/compression choices unless all methods are measured under the same protocol or the table separates raw, FP16, and lossless-compressed sizes.
-
-- **The ablation evidence for the entropy-constrained deformation mechanism is mixed.** Table 3 supports the DAC color representation well, and the final model often greatly reduces Gaussian count. However, the deformation+opacity combination is not uniformly quality-preserving: on Flame Steak, DAC+\(\mathcal{L}_{opa}\) obtains 33.45 PSNR with 2.76M Gaussians, while the final DAC+Deformation+\(\mathcal{L}_{opa}\) drops to 32.27 PSNR with 0.87M Gaussians, below the 4DGS baseline at 33.19. This does not invalidate the compression result, but it weakens the claim in Sec. 4.3 that the combination maintains 4DGS-comparable quality in general. A rate–distortion analysis would be needed to show that the final method is consistently on the best quality/storage frontier.
-
-- **Comparative claims against the broader SOTA are overstated.** The paper is convincing relative to original 4DGS on storage, but the evidence does not support broad “new standard” or generally superior quality/speed claims. In Table 1, STG has better DSSIM and LPIPS than MEGA on Technicolor despite lower PSNR. In Table 2, STG has higher PSNR and much higher FPS than MEGA on Neu3DV, and E-D3DGS has much better LPIPS with only moderately larger storage. The paper should frame MEGA’s contribution as an excellent compactness/quality tradeoff relative to 4DGS, not as uniformly better across all quality, speed, and storage metrics.
+- **Headline compression ratios conflate representation compression with generic post-processing.** Tables 1–2 report 190× and 125× storage reductions vs. 4DGS, but MEGA's storage includes FP16 quantization and zip delta compression while 4DGS's reported storage (6107MB, 3128MB) appears to be raw FP32 without compression. The ablation table reports parameter counts, showing genuine ~10–46× reductions — impressive on their own. But the 190× figure is not a rate-distortion comparison under a shared serialization protocol. A fair comparison would apply the same FP16 + zip treatment to 4DGS, or report parameter counts as the primary metric. The headline overclaims by roughly 3–4× beyond what the representation itself achieves.
 
 ### Minor
 
-- **The paper emphasizes memory efficiency but primarily reports disk storage.** The motivation repeatedly mentions memory/storage constraints, but the experiments report model size on disk rather than peak GPU memory during training or rendering. Because MEGA introduces AC color and deformation MLPs evaluated during rendering, reporting runtime memory would clarify whether the method is also memory-efficient in the operational sense, not only compact on disk.
+- **Quality degradation on some scenes is understated.** On Flame Steak (Neu3DV), the full MEGA model drops from 33.19 (4DGS baseline) to 32.27 PSNR — a 0.9 dB loss — while the ablation shows DAC+Lopa without deformation maintains 33.45. The aggressive Gaussian reduction harms some scenes, but the paper's narrative emphasizes maintaining "comparable quality." This tradeoff should be more transparently discussed.
 
-- **The storage contribution would be clearer with a component breakdown.** Since MEGA stores per-Gaussian parameters, AC/deformation MLP parameters, FP16 values, and zip-compressed outputs, a table separating these components would help readers understand which part of the reported gains comes from DAC, Gaussian count reduction, precision conversion, and lossless compression.
+- **The notation "×" in Eq. (6) is ambiguous.** The multiplicative updates `μ_{4D} × m_{μ_{4D}}`, `q_l × m_{q_l}` are not clearly defined. For quaternions, this could mean either element-wise or quaternion multiplication, and for positions, multiplicative deformation is unusual and coordinate-frame dependent. This is not a fatal issue but should be clarified for reproducibility.
 
-- **FPS comparisons are partially heterogeneous.** The paper states that Deformable 3DGS, E-D3DGS, STG, and 4DGS are reproduced on a single A800 GPU, while other baselines are copied from original papers. This is acceptable if used cautiously, but the paper should avoid strong speed-ranking claims across methods measured under different implementations/hardware.
-
-- **The selected ablation set is small for a mechanism that can fail on one of four shown scenes.** The ablation covers two Technicolor and two Neu3DV scenes. Since Flame Steak shows a large degradation for the final deformation+opacity model, dataset-wide ablations or at least additional failure-case analysis would make the conclusions more robust.
+- **The opacity entropy loss in Eq. (7) omits the (1−o)log(1−o) term.** The paper defines `L_opa = -(1/N)Σ o_j log(o_j)`, which is not standard binary entropy but rather a one-sided push toward zero or one. This is not incorrect per se, but the naming ("entropy") and behavior should be explained more carefully since the standard binary entropy would push opacity toward exactly 0 or 1, while this formulation also pushes but asymmetrically.
 
 ### Trivial
 
-None.
+- The conclusion's claim that these results "set a new standard in the field" is somewhat strong given the caveats above.
 
 ## Nice-to-Haves
 
-- Compare time-only deformation against time+view deformation to separate dynamic-scene modeling gains from view-conditioned geometry warping.
-- Add rate–distortion curves over storage/Gaussian count for MEGA variants and 4DGS variants, rather than reporting only a single operating point.
-- Report Gaussian participation statistics across all evaluated scenes, since the motivation in Fig. 3 is based primarily on Birthday.
-- Include qualitative/quantitative temporal consistency or multi-view consistency analysis, especially because the method changes geometry as a function of view direction.
+- A time-only deformation ablation (removing viewpoint conditioning from the deformation MLP) would clarify whether view-dependent geometry is essential to the compression gains.
+- Fair storage comparison: report both FP32 and FP16 storage sizes (with and without zip) for 4DGS and key baselines.
+- Stereo or multi-view consistency evaluation, or at minimum rendering along smooth novel camera paths to check for view-dependent geometric instability.
+- A rate-distortion curve across different opacity regularization weights rather than a single operating point.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution.
+These points are flagged to be removed, treat them with caution:
 
-- **Generic “important problem” strength.** The claim that reducing 4DGS storage is important is true but generic; it is not retained as a core strength without concrete evidence. The concrete storage/quality results are retained instead.
-- **Pure reproducibility nitpicks about small implementation details.** Concerns such as not specifying every pruning interval or minor hyperparameter are not central enough to count as evaluation weaknesses, especially because the paper gives a reasonably detailed implementation section and says it follows the original 4DGS hyperparameter settings for several thresholds.
-- **Formatting, notation, or typo-like issues.** Any issues caused by PDF extraction or minor notation inconsistencies are excluded under the review instructions.
-- **Requests for missing related work.** These are not included because external completeness of citations cannot be reliably verified here.
-- **Statistical variation / confidence interval concerns.** While repeated runs could be useful, single-run evaluation is common in large-scale neural rendering benchmarks; this is not treated as a substantive flaw.
-- **Overly broad criticism that the method is not “memory-efficient” because it introduces MLPs.** The MLPs may affect runtime memory and should be measured, but the reported storage reductions are real and large, so this concern is kept only as a minor request for runtime-memory reporting rather than a rejection-level issue.
+- **"Abstract's claim that MEGA maintains comparable rendering speeds" is misleading on Neu3DV.** Removed: The FPS difference (77.42 vs 96.69) is modest and MEGA is still very fast at 77 FPS. Calling this "comparable" is reasonable.
+
+- **Missing related works on view-independent vs. view-conditioned scene representations.** Removed per instructions: We cannot confirm whether specific uncited works exist.
+
+- **Under-specified architectural details (hidden dimensions, positional encoding length L, activation functions).** Demoted to trivial and mostly removed: Implementation details section does give learning rates and hyperparameters. The MLP architecture could be guessed reasonably. Not a substantive weakness.
+
+- **Reproducibility of FPS measurements and whether MLP inference cost is included.** Removed per instructions: This is a minor reproducibility nitpick that falls under "undisclosed hyperparameters/implementation details."
+
+- **"Half-precision training" is unclear about whether it refers to mixed precision or final storage only.** Removed: The paper states "During the optimization phase, we adopt half-precision training" and "store these learnable parameters in the FP16 format" — this is clear enough.
+
+- **Missing per-scene results for all main metrics.** Demoted to nice-to-have: The paper does provide some per-scene results in the ablation, and the averages on two benchmarks are standard.
+
+- **Stop-gradient choices are not justified.** This is a minor design choice that is common practice in neural rendering (to stabilize training). Demoted to trivial and removed from main weaknesses.
 
 ## Novel Insights
 
-The most important synthesis is that MEGA appears to be a genuinely effective *compact renderer* for dynamic Gaussian scenes, but its most aggressive compression mechanism changes the semantics of the representation: view-conditioned color is standard, while view-conditioned geometry is a much stronger choice. This distinction matters because the paper’s empirical story is strongest when framed as “storage-efficient novel-view synthesis relative to 4DGS,” but weaker when framed as “compressing a coherent 4D scene representation” or “setting a new standard” across all quality/speed/storage axes.
+The core tension in this paper is between two valid framings: as a compression method (where the results are genuinely impressive — an order-of-magnitude parameter reduction with maintained quality), and as a "4D Gaussian scene representation" (where the view-conditioned deformation makes the representation conceptually unsound as a coherent 4D scene). The paper positions itself as the latter but provides evidence primarily for the former. The DC-AC color decomposition is a clean, well-validated contribution on its own. The deformation module's strength (reducing Gaussian count) and weakness (view-dependent geometry) are two sides of the same coin — giving the model more flexibility allows it to use fewer Gaussians, but at the cost of physical coherence. The paper would be significantly stronger with a time-only deformation variant, and with honest framing about what kind of representation MEGA actually is.
 
 ## Suggestions
 
-- Reframe the contribution more precisely: emphasize compact dynamic Gaussian rendering relative to 4DGS, and avoid claiming broad SOTA superiority unless supported across PSNR, DSSIM, LPIPS, FPS, and storage.
-- Apply the same storage protocol to all Gaussian baselines, or report a breakdown with raw FP32 size, FP16 size, lossless-compressed size, and learned-representation savings.
-- Add an ablation comparing deformation inputs: time-only, view-only, and time+view deformation; also evaluate multi-view consistency if geometry remains view-dependent.
-- Add rate–distortion curves across storage/Gaussian count for 4DGS, DAC, DAC+\(\mathcal{L}_{opa}\), DAC+Deformation, and the final model.
-- Analyze failure cases such as Flame Steak, where the final model loses more than 1 dB relative to DAC+\(\mathcal{L}_{opa}\).
-- Report peak GPU memory during training/rendering and a storage breakdown for per-Gaussian parameters versus MLP parameters and compression effects.
+- Reframe the contribution: emphasize that MEGA is a "view-conditioned compact rendering model" and separately analyze how much of the performance comes from time-only vs. time+view deformation. If view conditioning is essential for the dramatic Gaussian reduction, acknowledge this as a design tradeoff rather than hiding it.
 
-## Score and Decision
+- Report fair storage comparisons: provide FP32 raw sizes for all methods alongside the compressed numbers, and state clearly what post-processing is applied to each.
 
-**Assessment by axis.**  
-Originality is good: the DC/AC color replacement and entropy-constrained deformation are meaningful adaptations to 4DGS compression. The research question is important and practically relevant. The empirical support is strong for storage reduction relative to original 4DGS, but less strong for the precise headline compression ratios, the claimed deformation mechanism, and broader SOTA claims. Experimental soundness is mostly adequate but missing fair/common storage accounting, rate–distortion curves, and a key time-only deformation control. Clarity is generally good, though the paper should more explicitly discuss the implications of view-dependent geometry. The value to the community is meaningful, especially for dynamic Gaussian compression, but the overclaiming and representation-consistency issue prevent a stronger score.
+- Add a time-only deformation ablation (remove `d_v` from the deformation MLP input) and report whether quality/compression is maintained.
 
-**Calibration anchors considered.**
+## Calibration and Score Assessment
 
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/okD9dbifxa.md`, avg 5.83 — dynamic/4D Gaussian work with useful ideas but concerns; MEGA has stronger compression evidence but similar overclaim/validation issues.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/dkrEoT68by.md`, avg 6.00 — accepted dynamic Gaussian reconstruction anchor; MEGA is comparable in contribution strength but has more serious accounting/semantic concerns.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/c1RhJVTPwT.md`, avg 6.50 — Swift4D, a compact dynamic Gaussian method accepted despite concerns about decomposition and generalization; MEGA is similarly relevant but somewhat more problematic due to view-dependent geometry.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/xy9yv5siYQ.md`, avg 5.25 — dynamic Gaussian reconstruction with weaker setup; MEGA is stronger empirically.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/DCandSZ2F1.md`, avg 6.50 — accepted 3DGS compression with strong results and some methodology/ablation concerns; MEGA is close but has a more central representation concern.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/PbheqxnO1e.md`, avg 7.00 — high-scoring Gaussian compression with strong storage results; MEGA’s results are impressive but less cleanly supported.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/dHYwfV2KeP.md`, avg 5.75 — accepted locality-aware Gaussian compression; MEGA fits around this borderline-to-accept range.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/JbRM5QKRDd.md`, avg 6.25 — entropy-constrained Gaussian/video compression anchor; MEGA has comparable motivation and results but weaker mechanism isolation.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/1PZt5nFlzH.md`, avg 5.00 — compression paper with strong claims but missing rate-size exploration and insufficient ablations; MEGA shares some weaknesses but has stronger top-line empirical gains.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/m3KuuE2ozw.md`, avg 6.00 — 3DGS compression with fair-comparison and ablation concerns; MEGA is similar in severity.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/P2Fjm0nIit.md`, avg 4.33 — NeRF compression rejected for limited novelty and incomplete cost/storage breakdown; MEGA is substantially stronger because the compression gains against 4DGS are large and directly demonstrated.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ZWi6RpT4mJ.md`, avg 3.50 — weak compression/INR anchor; MEGA is clearly above this due to stronger experiments and relevance.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/POFrdKvpea.md`, avg 7.00 — high-scoring neural field compression; MEGA is below this because its claims require more careful accounting and controls.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/2prShxdLkX.md`, avg 6.75 — high-band dynamic Gaussian anchor; MEGA is somewhat below due to conceptual ambiguity.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/nkeF3iRJRo.md`, avg 5.00 — medium dynamic-scene Gaussian anchor; MEGA is stronger empirically.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ylgg2RE7ub.md`, avg 4.00 — low-band dynamic Gaussian paper with limited novelty/experimental design concerns; MEGA is clearly stronger.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/zFfZEQHUiv.md`, avg 4.00 — low-band pose-free dynamic neural field/Gaussian anchor; MEGA is above this due to clearer contribution and results.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/hrXt6Fdl2P.md`, avg 2.60 — low-scoring free-viewpoint video compression anchor; MEGA is far stronger.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/GSckuQMzBG.md`, avg 3.00 — low-scoring NeRF/inverse-graphics compression anchor; MEGA is far stronger.
+**Anchors consulted:**
+- **Swift4D** (4DGS, compression, avg 6.5, Accept): Addresses similar dynamic scene compactness via divide-and-conquer with 30MB storage. Reviewers flag evaluation concerns but accept. MEGA has larger compression gains but also a more significant conceptual issue (view-dependent geometry).
+- **Lightweight Predictive 3DGS** (3DGS compression, avg 7.0, Accept): Achieves compression via tree structure. Fairness of storage comparison flagged. MEGA is comparable in contribution quality but with a more concerning representational issue.
+- **LocoGS** (3DGS compression, avg 5.75, Accept): Exploits spatial coherence for compression. Less novel methodologically; had storage accounting concerns similar to MEGA's.
+- **CAT-3DGS** (3DGS compression, avg 6.0, Accept): Rate-distortion optimization for 3DGS; well-designed ablations; concerns about decoding complexity.
+- **IF-MoDGS** (dynamic GS, avg 4.0, Reject): Dynamic GS with fundamental methodological issues, novelty concerns.
+- **WATER-GS** (3DGS watermarking, avg 4.0, Reject): View-inconsistent extraction, fundamental conceptual concerns.
 
-Relative to these anchors, this paper sits above the low and medium rejected compression papers because it has a clear method and very strong 4DGS-relative empirical reductions. It is below the cleaner accepted 6.5–7.0 Gaussian compression anchors because the view-dependent geometry design, storage-accounting ambiguity, and mixed deformation ablation directly affect the paper’s central framing. I would place it at the borderline accept/reject boundary, leaning slightly positive because the practical contribution is substantial and the main storage result relative to 4DGS remains meaningful even if the exact ratio is adjusted.
+MEGA's core compression contributions (DC-AC decomposition, opacity entropy for Gaussian reduction) are solid and empirically validated. The view-dependent deformation is a real concern but is not necessarily fatal — it may produce good results in practice because training across all viewpoints constrains the deformation to be mostly time-dependent. The storage comparison fairness is a real but partially addressable issue (the parameter count reduction is clean). Compared to Swift4D (6.5, Accept) and LocoGS (5.75, Accept), MEGA has stronger compression results but a more significant conceptual weakness. Compared to WATER-GS (4.0, Reject) and IF-MoDGS (4.0, Reject), MEGA's issues are less severe and its contributions are more substantial.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>  
-MY FINAL DECISION: <orange>Accept</orange>
+The view-dependent geometry concern is genuine but doesn't completely invalidate the method — it works well empirically and the core ideas (DAC, entropy regularization) are sound. This is a borderline paper that would benefit significantly from revision: a time-only ablation, fair storage, and reframing. I would rate it below the confident accepts in this space (Swift4D at 6.5, Lightweight Predictive 3DGS at 7.0) but above the clear rejects (IF-MoDGS at 4.0, WATER-GS at 4.0).
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

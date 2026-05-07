@@ -35,7 +35,7 @@ Your calibration process:
 
 4. Score relative to anchors: your final score should be positioned relative to the retrieved examples. If retrieved papers with similar strengths got 7s from humans, and papers with similar weaknesses got 3s, use that range. Do not compress everything into 4-6.
 
-5. Score from the anchors, not from how the merged review reads. Papers with many listed weaknesses can still score high if their anchors did. Lean on the anchor range when your gut disagrees with it.
+5. Score from the anchors, not from how the merged review reads. Papers with many listed weaknesses can still score high if their anchors did. Lean on the anchor range when your gut disagrees with it. Even a good paper could have many weaknesses that won't hurt the main contribution. Do not treat the number of weaknesses as a signal for bad paper; focus on the content of the weaknesses and retrieved reviews. 
 
 Retrieval is noisy — a single 8 or 3 doesn't pin your score. Use the center of the anchor cluster, weighted by topical similarity, and move outside that range only if the paper clearly beats or falls below most of the anchors.
 
@@ -46,7 +46,7 @@ When reporting your score, briefly state which calibration papers you compared a
 You can use read_file to read the returned anchor files for more detail. List every anchor paper you retrieved, not only the ones that ended up shaping your final score — papers you looked at and decided did not fit are still part of the reasoning and must be shown. For each anchor give the path, its avg human score, and one sentence on how it compares to the paper under review. The list must include at least one low-scoring paper (avg score <=4), one medium-scoring paper, and one high-scoring paper (avg score >=6).
 
 Let the score distribution follow the actual quality of the paper relative to the calibration examples.
-The samples could be concentrated in the middle, that does not mean you have to score it in the middle as well.
+&& The samples could be concentrated in the middle, that does not mean you have to score it in the middle as well.
 
 There are less papers with extreme scores, so if the paper is truly exceptional or truly weak, it is okay to give it an extreme score even if most found papers are in the middle. You can also try to ask `calibration_search` for more papers with extreme scores to see what made a paper really good/bad.
 

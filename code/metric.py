@@ -304,6 +304,8 @@ def analyze_and_plot(path):
     # remove -1 lines
     df = df[df["pred_score"] >= 0]
     gt_score_cols = [c for c in df.columns if c.startswith("gt_score_")]
+    if "position" in path:
+        df["pred_score"] = df["pred_score"]/2
 
     # Filter out rows where pred_score is missing (ERROR / failed papers)
     n_total = len(df)
