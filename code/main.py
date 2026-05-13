@@ -10,6 +10,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+from pydantic import BaseModel
 
 
 def _extract_cli_arg(flag: str) -> str | None:
@@ -180,8 +181,14 @@ else:
     if _NO_CAL:
         _merger_tools = [read_file, grep_file]
     else:
+        class CalibrationQuery(BaseModel):
+            query: str
+            n: int = 4
+            low_score: float = 0.0
+            high_score: float | None = 10.0
+
         @function_tool
-        def calibration_search(queries: list[dict]) -> str:
+        def calibration_search(queries: list[CalibrationQuery]) -> str:
             """Classic RAG retrieval over the human-review corpus.
 
             Pass a batch of queries; each runs vector search and returns top-n
@@ -196,13 +203,10 @@ else:
                 raise ValueError("calibration_search: 'queries' must be a non-empty list of query objects.")
             sections = []
             for i, q in enumerate(queries, 1):
-                if not isinstance(q, dict) or "query" not in q:
-                    raise ValueError(f"calibration_search: query #{i} must be an object with a 'query' field.")
-                qtext = str(q["query"])
-                n = int(q.get("n", 4) or 4)
-                low_score = float(q.get("low_score", 0.0) or 0.0)
-                hs = q.get("high_score", 10.0)
-                high_score = float(hs if hs is not None else 10.0)
+                qtext = q.query
+                n = q.n
+                low_score = q.low_score
+                high_score = 10.0 if q.high_score is None else q.high_score
                 body = _search_file_impl(qtext, n, "vector", low_score, high_score)
                 sections.append(
                     f"### Query {i}: {qtext!r}  (n={n}, score=[{low_score}, {high_score}])\n{body}"
