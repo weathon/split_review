@@ -483,8 +483,13 @@ async def process_papers(papers: list[dict], papers_dir: Path, skip_scoring: boo
             try:
                 result = await run_pipeline(str(paper_path), skip_scoring=skip_scoring, no_cal=no_cal)
             except Exception as e:
-                raise RuntimeError(f"[{pid}] pipeline failed: {e}") from e
+                msg = f"[{pid}] pipeline failed, skipping paper: {type(e).__name__}: {e}"
+                print(f"  ⚠️  WARNING: {msg}")
+                _error_logger.error(msg)
+                return
             if result is None:
+                print(f"  ⚠️  WARNING: [{pid}] pipeline returned None, skipping paper")
+                _error_logger.error(f"[{pid}] pipeline returned None")
                 return
             callback(paper_info, result)
 
@@ -493,13 +498,11 @@ async def process_papers(papers: list[dict], papers_dir: Path, skip_scoring: boo
 
 # ── Benchmark ────────────────────────────────────────────────────────
 
-async def run_benchmark(data_dir: str, n_samples: int = 10, seed: int = 42, balanced: bool = False, no_cal: bool = False, include_cal_papers: bool = False):
+async def run_benchmark(data_dir: str, n_samples: int = 10, seed: int = 42, balanced: bool = False, no_cal: bool = False, include_cal_papers: bool = False, reviews_dir: str | Path | None = None):
     data_path = Path(data_dir)
-    cal_ids = set() if include_cal_papers else {i.split(".")[0] for i in os.listdir(HUMAN_REVIEW_DIR) if i.endswith(".md")}
-
     gt_data, papers_dir = load_ground_truth(data_path)
-    available = [r for r in gt_data if (papers_dir / f"{r['paper_id']}.txt").exists() and r["paper_id"] not in cal_ids]
-    print(f"Available papers: {len(available)} (excluded {len(cal_ids)} calibration)")
+    available = [r for r in gt_data if (papers_dir / f"{r['paper_id']}.txt").exists()]
+    print(f"Available papers: {len(available)}")
 
     if balanced:
         samples = stratified_sample(available, n_per_bin=max(1, n_samples // 10), seed=seed)
@@ -508,11 +511,23 @@ async def run_benchmark(data_dir: str, n_samples: int = 10, seed: int = 42, bala
         print(f"Random sample: {len(samples)} papers")
     samples = samples[:int(os.environ.get("MAX_PAPERS", len(samples)))]  # allow limiting number of papers via env var but keep order
 
+    # Mutually exclude test-vs-calibration: rather than dropping calibration
+    # papers from the test pool, drop test-pool paper IDs from the calibration
+    # search corpus so a paper can never be retrieved as its own anchor.
+    if not include_cal_papers:
+        from tools import set_excluded_paper_ids
+        set_excluded_paper_ids({s["paper_id"] for s in samples})
+
     csv_path = Path(os.getenv("OUTPUT_CSV", str(RESULTS_DIR / "bench_scores.csv")))
     if not csv_path.is_absolute():
         csv_path = RESULTS_DIR / csv_path
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    reviews_dir = RESULTS_DIR / "bench_reviews"
+    if reviews_dir is None:
+        reviews_dir = Path(os.getenv("REVIEWS_DIR", str(RESULTS_DIR / "bench_reviews")))
+    else:
+        reviews_dir = Path(reviews_dir)
+    if not reviews_dir.is_absolute():
+        reviews_dir = RESULTS_DIR / reviews_dir
     reviews_dir.mkdir(parents=True, exist_ok=True)
 
     # Check for existing results and ask user whether to continue or overwrite
@@ -699,14 +714,15 @@ if __name__ == "__main__":
     parser.add_argument("--n_samples", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--balanced", action="store_true")
-    parser.add_argument("--calibration_set", choices=["2025", "2026"], default=os.getenv("CALIBRATION_SET", "2025"))
+    parser.add_argument("--calibration_set", choices=["deepreview", "2025", "2026"], default=os.getenv("CALIBRATION_SET", "deepreview"))
     parser.add_argument("--no_cal", action="store_true", help="Skip calibration sample search; score based on paper merits alone")
-    parser.add_argument("--include_cal_papers", action="store_true", help="Do not exclude calibration-set paper IDs from the benchmark pool")
+    parser.add_argument("--include_cal_papers", action="store_true", help="Do not exclude test paper IDs from the calibration search corpus (default: exclude, so a paper cannot anchor itself)")
     parser.add_argument("--position", action="store_true", help="Use position paper prompts and calibration dataset")
     parser.add_argument("--accept_csv", type=str, default=None, help="Path to bench CSV; predict acceptance rate at predicted score and ±0.5")
+    parser.add_argument("--reviews_dir", type=str, default=None, help="Directory to save per-paper review markdown files (default: RESULTS_DIR/bench_reviews)")
     args = parser.parse_args()
 
     if args.single_paper:
         asyncio.run(run_single_paper(args.single_paper, no_cal=args.no_cal, accept_csv=args.accept_csv))
     elif args.benchmark:
-        asyncio.run(run_benchmark(args.benchmark, n_samples=args.n_samples, seed=args.seed, balanced=args.balanced, no_cal=args.no_cal, include_cal_papers=args.include_cal_papers))
+        asyncio.run(run_benchmark(args.benchmark, n_samples=args.n_samples, seed=args.seed, balanced=args.balanced, no_cal=args.no_cal, include_cal_papers=args.include_cal_papers, reviews_dir=args.reviews_dir))

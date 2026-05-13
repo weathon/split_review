@@ -4,16 +4,37 @@ import os
 from paths import DATASETS_DIR, ensure_hf_file
 
 _position_mode = os.getenv("POSITION_MODE", "").strip().lower() in ("1", "true", "yes")
+_calibration_env = os.getenv("CALIBRATION_SET", "deepreview").strip().lower()
 if _position_mode:
+    if _calibration_env not in ("", "deepreview", "position"):
+        raise ValueError(
+            f"POSITION_MODE is set but CALIBRATION_SET={_calibration_env!r}; "
+            "these are mutually exclusive (unset CALIBRATION_SET or POSITION_MODE)."
+        )
     CALIBRATION_REVIEW_DIR = str((DATASETS_DIR / "neurips_position_human_review").resolve())
     _embeddings_path = ensure_hf_file("human_reviews_embeddings_position.pkl")
     _score_index_path = ensure_hf_file("human_review_score_index_position.pkl")
     _calibration_set = "position"
-else:
+elif _calibration_env in ("2025", "iclr2025"):
+    CALIBRATION_REVIEW_DIR = os.path.expanduser("~/review_agent/human_reviews")
+    _embeddings_path = os.path.expanduser("~/review_agent/new/human_reviews_embeddings.pkl")
+    _score_index_path = os.path.expanduser("~/review_agent/new/human_review_score_index.pkl")
+    _calibration_set = "iclr2025"
+elif _calibration_env in ("2026", "iclr2026"):
+    CALIBRATION_REVIEW_DIR = os.path.expanduser("~/review_agent/human_reviews_2026")
+    _embeddings_path = os.path.expanduser("~/review_agent/new/human_reviews_embeddings_2026.pkl")
+    _score_index_path = os.path.expanduser("~/review_agent/new/human_review_score_index_2026.pkl")
+    _calibration_set = "iclr2026"
+elif _calibration_env in ("", "deepreview"):
     CALIBRATION_REVIEW_DIR = str((DATASETS_DIR / "deepreview_13k_calibration").resolve())
     _embeddings_path = ensure_hf_file("human_reviews_embeddings_deepreview.pkl")
     _score_index_path = ensure_hf_file("human_review_score_index_deepreview.pkl")
     _calibration_set = "deepreview"
+else:
+    raise ValueError(
+        f"Unknown CALIBRATION_SET={_calibration_env!r}; expected one of "
+        "'deepreview', '2025', '2026' (or unset)."
+    )
 
 ALLOWED_PATHS = [CALIBRATION_REVIEW_DIR]
 
@@ -128,6 +149,27 @@ def grep_file(pattern: str, abs_path: str) -> str:
     return "\n".join(matches) if matches else "No matches found."
 
 
+EXCLUDED_PAPER_IDS: set[str] = set()
+
+
+def set_excluded_paper_ids(ids) -> None:
+    """Exclude these paper IDs (basename without extension) from calibration search results.
+
+    Used so that papers being scored in the current benchmark run are not also
+    retrieved as calibration anchors for themselves.
+    """
+    EXCLUDED_PAPER_IDS.clear()
+    EXCLUDED_PAPER_IDS.update(ids)
+    print(f"  [calibration] excluding {len(EXCLUDED_PAPER_IDS)} test paper id(s) from calibration search")
+
+
+def _is_excluded(basename: str) -> bool:
+    if not EXCLUDED_PAPER_IDS:
+        return False
+    pid = basename.rsplit(".", 1)[0]
+    return pid in EXCLUDED_PAPER_IDS
+
+
 def _search_file_impl(query: str, n: int, mode: str, low_score: float = 0.0, high_score: float = 10.0) -> str:
     print(f"  [search_file] query='{query}' mode='{mode}' n={n} score=[{low_score}, {high_score}]")
     if mode == "bm25":
@@ -136,6 +178,7 @@ def _search_file_impl(query: str, n: int, mode: str, low_score: float = 0.0, hig
         allowed_idx = [
             i for i, p in enumerate(files)
             if low_score <= _score_index.get(os.path.basename(p), -1.0) <= high_score
+            and not _is_excluded(os.path.basename(p))
         ]
         if not allowed_idx:
             return "No files in that score range."
@@ -153,7 +196,8 @@ def _search_file_impl(query: str, n: int, mode: str, low_score: float = 0.0, hig
         return "\n---\n".join(results) if results else "No relevant files found."
     elif mode == "vector":
         allowed_mask = np.array([
-            low_score <= _score_index.get(fn, -1.0) <= high_score for fn in filenames
+            low_score <= _score_index.get(fn, -1.0) <= high_score and not _is_excluded(fn)
+            for fn in filenames
         ])
         if not allowed_mask.any():
             return "No files in that score range."
