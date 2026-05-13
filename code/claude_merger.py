@@ -123,75 +123,83 @@ def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
         text = "\n".join(matches) if matches else "No matches found."
         return {"content": [{"type": "text", "text": text}]}
 
-    @tool(
-        "search_file",
-        "Search human reviews, optionally filtered by avg reviewer score. Args: query, n, mode ('bm25' or 'vector'), low_score (default 0), high_score (default 10). Filtering by score range is applied FIRST, then BM25/vector ranks over the filtered subset — use this to anchor calibration to a specific score band.",
-        {"query": str, "n": int, "mode": str, "low_score": float, "high_score": float},
-    )
-    async def _search_file(args: dict) -> dict:
-        time.sleep(random.uniform(0.5, 1.5))  # Simulate latency
-        query = args["query"]
-        n = args.get("n", 5)
-        mode = args.get("mode", "vector")
-        low_score = float(args.get("low_score", 0.0) or 0.0)
-        high_score = float(args.get("high_score", 10.0) if args.get("high_score") is not None else 10.0)
-        print(f"  [merger:search_file] query='{query}' n={n} mode='{mode}' score=[{low_score}, {high_score}]")
+    def _run_single_vector_query(query: str, n: int, low_score: float, high_score: float) -> str:
         score_index = _bm25_db.get("score_index", {})
-        if mode == "bm25":
-            bm25 = _bm25_db["bm25"]
-            files = _bm25_db["files"]
-            allowed_idx = [
-                i for i, p in enumerate(files)
-                if low_score <= score_index.get(os.path.basename(p), -1.0) <= high_score
-            ]
-            if not allowed_idx:
-                return {"content": [{"type": "text", "text": "No files in that score range."}]}
-            tokenized_query = query.split(" ")
-            doc_scores = bm25.get_scores(tokenized_query)
-            allowed_sorted = sorted(allowed_idx, key=lambda i: doc_scores[i], reverse=True)[:n]
-            results = []
-            for idx in allowed_sorted:
-                fpath = os.path.abspath(files[idx])
-                rel = doc_scores[idx]
-                avg = score_index.get(os.path.basename(fpath), -1.0)
-                with open(fpath, "r", errors="replace") as fh:
-                    content = fh.read()
-                results.append(f"{fpath}\navg_score: {avg:.2f}  bm25: {rel:.2f}\nfirst 1000 chars:\n{content[:1000]}\n")
-            text = "\n---\n".join(results) if results else "No relevant files found."
-        else:
-            vectors = _bm25_db["vectors"]
-            filenames = _bm25_db["filenames"]
-            allowed_mask = np.array([
-                low_score <= score_index.get(fn, -1.0) <= high_score for fn in filenames
-            ])
-            if not allowed_mask.any():
-                return {"content": [{"type": "text", "text": "No files in that score range."}]}
-            query_embedding = _or_client.embeddings.create(
-                model="google/gemini-embedding-001",
-                input=query,
-                encoding_format="float",
-            )
-            query_vector = np.array(query_embedding.data[0].embedding)
-            similarities = vectors @ query_vector.T
-            masked = np.where(allowed_mask, similarities, -np.inf)
-            top_indices = masked.argsort()[-n:][::-1]
-            results = []
-            for idx in top_indices:
-                if not np.isfinite(masked[idx]):
-                    break
-                fn = filenames[idx]
-                fpath = os.path.abspath(os.path.join(HUMAN_REVIEW_DIR, fn))
-                rel = similarities[idx]
-                avg = score_index.get(fn, -1.0)
-                with open(fpath, "r", errors="replace") as fh:
-                    content = fh.read()
-                results.append(f"{fpath}\navg_score: {avg:.2f}  sim: {rel:.2f}\nfirst 1000 chars:\n{content[:1000]}\n")
-            text = "\n---\n".join(results) if results else "No relevant files found."
-        return {"content": [{"type": "text", "text": text}]}
+        vectors = _bm25_db["vectors"]
+        filenames = _bm25_db["filenames"]
+        allowed_mask = np.array([
+            low_score <= score_index.get(fn, -1.0) <= high_score for fn in filenames
+        ])
+        if not allowed_mask.any():
+            return "No files in that score range."
+        query_embedding = _or_client.embeddings.create(
+            model="google/gemini-embedding-001",
+            input=query,
+            encoding_format="float",
+        )
+        query_vector = np.array(query_embedding.data[0].embedding)
+        similarities = vectors @ query_vector.T
+        masked = np.where(allowed_mask, similarities, -np.inf)
+        top_indices = masked.argsort()[-n:][::-1]
+        results = []
+        for idx in top_indices:
+            if not np.isfinite(masked[idx]):
+                break
+            fn = filenames[idx]
+            fpath = os.path.abspath(os.path.join(HUMAN_REVIEW_DIR, fn))
+            rel = similarities[idx]
+            avg = score_index.get(fn, -1.0)
+            with open(fpath, "r", errors="replace") as fh:
+                content = fh.read()
+            results.append(f"{fpath}\navg_score: {avg:.2f}  sim: {rel:.2f}\nfirst 1000 chars:\n{content[:1000]}\n")
+        return "\n---\n".join(results) if results else "No relevant files found."
+
+    @tool(
+        "calibration_search",
+        "Classic RAG retrieval over the human-review corpus. Pass a batch of queries; each runs vector search and returns top-n hits with avg human score and first 1000 chars. ONE call only — no iterative refining. Args: queries (list of {query: str, n?: int, low_score?: float, high_score?: float}).",
+        {
+            "type": "object",
+            "properties": {
+                "queries": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "n": {"type": "integer"},
+                            "low_score": {"type": "number"},
+                            "high_score": {"type": "number"},
+                        },
+                        "required": ["query"],
+                    },
+                }
+            },
+            "required": ["queries"],
+        },
+    )
+    async def _calibration_search(args: dict) -> dict:
+        queries = args.get("queries")
+        if not isinstance(queries, list) or not queries:
+            return {"content": [{"type": "text", "text": "ERROR: 'queries' must be a non-empty list of query objects."}], "is_error": True}
+        time.sleep(random.uniform(0.5, 1.5))
+        sections = []
+        for i, q in enumerate(queries, 1):
+            if not isinstance(q, dict) or "query" not in q:
+                sections.append(f"### Query {i}\nERROR: each query must be an object with a 'query' field.")
+                continue
+            qtext = str(q["query"])
+            n = int(q.get("n", 4) or 4)
+            low_score = float(q.get("low_score", 0.0) or 0.0)
+            hs = q.get("high_score", 10.0)
+            high_score = float(hs if hs is not None else 10.0)
+            print(f"  [merger:calibration_search] q{i}='{qtext}' n={n} score=[{low_score}, {high_score}]")
+            body = _run_single_vector_query(qtext, n, low_score, high_score)
+            sections.append(f"### Query {i}: {qtext!r}  (n={n}, score=[{low_score}, {high_score}])\n{body}")
+        return {"content": [{"type": "text", "text": "\n\n".join(sections)}]}
 
     tools = [_read_file, _grep_file]
     if not no_cal:
-        tools.append(_search_file)
+        tools.append(_calibration_search)
     return create_sdk_mcp_server(
         name="merger_fs",
         version="1.0.0",
@@ -204,47 +212,6 @@ with open(_prompt_path("cal_with.md"), "r") as _f:
 
 with open(_prompt_path("cal_without.md"), "r") as _f:
     CAL_INSTRUCTION_WITHOUT = _f.read()
-
-
-CALIBRATION_SUBAGENT_PROMPT = """You are a retrieval helper for the main merger agent. The main agent sends you a retrieval request (e.g. "find papers on face recognition privacy with high scores" or "find papers with weakness: unfair baseline comparison"), and you return a concise list of matching paper reviews.
-
-You have these tools (all under the mcp__merger_fs__ namespace):
-- search_file(query, n, mode, low_score=0, high_score=10): BM25 or vector search over human reviews, pre-filtered by the reviewer avg-score range. mode='vector' or 'bm25'. Set low_score/high_score to anchor to a band (e.g. low_score=7 for strong papers, high_score=3 for weak ones).
-- read_file(abs_path, start_line, end_line): read lines from a human review file.
-- grep_file(pattern, abs_path): substring search inside a single file.
-
-Workflow:
-1. Run 1-3 search_file calls to find candidate reviews matching the request. Use vector search for semantic queries and bm25 for literal keyword matches.
-2. Optionally skim promising candidates with read_file to confirm they match (especially to verify score/decision if the request specifies a score range).
-3. Return a list of matching papers. For each: the absolute file path and ONE sentence describing why it matches (the key weakness/strength/topic/score that makes it relevant).
-
-Output format (strict):
-- <abs_path>: <one-sentence reason, mentioning human score and decision if known>
-- <abs_path>: <one-sentence reason>
-...
-
-Constraints:
-- Return 3-8 papers, not more.
-- Do not produce a review, do not give calibration advice, do not compare the retrieved papers to the paper under review. The main agent handles all reasoning — you just retrieve.
-- Keep the whole response under 300 words.
-- Cap yourself at 6 tool calls total.
-- Search exactly for what the main agent asked. Do not broaden or narrow the request on your own.
-"""
-
-
-def _make_calibration_subagent():
-    from claude_agent_sdk import AgentDefinition
-
-    return AgentDefinition(
-        description="Retrieval helper for calibration anchors. Accepts a free-form retrieval request (e.g. 'find papers with weakness X' or 'find papers scored 7+ on topic Y') and returns 3-8 paper paths each with a one-sentence summary. Does not do calibration reasoning — just retrieves.",
-        prompt=CALIBRATION_SUBAGENT_PROMPT,
-        tools=[
-            "mcp__merger_fs__search_file",
-            "mcp__merger_fs__read_file",
-            "mcp__merger_fs__grep_file",
-        ],
-        model="haiku",
-    )
 
 
 async def _run_claude_sdk_query(
@@ -365,18 +332,15 @@ async def run_merger_claude_sdk(model_id: str, merger_prompt: str, paper_dir: st
 
     mcp_server = _make_merger_mcp_server(paper_dir, no_cal=no_cal)
 
-    # Main merger only gets read_file/grep_file. Calibration retrieval is
-    # delegated to the calibration_search subagent (invoked via Task) so its
-    # many search/read tool results don't accumulate in the main merger's
-    # context — only the subagent's short paper-list response does.
+    # Classic RAG: merger calls calibration_search once with a batch of queries,
+    # results are injected into context, merger optionally reads a few anchors
+    # in full via read_file, then writes the review. No subagent, no iteration.
     allowed_tools = [
         "mcp__merger_fs__read_file",
         "mcp__merger_fs__grep_file",
     ]
-    agents = None
     if not no_cal:
-        allowed_tools.append("Task")
-        agents = {"calibration_search": _make_calibration_subagent()}
+        allowed_tools.append("mcp__merger_fs__calibration_search")
 
     return await _run_claude_sdk_query(
         label="Merger",
@@ -385,6 +349,6 @@ async def run_merger_claude_sdk(model_id: str, merger_prompt: str, paper_dir: st
         user_prompt=merger_prompt,
         allowed_tools=allowed_tools,
         mcp_servers={"merger_fs": mcp_server},
-        agents=agents,
+        agents=None,
         max_turns=30,
     )

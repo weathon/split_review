@@ -30,7 +30,7 @@ if "--position" in sys.argv:
 _POSITION_MODE = os.environ.get("POSITION_MODE", "").strip().lower() in ("1", "true", "yes")
 
 from paths import prompt_path, RESULTS_DIR
-from tools import CALIBRATION_REVIEW_DIR, read_file, read_file_full, grep_file, search_file  # glob_files removed (unused)
+from tools import CALIBRATION_REVIEW_DIR, read_file, read_file_full, grep_file, search_file, _search_file_impl  # glob_files removed (unused)
 import weave
 weave.init("openai-agents")
 
@@ -172,31 +172,6 @@ neutral_reviewer = Agent(name="Strength Finder", instructions=load_prompts(_neut
 
 _NO_CAL = "--no_cal" in sys.argv
 
-CALIBRATION_SUBAGENT_INSTRUCTIONS = """You are a retrieval helper for the main merger agent. The main agent sends you a retrieval request (e.g. "find papers on face recognition privacy with high scores" or "find papers with weakness: unfair baseline comparison"), and you return a concise list of matching paper reviews.
-
-You have these tools:
-- search_file(query, n, mode, low_score=0, high_score=10): BM25 or vector search over human reviews, pre-filtered by the reviewer avg-score range. mode='vector' or 'bm25'. Set low_score/high_score to anchor to a band (e.g. low_score=7 for strong papers, high_score=3 for weak ones).
-- read_file(abs_path, start_line, end_line): read lines from a human review file.
-- grep_file(pattern, abs_path): substring search inside a single file.
-
-Workflow:
-1. Run 1-3 search_file calls to find candidate reviews matching the request. Use vector search for semantic queries and bm25 for literal keyword matches.
-2. Optionally skim promising candidates with read_file to confirm they match (especially to verify score/decision if the request specifies a score range).
-3. Return a list of matching papers. For each: the absolute file path and ONE sentence describing why it matches (the key weakness/strength/topic/score that makes it relevant).
-
-Output format (strict):
-- <abs_path>: <one-sentence reason, mentioning human score and decision if known>
-- <abs_path>: <one-sentence reason>
-...
-
-Constraints:
-- Return 3-8 papers, not more.
-- Do not produce a review, do not give calibration advice, do not compare the retrieved papers to the paper under review. The main agent handles all reasoning — you just retrieve.
-- Keep the whole response under 300 words.
-- Cap yourself at 6 tool calls total.
-- Search exactly for what the main agent asked. Do not broaden or narrow the request on your own.
-"""
-
 if MERGER_MODEL.startswith("claude_sdk:"):
     merger = None  # Claude SDK merger — created per-call in run_pipeline
     _MERGER_SDK_MODEL = MERGER_MODEL[len("claude_sdk:"):]
@@ -205,18 +180,36 @@ else:
     if _NO_CAL:
         _merger_tools = [read_file, grep_file]
     else:
-        _calibration_subagent = Agent(
-            name="Calibration Search",
-            instructions=CALIBRATION_SUBAGENT_INSTRUCTIONS,
-            tools=[search_file, read_file, grep_file],
-            model=resolve_model(SUBAGENT_MODEL),
-        )
-        _calibration_tool = _calibration_subagent.as_tool(
-            tool_name="calibration_search",
-            tool_description="Retrieve calibration anchors from the human-review corpus. Send a short retrieval request (topic / weakness / strength / score range). Returns a list of paper paths each with a one-sentence summary. Does not do calibration reasoning — just retrieves.",
-            max_turns=12,
-        )
-        _merger_tools = [read_file, grep_file, _calibration_tool]
+        @function_tool
+        def calibration_search(queries: list[dict]) -> str:
+            """Classic RAG retrieval over the human-review corpus.
+
+            Pass a batch of queries; each runs vector search and returns top-n
+            hits with avg human score and first 1000 chars. ONE call only — no
+            iterative refining.
+
+            Args:
+                queries: list of {query: str, n?: int, low_score?: float,
+                    high_score?: float}.
+            """
+            if not isinstance(queries, list) or not queries:
+                raise ValueError("calibration_search: 'queries' must be a non-empty list of query objects.")
+            sections = []
+            for i, q in enumerate(queries, 1):
+                if not isinstance(q, dict) or "query" not in q:
+                    raise ValueError(f"calibration_search: query #{i} must be an object with a 'query' field.")
+                qtext = str(q["query"])
+                n = int(q.get("n", 4) or 4)
+                low_score = float(q.get("low_score", 0.0) or 0.0)
+                hs = q.get("high_score", 10.0)
+                high_score = float(hs if hs is not None else 10.0)
+                body = _search_file_impl(qtext, n, "vector", low_score, high_score)
+                sections.append(
+                    f"### Query {i}: {qtext!r}  (n={n}, score=[{low_score}, {high_score}])\n{body}"
+                )
+            return "\n\n".join(sections)
+
+        _merger_tools = [read_file, grep_file, calibration_search]
     merger = Agent(
         name="Merger",
         instructions=_merger_instructions,
@@ -500,9 +493,9 @@ async def process_papers(papers: list[dict], papers_dir: Path, skip_scoring: boo
 
 # ── Benchmark ────────────────────────────────────────────────────────
 
-async def run_benchmark(data_dir: str, n_samples: int = 10, seed: int = 42, balanced: bool = False, no_cal: bool = False):
+async def run_benchmark(data_dir: str, n_samples: int = 10, seed: int = 42, balanced: bool = False, no_cal: bool = False, include_cal_papers: bool = False):
     data_path = Path(data_dir)
-    cal_ids = [i.split(".")[0] for i in os.listdir(HUMAN_REVIEW_DIR) if i.endswith(".md")]
+    cal_ids = set() if include_cal_papers else {i.split(".")[0] for i in os.listdir(HUMAN_REVIEW_DIR) if i.endswith(".md")}
 
     gt_data, papers_dir = load_ground_truth(data_path)
     available = [r for r in gt_data if (papers_dir / f"{r['paper_id']}.txt").exists() and r["paper_id"] not in cal_ids]
@@ -708,6 +701,7 @@ if __name__ == "__main__":
     parser.add_argument("--balanced", action="store_true")
     parser.add_argument("--calibration_set", choices=["2025", "2026"], default=os.getenv("CALIBRATION_SET", "2025"))
     parser.add_argument("--no_cal", action="store_true", help="Skip calibration sample search; score based on paper merits alone")
+    parser.add_argument("--include_cal_papers", action="store_true", help="Do not exclude calibration-set paper IDs from the benchmark pool")
     parser.add_argument("--position", action="store_true", help="Use position paper prompts and calibration dataset")
     parser.add_argument("--accept_csv", type=str, default=None, help="Path to bench CSV; predict acceptance rate at predicted score and ±0.5")
     args = parser.parse_args()
@@ -715,4 +709,4 @@ if __name__ == "__main__":
     if args.single_paper:
         asyncio.run(run_single_paper(args.single_paper, no_cal=args.no_cal, accept_csv=args.accept_csv))
     elif args.benchmark:
-        asyncio.run(run_benchmark(args.benchmark, n_samples=args.n_samples, seed=args.seed, balanced=args.balanced, no_cal=args.no_cal))
+        asyncio.run(run_benchmark(args.benchmark, n_samples=args.n_samples, seed=args.seed, balanced=args.balanced, no_cal=args.no_cal, include_cal_papers=args.include_cal_papers))

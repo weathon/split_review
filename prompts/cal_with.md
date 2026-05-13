@@ -1,55 +1,34 @@
-Use comparative scoring to calibrate your final score.
+Use comparative scoring to calibrate your final score against human-reviewed anchors.
 
-How retrieval works: you do not have direct search tools for the human-review corpus. Use the `calibration_search` tool for every retrieval. It runs BM25 / vector search / grep internally and returns a list of paper paths with one-sentence summaries. You decide what to look for; it does the looking.
+How retrieval works (classic RAG, one-shot):
 
-Workflow for every calibration step below:
-1. Decide what you want to retrieve (topic, weakness pattern, strength pattern, score range, etc.).
-2. Call `calibration_search` with a short natural-language request describing what you want.
-3. Read the returned paper list. If you want more detail on a specific anchor, use your own read_file on the returned absolute path.
+1. Make ONE call to `calibration_search` with a batch of 4-8 short natural-language queries. The tool runs vector search for each query in parallel and returns, for every query, the top-K matching human-review paths with their avg human score and first ~1000 chars. All results are injected into your context in a single response. You do not iterate.
 
-Do not try to call search_file, grep_file, or the BM25/vector index directly — those are only available inside `calibration_search`. If you want more or different anchors, call `calibration_search` again with a refined request.
+2. From the returned list, pick a small number of anchors (typically 3-6) you actually want to read in full. Use `read_file` on each chosen path to inspect the full review. Do not re-call `calibration_search` — one batch is all you get.
 
-&& IMPORTANT: Do NOT be afraid to be harsh/nice if the founded paper supports it. 
+3. Score the paper relative to those anchors.
 
-Your calibration process:
+What to put in your batch of queries:
+- 1-2 queries by topic of the paper under review (e.g. "privacy attacks on face recognition").
+- 2-3 queries by the paper's specific strength/weakness patterns (e.g. "overclaim strong experiments", "novel framing missing baselines"). Do NOT restrict by score for these.
+- 3 queries that anchor each score band on a topic similar to the paper:
+   - "<topic> with avg human score >= 6" (high band)
+   - "<topic> with avg human score around 5" (medium band)
+   - "<topic> with avg human score <= 4" (low band)
+  You can pass `low_score` / `high_score` numeric filters to `calibration_search` per-query (see tool schema). Use these exact bands. If nothing topically similar exists in a band, still take whatever the tool returned for that band as your anchor.
 
-1. Topic-based anchors: ask `calibration_search` for papers with similar topics. Note their human scores.
+`calibration_search` schema: pass `queries: list[{query: str, n: int, low_score?: float, high_score?: float}]`. Default n=4 if unsure. The tool runs all queries and returns concatenated results, grouped by query.
 
-2. Quality-based anchors: this is critical. Do not only search by topic. Ask for papers that share similar strength/weakness patterns with the paper under review. Do NOT restrict by score range here — you want to see the full spread of human scores given to papers with these patterns, whatever they happen to be:
-   - If this paper has strong empirical results but overclaims, ask for reviews mentioning "overclaim" "strong experiments" and note how humans scored those.
-   - If this paper has a novel framing but weak baselines, ask for reviews mentioning "novel framing" "missing baselines" and note those scores.
+Scoring rules:
 
-3. Deliberate range anchoring: this is the only step where you should constrain by score band. Use it to find papers on a similar topic (NOT similar strength/weaknesses) but at different quality levels, so you can see what high vs. low scoring looks like in your area. Retrieve multiple (ideally 2-4) papers per score range with topic as query, not just one — a single anchor is too noisy to rely on. When you ask `calibration_search` for a band, state the numeric score range explicitly (e.g. "avg human score between 4 and 6") rather than leaving it as "low-scoring" or "weak", so the subagent can apply the score filter. Use these exact bands:
-   - High: avg human score >= 6. Request papers in this band and read a few to see what made them strong.
-   - Medium: avg human score around 5. These are your borderline anchors.
-   - Low: avg human score <= 4. Request papers in this band and read a few to see what made them weak. "Low" here means genuinely poor, not just below-average — a paper averaging 5 is medium, not low.
-   - Compare the paper under review against all three bands. Every paper you review should be scored relative to at least one paper from each of the three bands, regardless of its topic. If nothing topically similar came back in the low band, still take whatever the subagent returned in the <=4 band as your low anchor rather than skipping the band.
+- Your final score must be positioned relative to the retrieved anchors. If anchors with similar strengths got 7s, and anchors with similar weaknesses got 3s, your score lives in that range.
+- Do not pick a score first and then justify it. Compare to anchors first, let the comparison set the score.
+- Retrieval is noisy. Use the center of the anchor cluster, weighted by topical similarity. Move outside the cluster only if the paper clearly beats or falls below most anchors.
+- The number of weaknesses listed is not a signal for a bad paper — focus on weakness content and anchor scores.
+- Score distribution: extreme scores are rare but valid. If the paper truly is exceptional or truly weak, give an extreme score even if most retrieved anchors sit in the middle.
 
-   Examples: if reviewing a paper about privacy attacks on face recognition:
-   - "Find papers on privacy attacks / face recognition with avg human score >= 6. Return 3-5 paths with one-sentence summaries of what made them strong."
-   - "Find papers on privacy attacks / face recognition with avg human score <= 4. Return 3-5 paths with one-sentence summaries of what made them weak."
-   - "Find face-recognition evaluation papers with avg human score >= 6."
-   - "Find privacy-evaluation papers with avg human score <= 4."
+&& IMPORTANT: Do NOT be afraid to be harsh/nice if the retrieved anchors support it.
 
-   If no papers are found with the same topic, relax topic but keep the score band — it is better to have an off-topic low anchor than no low anchor at all.
+When reporting your score, list every anchor paper that came back in the batch (not just the ones you read in full). For each anchor give the path, its avg human score, and one sentence on how it compares to the paper under review. The list must include at least one low-scoring (avg <=4), one medium-scoring, and one high-scoring (avg >=6) anchor.
 
-4. Score relative to anchors: your final score should be positioned relative to the retrieved examples. If retrieved papers with similar strengths got 7s from humans, and papers with similar weaknesses got 3s, use that range. Do not compress everything into 4-6.
-
-5. Score from the anchors, not from how the merged review reads. Papers with many listed weaknesses can still score high if their anchors did. Lean on the anchor range when your gut disagrees with it. Even a good paper could have many weaknesses that won't hurt the main contribution. Do not treat the number of weaknesses as a signal for bad paper; focus on the content of the weaknesses and retrieved reviews. 
-
-Retrieval is noisy — a single 8 or 3 doesn't pin your score. Use the center of the anchor cluster, weighted by topical similarity, and move outside that range only if the paper clearly beats or falls below most of the anchors.
-
-Ordering matters: compare the paper to the retrieved anchors first, and let the comparison determine the score. Do not pick a score first and then go looking for anchors that support it — that defeats the point of calibration. If the anchors disagree with your initial intuition, move the score toward the anchors, not the other way around.
-
-When reporting your score, briefly state which calibration papers you compared against and why the paper under review is above or below them.
-
-You can use read_file to read the returned anchor files for more detail. List every anchor paper you retrieved, not only the ones that ended up shaping your final score — papers you looked at and decided did not fit are still part of the reasoning and must be shown. For each anchor give the path, its avg human score, and one sentence on how it compares to the paper under review. The list must include at least one low-scoring paper (avg score <=4), one medium-scoring paper, and one high-scoring paper (avg score >=6).
-
-Let the score distribution follow the actual quality of the paper relative to the calibration examples.
-&& The samples could be concentrated in the middle, that does not mean you have to score it in the middle as well.
-
-There are less papers with extreme scores, so if the paper is truly exceptional or truly weak, it is okay to give it an extreme score even if most found papers are in the middle. You can also try to ask `calibration_search` for more papers with extreme scores to see what made a paper really good/bad.
-
-Limit your `calibration_search` invocations to less than 20 rounds, do not dig too deep into retrieval.
-
-
+Hard constraint: exactly one `calibration_search` call. No iterative refining, no follow-up retrieval. After that, you may use `read_file` to read anchor files, then write your review and score.
