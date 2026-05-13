@@ -1,113 +1,89 @@
-Now I have enough information to write the consolidated review. Let me read one more anchor for calibration.---
-
 ## Summary
-
-This paper proposes DACCA (Domain-Adaptive lane detection via Contextual Contrast and Aggregation), a UDA framework for lane detection. It introduces two main components: (1) a cross-domain contrastive loss (CCL) with dual positive-sample memory modules (PSMMs), one per domain, to mitigate false positive assignment caused by unreliable pseudo-labels; and (2) a domain-level feature aggregation (DFA) module that fuses per-domain prototype features with pixel-level features, including a refinement strategy for uncertain background pixels (UBP). Experiments are reported on six domain adaptation scenarios across three backbone architectures.
-
----
+The paper proposes DACCA (also called CUDALD in the abstract), an unsupervised domain-adaptive lane detection method built on self-training with two contributions: (i) a cross-domain contrastive loss (CCL) that uses per-domain Positive Sample Memory Modules (PSMMs) — separate prototypes $B_{so}$, $B_{ta}$ for source and target — as positives, and (ii) a Domain-level Feature Aggregation (DFA) module that fuses pixel features with prototype-derived domain features (including a refinement step for "unreliable background pixels" near lane edges). The method is evaluated on TuLane, MuLane, MoLane, OpenLane→CULane, and CULane→Tusimple across SCNN/ERFNet/RTFormer backbones.
 
 ## Strengths
-
-- **Dual-domain PSMM design is a clean and well-motivated extension.** Unlike CONFETI and ProCA, which maintain a single shared prototype for both domains, DACCA keeps separate PSMMs for source (B_so) and target (B_ta). The motivation — that source and target feature distributions differ and a single prototype may conflate them — is clearly articulated in Section 3.2, and the ablation in Table 1 (SCCL: +2.21%, TCCL: +1.01%) provides direct empirical support.
-
-- **Broad generalizability across architectures.** Table 2 shows that the CCL and DFA components plug into SCNN (+6.57% accuracy), ERFNet (+7.17%), and RTFormer (+7.17%), spanning CNN-based and Transformer-based backbones, which strengthens the claim that the method is architecture-agnostic.
-
-- **Multiple transfer scenarios.** The evaluation covers sim-to-real, real-to-real, easy-to-hard (OpenLane→CULane), and hard-to-easy (CULane→Tusimple) transfers, which is broader than most prior lane UDA work.
-
-- **UBP refinement shows a meaningful improvement.** The ablation in Table 1 records a 1.56% accuracy gain from the UBP handling within DFA — a distinct and isolatable contribution.
-
----
+- **Separate source/target prototypes** is a concrete, well-motivated departure from CONFETI's shared prototype. Figure 4(a) reports CCL outperforming CONFETI by 1.9% and ProCA by 2.58% on TuLane, supporting the design choice.
+- **Whole-domain rather than mini-batch context aggregation.** DFA is compared head-to-head against Cross-domain (Yang et al., 2021) and SAM (Chung et al., 2023) under the same backbone (Fig. 4(b)), with DFA winning by 0.46% and 0.72%, respectively.
+- **UBP refinement is a concrete observation specific to lane detection.** The paper isolates lane-edge pixels misclassified as background and re-routes them through the nearest prototype; Table 1 attributes a +1.56% accuracy gain to this step, the single largest ablation jump.
+- **Backbone breadth.** Table 2 shows consistent gains across SCNN (+6.57% acc), ERFNet (+7.17% acc), and RTFormer, indicating the method is not architecture-specific.
 
 ## Weaknesses
 
 ### Fatal
-
-- **Section 4.1 (Experimental Setting) is entirely absent.** The section heading appears in the PDF (line 199 of the extracted text) followed by only the token "1." and immediately a table image. There are no dataset descriptions, no backbone training protocols, no hyperparameter disclosures, no split details, and no baseline configuration information. The ablation and comparison sections reference datasets (TuLane, MuLane, MoLane) and hyperparameters (α_c, μ_c, ε, λ_c) that are never defined. Consequently, every quantitative result in the paper is unreproducible and uninterpretable. This is not a parser artifact — the content is structurally missing, as confirmed by the surrounding structure of Sections 4.2 and 4.3 which repeatedly cross-reference experimental decisions ("If not specified, all ablation studies are conducted on TuLane") that Section 4.1 was supposed to explain. This alone is a disqualifying flaw.
-
-- **Abstract-body naming mismatch.** The abstract explicitly names the proposed method **CUDALD** ("Context-aware Unsupervised Domain-Adaptive Lane Detection") with component terminology "cross-domain contrastive loss" and "domain-level feature aggregation." The entire body of the paper — Figure 1 caption, Section 3 header, Tables, and Conclusion — uses an entirely different acronym, **DACCA** ("Domain-Adaptive lane detection via Contextual Contrast and Aggregation"). This is not a cosmetic discrepancy; the abstract is a verbatim description of a differently-named method. This indicates the abstract was not updated when the method was renamed (or vice versa), suggesting the submission is not internally coherent. This compounds the reproducibility concern from the missing experimental setting.
+None.
 
 ### Major
-
-- **Non-standard, undescribed benchmarks.** TuLane, MuLane, and MoLane — the primary benchmarks in Tables 1–3 — are not standard benchmarks in the lane detection literature and receive no description whatsoever (compounded by the missing Section 4.1). Readers and future researchers cannot assess the significance of, e.g., the headline result "92.24% accuracy on TuLane with RTFormer" without knowing what TuLane is, what constitutes the source/target split, how many images it contains, or what the fully-supervised ceiling is.
-
-- **L_inter/L_intra terminology inversion.** In Section 3.2 (line 128), the paper defines: *"CCL, consisting of an intra-domain contrastive learning loss L_inter and an inter-domain contrastive learning loss L_intra."* The names are transposed: L_inter is called "intra-domain" and L_intra is called "inter-domain." Reading the subsequent SCCL description clarifies that the actual computation is consistent (L_inter uses cross-domain positives from B_ta, and L_intra uses same-domain positives from B_so), but the written definition is inverted. This inconsistency pollutes the core method section and forces readers to re-derive the intended meaning.
+- **Circularity in the PSMM update is not addressed.** §3.2 motivates per-domain prototypes by the claim that pseudo-label-driven positives are unreliable, but the target PSMM $B_{ta}$ is itself updated using the model's own (pseudo-labeled) target predictions, and is then used both as the positive in TCCL and as the lookup target for DFA. The paper's footnote 2 just defers to MCIBI (a supervised setting). There is no analysis or experiment showing the prototype dynamics actually denoise pseudo-label errors, which is the central methodological pillar.
+- **Internal tension between the anti-CONFETI argument and the DFA design.** §2 argues that "the feature distribution between the two domains is different" so a shared prototype is inappropriate; yet §3.3 concatenates $F_S$, $F_T$, and $E$ and linearly fuses them, and CCL deliberately uses cross-domain prototypes as positives (SCCL pulls source pixels toward $B_{ta}$). These choices presuppose that source/target features are alignable enough to share a representation — exactly what is denied two pages earlier. The paper should reconcile when source/target prototypes are too far apart to share and when they are close enough to fuse/contrast.
+- **Comparisons in Fig. 4 are "drop-in" replacements inside DACCA's full pipeline,** rather than each method evaluated in its own native pipeline. Replacing only the contrastive loss while keeping the dual-PSMM bookkeeping and DFA confounds the comparison. A swap into the baselines' own training recipes (or, at minimum, an ablation that disables PSMM/DFA when evaluating the alternatives) is needed before the gains in Fig. 4(a)–(b) can be attributed to CCL/DFA specifically.
+- **Small headline gaps, no variance reported.** Top-line gain over SGPCS on TuLane is 0.69% (92.24 vs. 91.55); ablation deltas for DFA (+0.66%) and individual CCL terms (~1%) are small. With no seeds, no significance, and λ_c/μ_c/α_c/ε/τ all "set empirically" with no sensitivity analysis, attribution of the gap to the proposed components rather than to recipe/tuning differences is not established.
 
 ### Minor
-
-- **Marginal DFA improvements lack statistical support.** DFA outperforms Cross-domain by 0.46% and SAM by 0.72% (Figure 4b). These are small differences that can easily vary across seeds. The claim "aggregating features from the whole domain is more effective than from a mini-batch" is presented without significance testing or multi-run variance. The claim may be valid but is not firmly established at these margins.
-
-- **Incremental technical novelty relative to prior prototype contrastive methods.** The core change from CONFETI/ProCA is maintaining two PSMMs rather than one. This is a reasonable design but is a modest extension; the ablation shows it yields +1.9–2.58% accuracy over those baselines. The paper claims the sampling strategy is "novel without modifying an existing contrastive loss," but the framing obscures that the principal innovation is the dual-memory design.
+- **Per-domain UBP relabeling (Eq. 12) re-assigns background pixels to the nearest *lane* prototype** based on Euclidean distance with no $\varepsilon$ ablation and no false-positive analysis. Given lane pixels are a tiny class fraction (acknowledged in §2), the failure mode of bleeding lane features into non-lane regions deserves a direct empirical check.
+- **Asymmetric negative sampling between source and target** (Eqs. 10–11): source uses GT-labeled non-$c$ pixels, target uses lowest-confidence-for-$c$ pixels. The justification is missing.
+- **Table 2's "generalizability" conflates DACCA with self-training.** No self-training-only baseline for ERFNet/RTFormer is reported, so the +7.17% on ERFNet cannot be decomposed into "self-training" vs. "DACCA components."
+- **No per-category breakdown on CULane,** which is the standard way category imbalance is diagnosed in that benchmark.
+- **No runtime/memory cost** of dual PSMM + DFA against the SCNN/ERFNet/RTFormer baselines.
 
 ### Trivial
-
-- None beyond the errors already noted.
-
----
+- The abstract names the method "CUDALD" while the body uses "DACCA" throughout — these need to be unified.
+- The naming in Eq. 9 ("$L_{inter}$" + "$L_{intra}$") and the subsequent text reads inconsistently: the loss bringing in the *other* domain's prototype intuitively reads as "inter," but the text describes both terms symmetrically as "the same as Eq. 6," with no clear distinction in form.
+- The abstract claims "six public datasets" but the body covers TuLane, MuLane, MoLane, OpenLane↔CULane, Tusimple — i.e., 5 distinct datasets / 5 adaptation settings depending on counting.
 
 ## Nice-to-Haves
-
-- A supervised upper-bound baseline (fully supervised training on target domain data) for each dataset and backbone would let readers assess how much of the performance gap UDA methods are closing.
-- A t-SNE or UMAP visualization of pixel features by class and domain, before and after DFA, would directly demonstrate that domain-level feature aggregation reduces the feature-space gap — a claim currently supported only by accuracy numbers.
-- Sensitivity analysis on the confidence thresholds (α_c, μ_c, ε) and the EMA coefficient β would strengthen confidence that the gains are not hyperparameter-sensitive.
-- Pseudo-label quality curves over training time would illuminate whether CCL anchors degrade early in training when pseudo-labels are noisy.
-
----
+- t-SNE/UMAP of pixel features before/after DFA, separated by domain, to directly verify alignment behavior.
+- A controlled pseudo-label-noise injection experiment for $B_{ta}$ updates to test the PSMM denoising claim.
+- Sensitivity sweeps for $\lambda_c$, $\mu_c$, $\alpha_c$, $\varepsilon$, $\tau$, $\beta$ on at least one benchmark.
 
 ## Removed Points
-
-*These points are flagged to be removed; treat them with caution.*
-
-- **"Self-plagiarism / duplicate submission" framing (Harsh Critic).** The abstract-body naming mismatch is a real problem (kept as a Fatal weakness), but inferring self-plagiarism from a naming discrepancy is speculation beyond what the evidence supports. Removed the accusatory framing.
-
-- **Negative sample selection (argmin) is "poorly motivated" (Harsh Critic).** Equation 10 selects pixels for which argmin over all categories equals c — i.e., pixels where the model assigns its *lowest* confidence to class c. This selects pixels that are definitionally "most unlike class c" across all categories, which is a reasonable negative mining strategy (paralleling hard-negative mining). The critic's reading that these are "simply backgrounds the model confidently predicts as something else" mischaracterizes the formulation. Removed.
-
-- **OCRNet comparison without acknowledgment (Harsh Critic).** The paper explicitly cites OCRNet (Yuan et al., 2020) in the Related Work (Section 2, Context Aggregation paragraph) and distinguishes it as a single-domain method, whereas DFA aggregates across both domains. This concern is already addressed by the paper.
-
-- **Strength: "addresses an important problem" (Strength Finder).** Generic; removed.
-
-- **Strength: "broad transfer scenarios" as a headline strength.** While real, this follows from the dataset setup, not a novel architectural choice; demoted to factual observation in Strengths.
-
----
+These points are flagged to be removed; treat them with caution.
+- *"Implementation details parsed as empty in §4.1."* — Likely a parser artifact rather than a paper deficiency; do not weigh.
+- *"Cherry-picked qualitative figures (Fig. 5)."* — Qualitative figures are standard and minor; does not affect core claims.
+- *Generic strength: "consistent SOTA across diverse domain transfer scenarios"* — Subsumed by the more specific Table 3/4/5 evidence already in Strengths; standalone phrasing was too generic.
+- *Generic strength: "comprehensive ablation"* — Kept implicitly via the UBP-refinement strength; the broader phrasing was sycophantic.
 
 ## Novel Insights
+None beyond the paper's own contributions. The "use per-domain prototypes + aggregate domain-level rather than mini-batch features" pair is a reasonable but incremental recombination of MCIBI-style memory and prototype-contrast UDA. The UBP observation (lane edges misclassified as background and bleeding into the prototype lookup) is the most paper-specific insight.
 
-The reviewers surface one genuinely useful observation beyond the paper's own framing: the dual-PSMM design and DFA module jointly address two typically orthogonal failure modes in lane UDA (false positive assignment and weak cross-domain context), and the ablation confirms they are largely complementary (each providing 1–2% gains). However, the paper's framing of DFA as "aggregating features from the whole domain" somewhat overstates the novelty — DFA is cross-attention to category prototypes, which is architecturally close to OCRNet applied cross-domain. The genuine novelty is that the per-domain prototype memory simultaneously serves both the contrastive loss and the feature aggregation, creating a tight coupling not seen in prior methods — but this insight is buried and not highlighted as clearly as it could be.
+## Suggestions
+- **Unify naming** (CUDALD vs. DACCA) and the dataset count throughout.
+- **Add a pseudo-label noise stress test** for $B_{ta}$ updates to substantiate the anti-pseudo-label motivation.
+- **Re-run contrastive/aggregation baselines in their native pipelines**, not as drop-in replacements inside DACCA, before claiming superiority of CCL or DFA over them.
+- **Report multi-seed variance** on TuLane given the sub-1% gaps, and provide a hyperparameter sensitivity table for at least $\lambda_c$, $\varepsilon$, $\tau$.
+- **Reconcile the §2 vs. §3.3 stance** on shareability of source/target features — when do prototypes need to be separate, and why is fusion via DFA simultaneously valid?
+- **Add a UBP relabeling false-positive analysis** (how often background near a prototype gets relabeled as lane).
 
----
-
-## Evaluation on Key Axes
-
-| Axis | Assessment |
-|---|---|
-| **Originality** | Low-to-moderate. The dual-PSMM idea is a clean extension of existing prototype contrastive learning; DFA is essentially cross-attention to dual-domain prototypes. Neither component independently crosses the novelty bar for a top venue. |
-| **Importance of research question** | Moderate. Lane detection under domain shift is a real and relevant problem for autonomous driving; the focus on small-object (lane) UDA, distinct from standard segmentation UDA, is justified. |
-| **Support for claims** | Poor. The headline accuracy figures are on undescribed benchmarks (TuLane/MuLane/MoLane), and the experimental section is missing. Claims are unsupported by verifiable experimental conditions. |
-| **Soundness of experiments** | Poor. Missing Section 4.1 makes all results unverifiable. Marginal DFA improvements lack significance testing. |
-| **Clarity of writing** | Poor. Abstract names a different method. Core method section has an inverted terminology definition. |
-| **Value to community** | Potentially moderate if the structural problems were fixed; as submitted, low. |
-
----
+## Axis-by-axis evaluation
+- **Originality:** Modestly novel; cleanly identifies a gap (per-domain prototype + whole-domain aggregation) but is an incremental composition of MCIBI/CONFETI/SePiCo ideas.
+- **Importance:** UDA lane detection is a real and under-explored niche.
+- **Claims supported:** Partially. The architectural ablations support component effects, but the central denoising claim is not directly tested and the cross-method comparisons are grafted into DACCA's own scaffolding.
+- **Soundness of experiments:** Adequate breadth across backbones/datasets, weak on variance/sensitivity/fairness.
+- **Clarity:** Acceptable but uneven: equation labeling, method name, and dataset count are inconsistent.
+- **Value to the community:** Useful as a recipe for prototype-based UDA in low-foreground-density segmentation; not a major conceptual advance.
 
 ## Score and Decision
 
-**Anchor papers:**
+Anchors used (all from the single calibration batch):
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/oEMSM8HHpj.md` — avg 4.00 (unsupervised urban scene contrastive, reject). More speculative than this paper.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/MwMoE1y0Nb.md` — avg 3.50 (DA infant analysis). Weaker contribution than the paper under review.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/U7iiF79kI3.md` — avg 6.67 (CALICO contrastive BEV pretraining). Cleaner contribution and stronger experiments than this paper.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/mLztw5kEQ9.md` — avg 4.50 (Debiased SFDA). Comparable level: incremental DA with a moderate idea.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/sGVmr7KHfn.md` — avg 5.50 (memory-assisted sub-prototype UDA). Strong methodological match; this paper is slightly weaker on rigor.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/eXrUdcxfCw.md` — avg 4.80 (EMA source/target prototypes for CTA). Very close in spirit; comparable evidence quality.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/3wEGdrV5Cb.md` — avg 6.33 (MPFT federated DA). Cleaner design and more thorough evaluation than this paper.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/bnpeTgh29E.md` — avg 3.75 (sub-domain segmentation). Weaker than this paper.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/lnVPfgRnIV.md` — avg 4.75 (incremental segmentation). Roughly comparable.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/7FeIRqCedv.md` — avg 7.00 (SLiMe). Clearly above this paper in novelty and execution.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/LsURkIPYR5.md` — avg 6.00 (LaneSegNet). Stronger paper in the same lane-detection area.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/IdAyXxBud7.md` — avg 6.33 (DynAlign UDA seg). Cleaner story than this paper.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/kqHxpHKMSz.md` — avg 6.20 (perspective debiasing). Above this paper.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/0MhlzybvAp.md` — avg 5.50 (BLDA balanced DA seg). Close match, slightly stronger.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/etm456yoiq.md` — avg 4.50 (B³CT three-branch DA seg). Very close peer; same flavor of issues.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/wazvIr0Sw0.md` — avg 4.75 (OpenDAS). Comparable level.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/YRJDZYGmAZ.md` — avg 3.25 (domain prompt MFDA). Weaker than this paper.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/t5mpbfpZuF.md` — avg 3.50 (DA for LLM alignment). Weaker contribution than this paper.
 
-| Path | Avg Human Score | Comparison to Paper Under Review |
-|---|---|---|
-| `/calibration/IdAyXxBud7.md` (DynAlign, UDA cross-domain segmentation, accepted) | 6.33 | DynAlign has a complete experimental section, novel problem formulation, and standard benchmarks; far superior presentation to the current paper. |
-| `/calibration/0MhlzybvAp.md` (BLDA, UDA segmentation, rejected) | 5.50 | BLDA also uses self-training + contrastive signals but has a coherent experimental section; its weaknesses are conceptual rather than structural. |
-| `/calibration/etm456yoiq.md` (B3CT, UDA segmentation, rejected) | 4.50 | B3CT has a complete experimental section on standard benchmarks and coherent presentation; rejected for limited novelty and weak baselines — issues far less severe than DACCA's missing Section 4.1. |
-| `/calibration/sGVmr7KHfn.md` (Memory-Assisted Sub-Prototype Mining, UDA, accepted) | 5.50 | Closer to this paper's architecture (prototype memory) but has proper experimental setup and clearer novelty. |
-| `/calibration/eXrUdcxfCw.md` (CTA Prototypes, rejected) | 4.80 | Uses EMA prototypes like DACCA, but has full experimental description. |
-| `/calibration/G9HV5upWhx.md` (SgCG, medical segmentation, rejected) | 2.33 | Plagiarism concerns; more damaging than DACCA's issues. |
-| `/calibration/bnpeTgh29E.md` (SDA granular segmentation, rejected) | 3.75 | Limited contribution on niche benchmarks; closer in quality to DACCA's structural state. |
-| `/calibration/PSzDG612AC.md` (text-driven zero-shot UDA, rejected) | 3.00 | Weak methodology and limited experiments; comparable severity of structural incompleteness. |
+This paper sits closest to B³CT (4.50), Debiased SFDA (4.50), OpenDAS (4.75), and EMA-prototype CTA (4.80): an incremental but coherent DA recipe with sub-1% headline gains, no variance reporting, and a couple of unresolved structural concerns. It is above the low-3.x tier (the contribution is concrete and the empirical breadth is reasonable) but below the 5.5–6 anchors (which have either cleaner stories or stronger evidence).
 
-**Rationale:** Even rejected UDA papers (B3CT, BLDA, eXrUdcxfCw, all scoring 4.5–5.5) have complete experimental sections and coherent abstract-body alignment. This paper is categorically below that tier due to its two fatal structural failures: a completely missing Section 4.1 and an abstract that names a different method. The real technical content (dual PSMMs, DFA, UBP handling) is present and the ablation is partially informative, preventing the score from falling to the very bottom (as with plagiarism cases like SgCG at 2.33). The paper lands near PSzDG612AC (3.0) and below bnpeTgh29E (3.75), as its structural incompleteness — particularly the missing experimental setting — is a more severe deficit than marginal novelty alone.
-
-**Final Score: 3.0 — Reject**
-
-The paper cannot be accepted. The missing Section 4.1 renders every quantitative result unverifiable, and the abstract-body naming mismatch indicates the submission was not properly prepared. These are not stylistic issues — they are fundamental barriers to scientific evaluation. The technical content has promise, but must be accompanied by a complete and coherent experimental description before the paper can be seriously evaluated.
-
-MY FINAL SCORE: <pineapple>3.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

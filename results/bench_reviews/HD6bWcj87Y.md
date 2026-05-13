@@ -1,23 +1,12 @@
-Now I have enough information to write the final meta-review. Let me synthesize.
-
----
-
 ## Summary
-This paper introduces *In-Run Data Shapley*, a method that decomposes the Data Shapley objective over individual gradient-update iterations, then derives closed-form first- and second-order Taylor approximations that reduce attribution to gradient dot-products or gradient-Hessian-gradient products. A key algorithmic contribution is the *ghost dot-product* technique—inspired by differential-privacy ghost clipping—that computes all pairwise per-sample gradient inner products in a single backward pass with negligible overhead. The method is applied to GPT2-small pretraining on the Pile dataset, yielding case studies on copyright attribution, training dynamics, and data curation.
-
----
+The paper introduces **In-Run Data Shapley**, a data attribution method that computes Shapley values along a single training trajectory by defining a per-iteration local utility (loss change over a single gradient update) and aggregating across steps via linearity. Closed-form expressions are derived under first- and second-order Taylor approximations of the local utility (reducing to per-step gradient dot-products and gradient-Hessian-gradient products), and "ghost dot-product" / ghost gradient-Hessian-gradient techniques allow all pairwise quantities to be computed inside 1–2 backpropagations without ever instantiating per-sample gradients. The result is the first Shapley-style attribution demonstrated at GPT-2-pretraining scale (~10B tokens of the Pile).
 
 ## Strengths
-
-- **Ghost dot-product technique**: Adapting DP ghost clipping to compute all pairwise gradient dot-products in one backward pass is a genuine algorithmic contribution with value independent of the Shapley framing. Figure 2 empirically confirms that first-order In-Run Data Shapley incurs near-zero overhead (within 5% of regular training) versus the >30× slowdown of naïve per-sample gradients.
-
-- **Second-order extension with principled interpretation**: The gradient-Hessian-gradient interaction term in Theorem 2 captures data redundancy: duplicate or highly similar training points have their attributed value reduced via the interaction term, yielding a *uniqueness-aware* attribution score. This is a substantive improvement over TracIN-Ideal with a clean mathematical interpretation.
-
-- **Theoretical connection: TracIN-Ideal = first-order In-Run Shapley**: Section 4.1 explicitly and correctly identifies that the first-order closed-form (Theorem 1) is algebraically equivalent to TracIN-Ideal (Pruthi et al., 2020). This provides the first principled, axiom-derived justification for TracIN-Ideal's design—a genuine contribution to understanding an existing method.
-
-- **Stage-dependent attribution analysis**: The finding (Figure 3) that general corpora (Pile-CC) have high early-training value that decays to near-zero while domain-specific corpora (ArXiv for math) gain over time is a novel empirical insight not capturable by retraining-based Shapley or single-checkpoint influence functions. This demonstrates a practical advantage of tracking attribution over a training trajectory.
-
----
+- **Ghost dot-product / ghost vHv derivation (Eq. 5, Section 4.2)** is a concrete engineering contribution: pairwise per-sample gradient inner products with no per-sample gradient materialization, by reusing activations and output-gradients already computed in backprop. This is portable to influence-function and DP work.
+- **Empirical efficiency claim is well-substantiated (Figure on runtime, Section 5.1)**: first-order In-Run Shapley matches regular-training wall clock and is >30× faster than naive per-sample-gradient computation, putting Shapley-based attribution into the same compute envelope as ordinary pretraining for the first time.
+- **Theoretical grounding of TracIN**: Theorem 4.1 / discussion after Theorem 1 makes explicit that the first-order quantity equals TracIN-Ideal, recasting a previously heuristic per-step gradient-alignment score as a Shapley value under an additive local utility — a clean theoretical observation rather than a re-derivation that pretends to be novel.
+- **Second-order interaction term** has a principled, interpretable role (Theorem 4.2, term ②): it down-weights duplicates and near-duplicates via a Hessian-modulated interaction with the rest of the batch, which is conceptually what distinguishes Shapley from per-sample influence.
+- **Stage-dependent attribution finding (Section 5.2.2)**: capturing the rise-then-fall trajectory of Pile-CC's contribution to math validation data is genuinely something final-model influence cannot expose.
 
 ## Weaknesses
 
@@ -25,95 +14,72 @@ This paper introduces *In-Run Data Shapley*, a method that decomposes the Data S
 None.
 
 ### Major
-
-- **Data curation experiment is compute-confounded**: Section 5.3 removes approximately 16% of negatively valued corpora and reports "~25% fewer training iterations to reach test loss 3.75." Fewer total tokens means fewer iterations per epoch of the dataset; the comparison does not control for total gradient steps, tokens processed, or FLOPs. A cleaned subset with 84% of the original tokens will naturally require fewer iterations to traverse, irrespective of data quality. The paper does not report whether the cleaned model achieves better final performance at a fixed token budget or fixed compute budget. As presented, the speedup cannot be attributed to attribution-based filtering rather than simply having less data.
-
-- **TracIN is the natural baseline but is absent**: Because first-order In-Run Data Shapley is mathematically equal to TracIN-Ideal (a fact the paper explicitly states), the natural attribution baseline in the copyright and data curation experiments is TracIN, not a single-checkpoint influence function. Including only a single-checkpoint influence function baseline obscures whether the Shapley framing—or the ghost dot-product efficiency—adds anything empirically beyond the existing TracIN-Ideal method. This gap directly affects interpreting Figures 3 and 4.
-
-- **Inflated "foundation model pretraining" claim**: The paper's abstract, introduction, and conclusion repeatedly claim to perform "data attribution for the foundation model pretraining stage for the first time." The experiment trains GPT2-small (124M parameters) on 10B tokens. GPT2-small is a useful testbed but is not representative of foundation model scale (GPT-4, LLaMA-3, etc., operate at 10–1000× the parameter count). The paper qualifies this as a "pilot study," but the headline framing is significantly overstated.
-
-- **Copyright policy claims exceed the experimental evidence**: The policy claim—"data owners should receive a royalty share even when output does not closely resemble copyrighted material"—is supported by a single hand-constructed (training, validation) pair: a Wikipedia passage about a musician matched against a synthetic story about a violinist. Table 1 shows average ranks across similarity categories, but the number of examples per category is not reported. A single constructed example is insufficient evidentiary basis for policy-relevant conclusions about copyright law. The implications section should be moderated accordingly.
+- **Data-curation evaluation has an in-distribution confound (Section 5.3, Figure 5).** The Pile validation set is used both to compute Shapley values and (implicitly, through the Pile test set) to evaluate convergence. Removing the 16% of training corpora whose gradients align negatively with the validation distribution will, almost by construction, accelerate loss on the same distribution — independent of whether those corpora are actually "low quality." Without a held-out out-of-Pile evaluation, or a comparison against cheap proxies (random 16% removal at matched compute, perplexity filtering, embedding-distance-to-validation), the "well-curated datasets still contain bad data" claim is weaker than presented. The paper does acknowledge "significant domain shift" might explain some negative values but does not isolate this from genuine quality detection.
+- **Copyright/royalty conclusion overreaches what the method shows (Section 5.2.1).** The result is that a paraphrase/"similar topic" rewrite ranks the source corpus at 32–146 out of ~320k — i.e., topic-level gradient alignment exists. The paper extrapolates from this to a normative claim that "data owners should receive a royalty share for generated content, even if the output does not closely resemble the copyrighted material." The chosen Shapley utility is loss-change on a fixed validation point along one trajectory, not causal contribution to a particular generation; topic-level alignment may exist for thousands of training corpora simultaneously. The empirical observation is fine; the policy framing is a leap the gradient-dot-product cannot support and should be softened.
+- **Adam vs SGD gap for a "foundation-model pretraining" framing.** The ghost derivations are SGD-specific and all case studies are run with SGD on GPT-2-small, while real pretraining uses Adam/AdamW. The paper does flag this in its limitations and argues SGD acts as a proxy, but the per-coordinate adaptive scaling of Adam changes the Taylor-expansion validity argument materially. The contribution as stated (data attribution for the foundation-model pretraining stage) is currently demonstrated only under the surrogate optimizer.
 
 ### Minor
-
-- **No empirical check connecting In-Run Shapley to retraining-based Shapley**: The paper explicitly argues that In-Run Shapley measures something different from Retraining-based Shapley (targeted to a specific run vs. average over algorithm). While this distinction is conceptually valid, there is no small-scale experiment showing whether high In-Run Shapley values qualitatively agree with high retraining-based Shapley values (on a dataset where both are computationally feasible). Without this, it is unknown whether In-Run Shapley is a useful approximation or measures a substantially orthogonal quantity.
-
-- **Multi-epoch / data duplication frequency conflation**: The paper does not address the case where a data point appears in many batches across epochs. Its cumulative In-Run Shapley score accumulates contributions from all appearances, conflating frequency of sampling with intrinsic data quality. A duplicated data point will mechanically accumulate a higher score than an equally informative non-duplicated one. This is worth acknowledging.
-
-- **SGD/Adam mismatch uncharacterized**: The paper acknowledges (Section 6) that ghost techniques apply to SGD and that SGD is used as a proxy for Adam in the GPT2 experiments. However, no ablation characterizes how much attribution quality degrades from this mismatch. The acknowledgment without quantification leaves the approximation error unknown.
+- **No run-to-run stability analysis.** The conceptual selling point is "targeted attribution to the specific trained model." Without showing rank correlations across SGD seeds / batch orders, it is unknown whether per-point Shapley values are stable enough to support the data-curation and copyright applications, or whether they reflect mostly trajectory noise. A basic seed-variation study would directly test the central claim.
+- **Limited evidence that the 2nd-order term is decisive.** Section 5.3 reports ~equivalent curation improvements from 1st- and 2nd-order Shapley. The interaction term has a clear theoretical role (near-duplicate down-weighting), but the paper does not show a setting (e.g., a controlled k-duplicate insertion test) where 2nd-order changes a decision. Without that, the 2× cost is hard to motivate beyond the conceptual justification.
+- **Error-rate numbers for the Taylor approximation ("<10% first-order, <4% second-order," Section 4.1) are asserted without a stated protocol** — model scale, training stage, batch size, validation point. These carry real weight in justifying the approximation and should be backed by an explicit measurement.
+- **Local utility is computed only over players that happened to land in the realized batch** (Section 4.1 and the augmentation argument), and the global Shapley is just the sum across $T$ steps. This sidesteps the Shapley combinatorial blow-up, but it also means the "Shapley axioms" hold for a sequence of local per-batch games rather than for a global retraining-style utility. The framing is honest in the technical statements but the introduction sells a stronger flavor of "axiomatic uniqueness" than the construction delivers.
+- **Memory cost of ghost dot-product (storage of per-layer activations and output-gradients for the validation batch alongside the training batch) is not quantified.** The conclusion mentions gradient accumulation as a fallback but does not characterize scaling with $|D_{val}|$ or model size — relevant if the technique is to migrate to larger models.
 
 ### Trivial
-- Runtime scaling with validation set size is not reported. For a single validation point the cost is negligible, but the scaling for a large validation set (e.g., a full benchmark subset) should at least be noted.
-
----
+- The "rank out of ~320k" framing makes top-145 look extreme, but absolute ranks of unrelated topic-level corpora are not measured, so the reader has no null distribution to compare against.
+- Test-loss-vs-wall-clock (rather than vs iterations) for the curation experiment would be more honest given the 2× cost of 2nd-order Shapley computation during the original run.
 
 ## Nice-to-Haves
-
-- A compute-matched data curation baseline (same total FLOPs or token budget) comparing the original and cleaned corpora would resolve the core confound in Section 5.3 and would make the data curation result publishable as a strong claim.
-- Extending experiments even to GPT2-medium (345M) would provide preliminary evidence for the scalability narrative without large additional compute.
-- A scatter plot comparing In-Run Shapley domain scores vs. TracIN-Ideal domain scores across all 16 Pile domains would clarify whether the second-order term makes a meaningful difference in practice.
-- A systematic copyright attribution evaluation over tens of (training, validation) pairs per similarity category, with statistical significance, would substantiate the policy-relevant claims.
-
----
+- Replicate one case study under Adam (even approximately) and report rank correlation with the SGD attributions, to substantiate the "SGD-as-proxy" claim empirically.
+- A controlled near-duplicate stress test ($k$ copies of a corpus inserted into the training set) showing 2nd-order Shapley distributes the credit correctly while 1st-order/TracIN-Ideal does not — this would crisply demonstrate the value of the second-order term.
+- Out-of-Pile evaluation in the curation experiment to rule out the in-distribution confound.
+- A simple seed-variation table for the per-corpus rankings used in the copyright study.
 
 ## Removed Points
-
-*These points are flagged to be removed, treat them with caution.*
-
-- **"Global utility function does not measure what traditional Data Shapley measures"** (Harsh Critic): Removed as a standalone weakness. The paper explicitly and transparently defines In-Run Shapley as measuring a *different* quantity than Retraining-based Shapley (per Section 3 and the conclusion), positioning this as a feature enabling targeted attribution. The criticism conflates a design choice with a flaw. A residual concern about whether the quantity is useful is captured under the minor weakness about lack of empirical connection to retraining-based Shapley.
-
-- **"First-order method is TracIN-Ideal with a Shapley rebranding"** (Harsh Critic, as a *fatal* claim): Reduced to the TracIN baseline absence point. The paper explicitly acknowledges the equivalence (line 197), and the genuine contributions—the ghost dot-product technique and the second-order extension—are distinct from TracIN. The rebranding criticism is valid as a framing issue but does not invalidate the paper's technical contributions.
-
-- **Criticism of the Hessian computation quality / "}" symbols in submitted text**: Removed per hard rule (formatting artifacts are parser issues, not author errors).
-
-- **Strength: "Data curation utility (25% fewer iterations)"** (Strength Finder): Moved here because the underlying experiment is confounded by total token count. The strength cannot be accepted at face value.
-
-- **Strength: "First application at foundation model scale"** (Strength Finder): Reduced—GPT2-small at 124M parameters does represent scaling up Data Shapley meaningfully, so this is partially kept, but the framing as "foundation model pretraining" is overclaimed.
-
----
+These points are flagged to be removed, treat them with caution.
+- **Harsh critic's framing that "the first-order method is just TracIN-Ideal repackaged as Shapley."** This is technically correct but the paper explicitly states the equivalence in Section 4.1 and presents the contribution as (a) supplying a Shapley-axiomatic interpretation of an existing heuristic, (b) deriving the genuinely new 2nd-order term, and (c) providing the efficient ghost computation. Treating the equivalence as a "structural" flaw rather than an acknowledged framing decision is unfair.
+- **Strength claim "first Shapley-value-based data attribution at pretraining scale"** as phrased is supported by the experiments, but the strength finder's broader "GPT-2 pretraining = foundation model pretraining" framing conflicts with the Adam-vs-SGD gap noted above; kept only as supporting evidence.
 
 ## Novel Insights
-
-The paper's most genuinely novel observation is the algebraic proof that the first-order In-Run Shapley value equals TracIN-Ideal—retroactively providing an axiomatic (Shapley) justification for a heuristic that TracIN-Ideal's original paper lacked. This reframes TracIN-Ideal as principled rather than ad-hoc and simultaneously clarifies that the second-order correction term is precisely the gap: it captures how the value of a data point changes when similar points are present in the same batch. The interaction term—gradient of z transposed through the validation Hessian times the batch gradient sum—gives a clean formula for *data uniqueness* that has no analogue in prior TracIN-style methods. Whether this uniqueness correction materially improves downstream applications (data curation, copyright analysis) is the paper's open empirical question.
-
----
+The cleanest novel observation is that **TracIN-Ideal is exactly the first-order Shapley value of an additive single-step local utility** — this is a small but real theoretical reframing that retroactively axiomatizes an existing heuristic and makes the route to a 2nd-order (interaction-aware) refinement obvious. The ghost dot-product extension from DP "ghost clipping" to pairwise inner products is a transferable technique that goes beyond the paper's own application. Beyond these, no insights emerge from the reviews that exceed the paper's own contributions.
 
 ## Suggestions
+- Reframe the copyright discussion as: "gradient alignment persists under paraphrasing, which is suggestive for the copyright debate," and drop the explicit royalty-share normative claim, or move it explicitly to a discussion of implications.
+- Add an out-of-distribution evaluation for the curation experiment (e.g., one external benchmark not derived from Pile).
+- Report seed-to-seed rank correlation for the per-corpus attributions.
+- Add a controlled duplicate-insertion experiment that 1st-order cannot solve but 2nd-order can; this would justify the extra backprop.
+- Spell out the experimental protocol behind the "<10% / <4%" Taylor-error numbers.
 
-1. **Fix the data curation confound**: Retrain both original and cleaned models for the same total number of gradient steps (e.g., 200k steps each), not the same number of "training iterations over the dataset." Report test loss as a function of total gradient steps. If the cleaned model is still better at the same step count, the result is clean and publishable.
-2. **Add TracIN-Ideal as a baseline**: Since 1st-order In-Run Shapley = TracIN-Ideal, run both in the copyright and data curation experiments. Report whether the second-order extension makes a quantifiable difference.
-3. **Moderate copyright policy claims**: Restrict them to the observation that data attribution can identify relevant training corpora even without verbatim overlap, and note that policy implications require broader empirical and legal analysis.
-4. **Provide frequency statistics for copyright experiment**: Report exactly how many (training, validation) pairs were used to compute average ranks in each similarity category in Table 1.
-
----
+## Evaluation by axis
+- **Originality**: medium-high. The Shapley reframing of TracIN is a small but real theoretical step; the ghost dot-product/vHv for pairwise inner products is genuinely new in this context.
+- **Importance**: high. Per-example attribution at pretraining scale is a problem with real legal and curation stakes.
+- **Soundness of claims**: mixed. The efficiency claim is well-supported. The "targeted to a specific model" claim lacks stability evidence. The data-quality claim is confounded by in-distribution evaluation. The copyright/royalty claim outruns the method.
+- **Experiments**: case studies are evocative and well-chosen but methodologically thin (single baseline, in-distribution evaluation, SGD only, no seed variation).
+- **Clarity**: good. Theorems, ghost derivations, and limitations are stated cleanly.
+- **Community value**: high — the ghost techniques and the per-iteration decomposition will be reused regardless of whether the case-study conclusions stand.
 
 ## Score and Decision
 
-**Anchor comparison:**
+Anchors retrieved (all queries; subset read in full):
+- `qk6AxjhFVR.md` — NESTLE (LLM data valuation), avg 5.25, Reject. Comparable framing but weaker theoretical novelty than this paper.
+- `EDoD3DgivF.md` — Linear Representations & pretraining frequency, avg 6.00, Accept. Different topic; similar "first principled study at scale" flavor.
+- `9EqQC2ct4H.md` — Crediting Data Contributors of Diffusion Models (Shapley for diffusion), avg 6.00, Accept. Closest match — Shapley scaling story with policy framing; this paper has stronger efficiency results.
+- `zWqr3MQuNs.md` — Detecting Pretraining Data from LLMs, avg 6.25, Accept. Different problem; comparable maturity.
+- `p85TNN62KD.md` — Versatile Influence Functions, avg 5.50, Reject. Similar gradient-based attribution; this paper has more striking efficiency wins.
+- `esYrEndGsr.md` — Influence Functions for Diffusion, avg 8.00, Accept. Stronger theoretical-empirical integration than the paper under review.
+- `jZw0CWXuDc.md` — LoGra / large-scale influence, avg 5.50, Reject. Very close analog (efficient gradient-projected attribution at scale); split reviews mirror likely fate here.
+- `HE9eUQlAvo.md` — Influence-based data selection, avg 6.40, Accept. Comparable applied flavor.
+- `PKqHT0xZhI.md` — Efficient Ensembles for TDA, avg 5.40, Reject. Less novel.
+- `OLtD2vDF5X.md` — HyperINF, avg 4.88, Reject. Narrower contribution than the paper here.
+- `9m02ib92Wz.md` — DataInf, avg 6.00, Accept. Same "closed-form efficient attribution" template; the paper here is more ambitious in scale.
+- `kuutidLf6R.md` — Diffusion Attribution Score, avg 7.50, Accept. Stronger evaluation rigor than this paper's case studies.
+- `WncnpvJk83.md` — GMValuator, avg 6.50, Accept. Comparable.
+- `77zLqGGowO.md` — Data Attribution for Multitask Learning, avg 5.50, Reject. Less impactful contribution.
+- `qUVP6IDc5J.md` — Eliciting Attributions from LLMs, avg 3.50, Reject. Much weaker.
+- `BQgAToASdX.md` — Generalized Group Data Attribution, avg 4.00, Reject. Notably less novel.
+- `fdvSCcB7i8.md` — Feature-Level Instance Attribution, avg 3.00, Reject. Far weaker.
 
-| Path | Avg Score | Decision | Comparison to this paper |
-|---|---|---|---|
-| `9EqQC2ct4H.md` | 6.00 | Accept | Shapley applied to diffusion models with efficiency trick (model pruning). Similar scope; this paper has a more principled algorithm (ghost dot-product) but a more limited experimental scale. |
-| `1hQKHHUsMx.md` | 6.75 | Accept | Data attribution on LLM pretraining using influence functions at 35B scale. More impressive empirical scale than GPT2-small but less principled framework. |
-| `jZw0CWXuDc.md` | 5.50 | Reject | Efficient influence functions for LLMs (LoGra at Llama3-8B scale). More impressive empirical scale; stronger experimental evaluation but comparable algorithmic novelty. Divided reviewers (8,8,3,3). |
-| `qk6AxjhFVR.md` | 5.25 | Reject | NESTLE for LLM data valuation. Less principled and less technically rigorous than this paper. |
-| `uVMZgtw2pf.md` | 4.67 | Reject | CHG Shapley—also computes Data Shapley in one training run via a gradient-based heuristic, less rigorously. Clearly weaker than this paper. |
-| `EXXvBdFJ6I.md` | 5.50 | Reject | KNN-Shapley value inflation correction. Different method, smaller scope. |
-| `WT2bL7sCM1.md` | 3.00 | Reject | Revisit Hessian-free influence functions—weaker contribution, no scaling up. Clearly weaker than this paper. |
-| `fdvSCcB7i8.md` | 3.00 | Reject | Feature-level instance attribution—basic method, limited experiments. Much weaker. |
-| `PKqHT0xZhI.md` | 5.40 | Reject | Ensemble-augmented TDA methods—comparable motivation, somewhat weaker technical contribution. |
-| `JDm7oIcx4Y.md` | 7.20 | Accept | Efficient gradient propagation—stronger technical innovation in efficient backprop; comparable originality level. |
+Relative to the cluster, this paper sits **above** DataInf / NESTLE / LoGra (closer technical analogs) because of (a) the genuinely new ghost vHv derivation, (b) the cleaner theoretical bridge to TracIN, and (c) the demonstrated pretraining-scale runtime parity — but **below** the diffusion-attribution accepts (kuutidLf6R/esYrEndGsr) because the case studies have real methodological gaps (in-distribution curation eval, copyright overreach, no stability analysis, SGD-only). That puts it around the diffusion-Shapley accept (9EqQC2ct4H, 6.00) and slightly above DataInf, with a half-step bonus for the efficiency story.
 
-**Assessment**: This paper is clearly above the low-scoring anchors (3.0–3.5), which offer minimal technical novelty. It is comparable to the 5.5–6.0 range: the ghost dot-product technique is a genuine algorithmic contribution (stronger than NESTLE at 5.25), the second-order extension is principled, and the application to GPT2 pretraining represents a meaningful scaling milestone for Data Shapley. However, it does not reach the 6.75 anchors because those papers have cleaner experimental validation and stronger empirical demonstrations. The confounded data curation experiment, the absence of TracIN baseline, and the overclaimed "foundation model" framing are real weaknesses. Compared to `jZw0CWXuDc.md` (5.50, Rejected), this paper has a more principled framework but more limited empirical scale. Compared to `9EqQC2ct4H.md` (6.00, Accepted), it has comparable scope and a stronger algorithm.
-
-**Originality**: Moderate-high. Ghost dot-product and second-order extension are original; first-order = TracIN-Ideal.
-**Importance**: Moderate-high. Scaling Data Shapley to pretraining is genuinely important if the experiments were cleaner.
-**Claim support**: Moderate. Runtime results are solid; data curation claim is confounded; copyright claim is under-evidenced.
-**Soundness**: Moderate. Theory is sound; experiments have real methodological gaps.
-**Clarity**: Good.
-**Value to community**: Moderate-high. Ghost dot-product is immediately usable; TracIN connection provides lasting insight.
-
-**Final Score: 6.0** (Accept, with major revisions requested on data curation baselines and copyright evidence)
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

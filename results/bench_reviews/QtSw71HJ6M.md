@@ -1,127 +1,83 @@
-Now let me run the calibration search before finalizing the review:Now I have enough to write the authoritative final review. Let me synthesize everything.
-
----
-
 ## Summary
-RLAD proposes to mitigate Q-value overestimation in offline RL by pre-training an anomaly detection (AD) module on the offline dataset and using its scores as monotonically decreasing weights on both the critic (Q-function) and actor (policy) loss during training. Two AD architectures — Deep SVDD and DAGMM — are tested in combination with SAC and BEAR as base RL algorithms. The method is evaluated on D4RL MuJoCo and Adroit benchmarks and compared against CQL, IQL, DT, EDAC, and others on the Q-value distribution and normalized returns.
-
----
+RLAD proposes to mitigate Q-value overestimation in offline RL by pretraining an anomaly detection model (Deep SVDD or DAGMM) on dataset state-action pairs, then using a monotonically decreasing function of the anomaly score as a multiplicative weight on the standard actor and critic losses. The paper reports normalized returns on D4RL MuJoCo and Adroit (averaged over 5 seeds) and a Q-difference analysis on halfcheetah-medium-v2 and Pendulum-v1, claiming "near state-of-the-art" performance.
 
 ## Strengths
-
-- **Conceptually distinct mechanism:** Rather than imposing hard constraints or pessimistic value penalties (CQL, BCQ), RLAD uses AD-derived soft weights. This avoids the overly conservative policies often produced by constraint-based methods. The plug-in design — where the AD module is trained independently and inserted without modifying the RL objective's structure — is clean and modular.
-
-- **Two qualitatively different AD architectures tested:** Combining Deep SVDD (hypersphere boundary method) and DAGMM (density-mixture method) with two base algorithms (SAC and BEAR) provides evidence that the framework generalizes across AD implementations, not just one cherry-picked architecture.
-
-- **Informative Q-function visualization on Pendulum-v1:** The Q-function heatmap in Section 5.2 (Figure 3) directly shows that RLAD sits between online SAC and CQL in conservatism, offering an interpretable qualitative diagnostic. This toy-environment analysis adds credibility to the method's core claim about balanced Q-value estimation.
-
-- **Q-difference analysis provides a directional signal:** Section 5.1 presents a concrete diagnostic — the distribution of `Q_difference = Q(s,a) - Q*(s,a)` — that shows RLAD's estimates are more concentrated around zero than CQL for both in-distribution and OOD samples in halfcheetah-medium-v2, partially supporting the claim that RLAD avoids both overestimation and excessive conservatism.
-
----
+- **Modular two-stage pipeline.** Decoupling OOD detection from the RL objective is conceptually clean and the paper instantiates four combinations (SAC/BEAR × Deep SVDD/DAGMM) in Tables 2–3, showing the framework is plug-and-play (Section 4.3 / Algorithm 1).
+- **Reported gains on multimodal datasets.** Table 2 indicates competitive numbers on medium-expert / medium-replay variants, which are harder for simple behavior-cloning-style constraint methods.
 
 ## Weaknesses
 
 ### Fatal
-*None that definitively invalidate all results.*
+- **The mechanism does not implement the stated goal.** The paper claims the method "mitigates the overestimation of OOD actions" (Abstract; §4.3) but Eq. (3)–(5) merely *down-weight* the critic gradient on bootstrap targets `(s', a')` with high anomaly score. This stops correction of Q on OOD regions; it does *not* push Q values down. Unlike CQL (explicit penalty on OOD Q) or BCQ/BEAR (support restriction), nothing in RLAD bounds `Q(s', π(s'))` from above. The actor (Eq. 5), which is itself only soft-weighted by `weight(s,a)` on in-distribution `s`, will still chase whatever spurious large Q values arise in OOD regions because those regions are never corrected toward zero. The paper offers no theoretical or empirical argument that "withholding updates" suppresses overestimation, and the §5.1 "evidence" depends on item below.
 
 ### Major
-
-- **Algorithm 1 has verifiably swapped parameter update subscripts.** Confirmed from the text:
-  > Line 11: `φ ← φ − α_φ ∇_φ L_Q` (updating *policy* parameters with the *Q-function* loss gradient)
-  > Line 13: `θ ← θ − α_θ ∇_θ L_π` (updating *Q-function* parameters with the *policy* loss gradient)
-
-  These assignments are inverted relative to every standard actor-critic convention and relative to the text in §4.3 (which correctly derives `∇_θ L(θ)` for the critic and `∇_φ L(φ)` for the actor). Whether this is a pure notation typo or reflects a code-level inversion is unknowable from the paper. Because the correct algorithm is unambiguous, it should be trivial to fix — but as written it undermines confidence in the pseudocode's fidelity to the actual implementation.
-
-- **Policy gradient as presented is inconsistent with the claimed SAC base algorithm.** The weighted policy update in Eq. 4 reads:
-  > `∇_φ L(φ) = E[weight(s,a) · Q_θ(s,a) · ∇_φ log π_φ(a|s)]`
-  
-  This is a REINFORCE-style log-policy gradient with no entropy regularization. SAC's defining feature — reparameterization with the entropy bonus `α H(π)` — is entirely absent from both the equation and Algorithm 1. The entropy term is not just a minor detail; it stabilizes SAC in continuous action spaces and is why SAC outperforms basic REINFORCE-style actor-critic algorithms. Omitting it while claiming SAC as the base algorithm creates a methodological inconsistency that the paper does not acknowledge. An ablation or at least a discussion of whether the entropy term was kept in practice is needed.
-
-- **Q-difference analysis has limited scope and a partially circular ground-truth proxy.** The analysis is presented only for halfcheetah-medium-v2 and only compared to CQL — not to BEAR, IQL, EDAC, or any other baseline from Tables 2/3. More critically, the paper uses the critic of an online SAC model as a proxy for Q*, yet online SAC is well-known to overestimate Q-values due to function approximation and bootstrapping. Since RLAD is itself SAC-based, close agreement with online SAC's Q-values could reflect shared bias rather than accuracy. The paper does not acknowledge this confound.
+- **The Q-difference analysis cannot support the "accurate Q-estimation" claim.** §5.1 estimates `Q*(s,a)` using "the critic network of an SAC model trained in online setting for proxy." This proxy is itself a biased, policy-dependent estimate, not the optimal value function. Worse, RLAD is a SAC variant so the comparison effectively measures Q-agreement with another SAC critic, while CQL is compared against a different family's critic. The headline conclusion of §5.1 — that RLAD's Q estimates are more accurate than CQL's — does not follow from this protocol. A ground-truth comparison (e.g., a tabular/low-dim MDP where `Q*` is computable, or rollout returns of greedy actions) is needed.
+- **Circular validation of the AD module.** The OOD/normal split used to demonstrate the AD module is itself "extracted using AutoEncoder and MC-Dropout" (§5.1). RLAD's anomaly detector is then "validated" against the verdict of *another* anomaly detector, not any ground truth. The Pendulum random-policy visualization (Fig. 3) is a sanity check, not evidence.
+- **`f(x) = 1/x` is numerically inconsistent with the paper's own assumptions.** §4.3 and Algorithm 1 line 6 require `f` to be "bounded, non-negative, monotonically decreasing." For Deep SVDD, `x` is the squared distance to the hypersphere center, which is exactly zero at the center and arbitrarily small for in-distribution points — so `1/x` is *unbounded* there. The paper specifies neither a clamp nor an epsilon, and this is the choice on which the entire SVDD variant rests.
+- **Baselines are pulled from heterogeneous source papers without standardized re-evaluation.** §5.3 explicitly states "baseline values are taken from each paper." With different evaluation protocols (training budgets, episode counts, normalization), this is not a fair comparison. Tables 1–3 report only mean returns over 5 seeds with no standard deviations or significance tests, so "best on most environments" cannot be statistically assessed.
 
 ### Minor
-
-- **No ablation isolating the AD contribution from simpler weighting schemes.** The paper does not compare against replacing the AD module with a simple distance-to-nearest-neighbor weight or a uniform weight. Without this, it is unclear whether the AD model's learned representations are necessary or whether any proximity-based downweighting of OOD samples would produce similar results. This is the most important missing experiment.
-
-- **No variance reporting despite multi-seed evaluation.** Results are "averaged over 5 random seeds" but no standard deviations or confidence intervals appear anywhere. On D4RL, methods often differ by 1–2 normalized score points — within typical seed variance. Variance bounds are necessary to claim superiority over baselines.
-
-- **`f(x) = 1/x` for Deep SVDD is numerically unstable.** Deep SVDD assigns anomaly scores based on distance to the hypersphere center; for perfectly normal samples these distances can be very small or zero, making `1/x` prone to numerical overflow. No clipping, offset, or normalization is mentioned.
-
-- **The weighting asymmetry between critic and actor is unexplained.** The critic uses `weight(s', a')` (next-step anomaly score) while the actor uses `weight(s, a)` (current-step anomaly score). The design has an intuitive justification — the critic is penalized for bootstrapping OOD *next* actions while the actor is penalized for selecting OOD *current* actions — but no discussion or ablation justifies this asymmetric choice over alternatives (e.g., using the same weight for both, or weighting the TD target only).
+- **Pseudocode parameter swap.** Algorithm 1 lines 11 and 13 update `φ` with `∇L_Q` and `θ` with `∇L_π` — the parameter symbols are exchanged versus the loss definitions. This is almost certainly a typo but introduces avoidable confusion in the paper's central artifact.
+- **No ablation isolating the weighting.** No experiment shows RLAD beats offline SAC with `weight ≡ 1` (or with random weights). Without this, attribution of gains to the AD module is not established. Likewise, no ablation on `f(·)`, on `(s,a)` vs. `(s',a')`, or on AD pretraining length.
+- **Dismissive treatment of uncertainty-based baselines.** §4.1 dismisses ensemble/MC-Dropout methods as "high computational cost or inaccurate" but RLAD itself trains a separate AD network with the same kind of cost; the paper does not acknowledge this symmetry.
+- **"Near-SOTA" vs. "SOTA" inconsistency.** Abstract/§5.4 say "near state-of-the-art"; §1 and §5.3 say "state-of-the-art." These should be reconciled.
+- **Informal density-ratio claim left implicit.** §4.2: "When the state s is fixed, this can be roughly interpreted with behavior policy" — this is the central justification for the weighting scheme and is never made precise.
 
 ### Trivial
-
-- The conclusion appears as §5.4 inside the Experimental Results section rather than as a standalone section. This is a minor structural organization issue.
-
----
+- Figure 3 caption appears in §5.1 but the figure is discussed in §5.2; small organizational issue.
+- Table 3 caption says "RLOCC" instead of "RLAD."
 
 ## Nice-to-Haves
-
-- Extend the Q-difference analysis to hopper and walker2d, and compare against IQL and BEAR (not just CQL), to support the generalization claim.
-- Provide anomaly score / weight distribution histograms by dataset type (medium, medium-replay, medium-expert) to reveal whether the AD module produces meaningfully differentiated weights or near-uniform assignments across dataset types.
-- Include a theoretical characterization (even informal) of the fixed point of the weighted Bellman operator, and under what conditions anomaly-score weighting provably reduces overestimation.
-- Discuss how Deep SVDD (single hypersphere) handles multi-modal datasets like medium-expert, which mixes near-random and near-expert trajectories.
-
----
+- An anomaly-score-weighted *penalty* term (e.g., add `weight(s', a') · Q(s', a')` to a CQL-style regularizer) rather than gradient down-weighting; this would actually implement the stated suppression goal.
+- Comparison against modern overestimation-suppression baselines (EDAC, SAC-N, MSG, ReBRAC) re-run under the same protocol.
+- Plots of Q-value trajectories on OOD actions over training iterations for SAC vs. RLAD vs. CQL.
+- Report standard deviations / per-seed scores; release code and AD hyperparameters.
 
 ## Removed Points
-
-*These points are flagged to be removed; treat them with caution.*
-
-1. **"All numerical results are image-only; no claim can be verified"** (Harsh Critic Issue 3): Removed. This is a PDF-parser artifact — the tables exist in the original submission as readable text. Per hard rules, formatting artifacts are parser errors, not author errors.
-
-2. **"The conclusion is placed inside §5 as a formatting error"**: Removed as a standalone weakness. Likely a parser artifact in section labeling.
-
-3. **Strength Finder: "Strong empirical performance on D4RL benchmarks"** (from Tables 2/3): Conditionally retained only as a claimed strength, since the underlying numbers are in image form and the algorithm pseudocode has a confirmed notation error that cannot be independently audited. Not elevated as a verified strength.
-
-4. **Strength Finder: "Simplicity of implementation"**: Removed as generic. Every method that proposes a plug-in module makes this claim.
-
----
+*These points are flagged to be removed, treat them with caution.*
+- Harsh critic's "missing baselines like EDAC/MSG/SAC-N/RORL/ReBRAC" was kept but softened to a nice-to-have rather than a major fault; demanding specific named baselines is partly scope creep, though the broader point (no modern overestimation-suppression baseline) is real and retained.
+- Strength Finder's "Direct evidence that RLAD avoids both overestimation and excessive conservatism" — dropped because the supporting Q-difference analysis is itself unsound (see Major weakness above); the strength conflicts with a verified weakness.
+- Strength Finder's "Simplicity of implementation" and "use of independently trained AD as OOD proxy" — dropped as generic restatements of the method rather than concrete evidence-backed strengths.
 
 ## Novel Insights
-
-The core observation that anomaly detection models — trained as semi-supervised OOD detectors — can replace explicit distributional constraints in offline RL is a genuinely clean framing. The independence of the AD module from the RL objective means the two components can be improved or swapped without re-deriving one another, which is an underexplored design space. The empirical finding (to the extent the Q-difference analysis is valid) that soft weighting avoids excessive conservatism while still suppressing OOD overestimation is a useful middle-ground result, though it is currently supported only in one environment with one comparison baseline.
-
----
+None beyond the paper's own contributions. The conceptual move (weight RL losses by an AD score) is plausible, but no theoretical analysis or rigorous empirical test confirms that it actually suppresses overestimation rather than merely slowing critic updates on the relevant transitions.
 
 ## Suggestions
-
-1. Fix Algorithm 1 lines 11 and 13: swap the update targets so the Q-function parameters θ are updated with `∇_θ L_Q` and the policy parameters φ are updated with `∇_φ L_π`.
-2. Clarify whether SAC's entropy term is included in the actual implementation (if yes, add it to Eq. 4 and Algorithm 1; if no, justify its removal or switch to a REINFORCE-style actor-critic as the stated base).
-3. Add a baseline that uses simple inverse-distance-to-dataset weighting (no learned AD model) to isolate the AD module's contribution.
-4. Add a `+ε` offset in the `f(x) = 1/x` weighting function to prevent numerical instability near zero.
-5. Report per-seed standard deviations alongside mean normalized returns.
-6. Extend the Q-difference analysis to multiple environments and multiple baselines.
+- Replace gradient down-weighting with an anomaly-score-weighted *penalty* on `Q(s', a')` so the mechanism actively suppresses OOD Q rather than ignoring it.
+- Validate Q-accuracy on a domain where `Q*` is computable (tabular MDP, low-dim continuous control with Monte-Carlo rollouts), not against another SAC critic.
+- Add an ablation with `weight ≡ 1` and with shuffled weights on identical seeds and protocols.
+- Clamp `f(x) = 1/x` (or replace with `1/(x+ε)` / `exp(-x)`) and justify the choice; align Algorithm 1 with the loss definitions and fix the parameter-swap typo.
+- Re-run a fixed subset of strong baselines under your own evaluation protocol and report seed-level standard deviations.
 
 ---
 
-## Score and Decision
+**Axis evaluation.**
+- *Originality:* moderate. Using an independent AD model as a soft weighting signal is a reasonable but incremental idea.
+- *Importance:* the problem (overestimation in offline RL) is real and well-motivated.
+- *Soundness of claims:* weak. The central mechanistic claim is not supported by the method's actual update rule, and the headline Q-accuracy claim rests on a fundamentally biased proxy.
+- *Soundness of experiments:* weak. Baselines imported from disparate papers, no std-devs, no isolation ablation, missing recent overestimation baselines, AD validation is circular.
+- *Clarity:* mediocre. Algorithm 1 contains parameter-swap errors, `f` is described as bounded but the chosen form is unbounded, and key claims (e.g., density-ratio interpretation) are left informal.
+- *Value to the community:* limited in current form.
 
-**Anchor summary:**
+### Calibration anchors
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/eY5JNJE56i.md` (avg 6.75) — Accept. Cleaner formulation of essentially the same problem (smoothing OOD Q values) with a more principled mechanism and theory. RLAD is substantially weaker on both axes.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/4WM0OogPTx.md` (avg 6.75) — Accept. Strong offline-RL paper with theory and SOTA results; much stronger than RLAD.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/3w6xuXDOdY.md` (avg 6.50) — Accept. Empirical benchmark contribution; not directly comparable but indicates the bar for "useful empirical paper."
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/P7t2niLbvw.md` (avg 6.50) — Accept. RL-for-AD paper unrelated topic-wise.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/mHXCByvrLd.md` (avg 5.00) — Reject. Offline RL with novel framing but mixed empirical support; RLAD's mechanism issue makes it weaker.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/N2Kdq5biZx.md` (avg 5.33) — Reject. Reasonable scope but limited empirical novelty; comparable framing strength to RLAD but with cleaner experiments.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/p7iVaVidha.md` (avg 5.33) — Reject. Domain-specific offline RL; cleaner empirically than RLAD.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/P895PSh41Z.md` (avg 4.50) — Reject. Robust offline RL with thin theoretical grounding; similar level of polish to RLAD but without RLAD's mechanism inconsistency.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/X5qi6fnnw7.md` (avg 4.75) — Reject. Conservative-FB; comparable scope/evidence shortfalls.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Aj1wftldeR.md` (avg 4.75) — Reject. Benchmark paper, weak related to RLAD.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/UoYxPYMUWd.md` (avg 4.00) — Reject. Offline RL with reward-mechanism trick, conceptually thin; similar tier to RLAD.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/fWx1CKgPCc.md` (avg 4.00) — Reject. Lyapunov-based uncertainty control; thin theory and experiments; comparable.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/tR2qSmSOQ3.md` (avg 4.25) — Reject. Offline-to-online with weak empirical support; comparable tier.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/fo5IUCMoFg.md` (avg 4.25) — Reject. Comparable evidence quality.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/RwiUmrEHgR.md` (avg 3.00) — Reject. Long-tail classification with RL-flavored trick; less rigorous than RLAD.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/SYI409tbsv.md` (avg 4.60) — Reject. Clustering-AD; tangential.
 
-| Path | Avg Human Score | Comparison to RLAD |
-|---|---|---|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/eY5JNJE56i.md` | 6.75 (Accept) | Stronger — has theoretical analysis, ablations, clear pseudocode, multi-environment Q-function analysis, and near-SOTA results with variance. RLAD has none of these. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/QyVLJ7EnAC.md` | 6.40 (Accept) | Stronger — double-pessimism principle is theoretically motivated with convergence results and broader robustness analysis. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/3w6xuXDOdY.md` | 6.50 (Accept) | Higher quality — benchmark contribution with extensive multi-algorithm testing and analysis across many environments. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/oWKPZ1Hcsm.md` | 5.00 (Reject) | Comparable scope — plug-in pretraining idea for offline RL, but that paper has cleaner pseudocode and no algorithm-level inconsistency. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/UoYxPYMUWd.md` | 4.00 (Reject) | Comparable quality — novel framing but methodological issues and limited scope. Similar pattern of good idea, weak execution. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/fWx1CKgPCc.md` | 4.00 (Reject) | Comparable — limited contribution, missing baselines, unclear theoretical-to-practical connection. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/gEdg9JvO8X.md` | 3.67 (Reject) | Slightly below RLAD in novelty but has no algorithm-level pseudocode error. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/6PcJEFKvBD.md` | 2.33 (Reject) | Much weaker — software library contribution, not an algorithmic paper. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/tR2qSmSOQ3.md` | 4.25 (Reject) | Comparable — offline-to-online RL with a limited analysis scope. |
+RLAD sits with the cluster around 3.5–4.0: a plausible idea undermined by a mechanism that does not provably do what the paper claims, a Q-accuracy experiment that uses a biased proxy, and benchmark tables stitched from heterogeneous source numbers with no variance.
 
-**Calibration reasoning:** The paper falls clearly below the 6+ Accept tier (no theoretical analysis, missing ablations, confirmed pseudocode error, limited empirical scope). It is in the same range as the 4.0 Reject anchors (ODAF, LUC) that had novel ideas but methodological execution problems. The Algorithm 1 subscript swap and the inconsistency with SAC's entropy term are both confirmed, real issues that would require revision before results can be trusted without reservation. The paper is not completely without value — the AD-weighting framing is novel and practically motivated — but in its current form it does not meet the bar for acceptance.
-
-**Final Score: 4.0 — Reject**
-
-**Axis summary:**
-- *Originality*: Moderate — using AD scores as soft weights is a fresh angle on a well-studied problem.
-- *Importance of research question*: High — overestimation in offline RL is a central challenge.
-- *Claims well-supported*: Weak — Q-difference analysis is narrow (one env, one baseline), no ablations, algorithm notation is inconsistent.
-- *Soundness of experiments*: Moderate — methodology is reasonable but flawed in presentation, limited scope.
-- *Clarity of writing*: Below average — algorithm pseudocode has confirmed notation errors, policy gradient is inconsistent with stated base algorithm.
-- *Value to research community*: Low-to-moderate — framework is interesting but needs significant repair before results can be trusted.
-
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>3.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

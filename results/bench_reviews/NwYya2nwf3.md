@@ -1,124 +1,83 @@
-Now I have enough context to write the final meta-review. Let me compile it.
-
----
-
 ## Summary
-
-ExpertZIP proposes a progressive framework for compressing Mixture-of-Experts (MoE) models by leveraging Huffman tree structures to determine the order of expert merging, targeting underutilized experts in the Switch Transformer. The abstract reports a 17.23× model size reduction, 4.84× inference speedup, and 1.18% average accuracy drop relative to the original 64-expert model, along with a 6.47% accuracy gain over models with an equivalent number of experts.
-
-> **Critical caveat**: The PDF parser extracted only 10 lines — the title and abstract. The entire paper body, including all methods, experiments, and analysis, is absent. The review below is necessarily confined to what the abstract states. Weaknesses that cannot be verified or refuted without the body are marked accordingly. This limitation is a parser failure, not an author failing, and does not reflect on the paper's quality per se; however, it precludes assessing methodology, ablations, or experiments.
-
----
+ExpertZIP proposes a progressive fusion framework for Mixture-of-Experts (MoE) models that uses a Huffman tree structure to order the merging of underutilized experts. The authors report a 17.23× reduction in model size, 4.84× inference speedup, and only 1.18% average accuracy loss versus a 64-expert Switch Transformer, plus a 6.47% accuracy gain over models with an equivalent number of experts.
 
 ## Strengths
-
-- **Novel Huffman-tree fusion ordering**: Mapping expert selection frequency to a Huffman-tree construction and using that tree to determine progressive merge order is a specific and distinctive design choice. It differs from prior approaches (e.g., magnitude-based pruning, one-shot removal) by providing a frequency-principled merging schedule. The abstract explicitly describes this: "leverages a Huffman tree-based expert fusion technique… systematically merges underutilized experts step by step."
-- **Progressive step-by-step fusion**: Rather than one-shot pruning, the staged approach — merging pairs of underutilized experts incrementally — is a principled strategy for preserving representational capacity across compression levels. This is a concrete architectural choice described in the abstract.
-- **Strong claimed compression-accuracy numbers on a well-understood baseline**: 17.23× size reduction and 4.84× inference speedup with only 1.18% accuracy drop on the 64-expert Switch Transformer are striking if fully documented. The Switch Transformer provides a reproducible, community-familiar baseline.
-
----
+- **Concrete, quantitative efficiency claims tied to a recognized base model.** The paper reports specific numbers (17.23× size reduction, 4.84× inference speedup, 1.18% accuracy drop) against the 64-expert Switch Transformer (Abstract), which gives a clear comparison anchor if the body's experimental setup is sound.
+- **Structured (rather than ad-hoc pairwise) merge ordering.** Framing expert fusion as a hierarchical procedure driven by utilization frequencies is a reasonable design choice — it converts a combinatorial merging-order problem into a deterministic one.
 
 ## Weaknesses
 
 ### Fatal
-None identifiable from the abstract alone; evaluation of the core experimental methodology is blocked by the parser failure.
+None established from the abstract alone.
 
 ### Major
-
-- **The central accuracy comparison is defined against an ambiguous baseline.** The most important positive claim — "6.47% increase in accuracy relative to models with an equivalent number of experts" — is the paper's primary evidence that ExpertZIP is better than simply using a smaller MoE from the start. However, "equivalent number of experts" is not defined in the abstract. This phrase could refer to: (a) a smaller MoE trained from scratch with the same compute budget (a truly fair comparison), (b) a naively pruned model (any structured merging would beat this), or (c) an inadequately tuned baseline. The validity of the 6.47% gain depends entirely on which interpretation is correct. Because this figure is the central competitiveness claim for the method, the ambiguity is substantive. If the paper body defines the baseline clearly and rigorously (e.g., trained-from-scratch or random-merge baseline), this concern is resolved — but it cannot be confirmed from the available text.
-
-- **The 17.23× total model-size reduction appears implausible without decomposition.** In Switch Transformer, expert FFN parameters are a fraction of total model parameters (attention, embeddings, and shared FFN layers are not touched). A method that only merges expert blocks cannot achieve a 17.23× reduction in *total* model size unless the experts constitute nearly all parameters or the denominator is "expert parameters only." The abstract does not clarify whether this figure refers to total parameters or expert parameters. If "expert parameter reduction" is conflated with "model size reduction," the headline figure is misleading. The body likely clarifies this, but the abstract's framing creates a red flag that must be addressed.
+- **Motivational tension between "underutilized" and "essential contributions maintained."** The abstract argues many experts are underutilized, then proposes to merge precisely those experts while claiming their "essential contributions are maintained." If the experts genuinely contribute little, the natural baseline is pruning, not fusion; if they contribute meaningfully, aggressive Huffman-style merging risks losing that signal. The abstract does not resolve this, and pruning is the most obvious baseline a reader will demand.
+- **Huffman-coding analogy needs justification for weight space.** Huffman codes are optimal *prefix codes* over symbol streams under a known frequency distribution. The leap from coding-theoretic optimality over symbols to an inductive bias for *parameter fusion order* is non-obvious. The abstract treats the choice as self-evidently appropriate; readers will need an argument (or ablation) that Huffman order beats alternatives such as similarity-based clustering, uniform pairwise averaging, or random merge order.
+- **"6.47% increase over models with an equivalent number of experts" is comparison-ambiguous.** The reference point is not specified in the abstract. A from-scratch small-expert Switch Transformer is not a fair comparator for a method that starts from a fully trained 64-expert teacher, because the gain may reflect distillation/initialization advantages rather than the proposed fusion mechanism.
 
 ### Minor
-
-- **"Average accuracy" is not benchmarked in the abstract.** The 1.18% drop in "average accuracy" does not name the benchmarks or aggregation method. Different benchmark suites (e.g., single downstream task vs. multi-task average vs. perplexity) yield very different interpretations of the same headline number. The body presumably names these, but the abstract's phrasing makes the key accuracy claim non-interpretable in isolation.
-
-- **Huffman tree use: heuristic vs. claim of optimality.** The abstract does not claim Huffman coding's information-theoretic optimality transfers to expert fusion, but the framing by analogy invites confusion. The paper should make explicit in its contribution statement whether the Huffman tree is used purely as a merge-scheduling heuristic (fine) or as a theoretically principled strategy (which would require formal justification). This is a clarity issue, not necessarily a correctness issue.
-
-- **Inference time improvement lacks setup specification.** A 4.84× speedup figure is hardware-, batch-size-, and sequence-length-dependent. Without specifying the hardware and evaluation setup, this number is not reproducible from the abstract. Again, the body presumably clarifies this.
+- **Aggregated single-number accuracy metric.** A "1.18% decrease in average accuracy" averaged across an unspecified task suite, without per-task numbers or variance reporting in the abstract, makes it difficult to rule out large per-task regressions hidden behind the average.
+- **Generalization across MoE families unclear.** Results are framed against Switch Transformer; whether the approach transfers to Mixtral-style or other modern MoE families is not signaled in the abstract.
 
 ### Trivial
-None identifiable (formatting artifacts are parser issues, not paper errors).
-
----
+- None substantive.
 
 ## Nice-to-Haves
-
-- An accuracy vs. number-of-fused-experts trade-off curve (across intermediate compression levels, not just the endpoint) would demonstrate whether Huffman-ordered fusion preserves accuracy better than alternative orderings at each step.
-- Expert utilization frequency histograms before and after fusion would directly validate the motivating observation about underutilization and confirm that routing remains sensible after merging.
-- Extension to more recent large-scale MoE models (e.g., Mixtral, DeepSeek-MoE) beyond the Switch Transformer would substantially strengthen the relevance claim for contemporary deployment.
-- Ablation comparing Huffman-ordered fusion against simpler merge schedules (random ordering, magnitude ordering) would isolate whether the Huffman structure specifically contributes to performance, or whether progressive fusion in any order is sufficient.
-
----
+- A pruning baseline (drop k lowest-utilization experts + brief fine-tune) — the single most informative ablation given the stated motivation.
+- A merge-order ablation comparing Huffman ordering to similarity-based clustering, uniform pairwise averaging, and random ordering, to isolate the contribution of the Huffman structure specifically.
+- Routing-distribution visualizations pre/post-fusion to confirm that surviving experts actually inherit the workload of merged ones rather than the router collapsing.
+- Wall-clock latency (not just FLOPs) at realistic batch sizes for the speedup claim.
 
 ## Removed Points
-
-*These points are flagged to be removed — treat them with caution.*
-
-1. **Harsh Critic — "Theoretical connection between Huffman coding and expert fusion optimality is missing."** The abstract does not claim Huffman-theoretical optimality; it uses Huffman trees as an ordering mechanism. This was partially retained as a minor clarity concern, not a fatal structural flaw, since the claim of inherited optimality is not actually made.
-
-2. **Harsh Critic — "Missing trained-from-scratch small MoE baseline."** This is a legitimate concern but belongs in the "Major" tier under the already-flagged baseline ambiguity, not as an independent fatal flaw.
-
-3. **Harsh Critic — "Comparison against other expert pruning/merging methods absent."** Valid as a nice-to-have ablation, but demanding a complete survey of ablation baselines from an abstract-only read is beyond what can be confirmed as missing. Moved to nice-to-haves.
-
-4. **Strength Finder — "Comparison against equivalent-expert baselines directly addresses the question of whether the fused experts retain more useful capacity."** This was listed as a strength but is precisely the ambiguous claim that constitutes a major weakness. Removed per the rule that conflicting evidence gives priority to the weakness.
-
-5. **Harsh Critic — Points about reproducibility of hyperparameters, training logs, appendix proofs.** Removed per hard rules: parser strips appendix; reproducibility nitpicks about undisclosed hyperparameters are disqualified.
-
-6. **Harsh Critic — "4.84x inference improvement is not decomposed."** Retained as a minor/trivial issue (setup specification), but the more elaborate speculation about specific hardware configurations was dropped as scope creep.
-
----
+*These points are flagged to be removed; treat them with caution.*
+- **Harsh critic's framing that the body is unverifiable / abstract-only review.** This reflects a parser limitation, not an author error; the body exists in the original submission and should not count against the paper.
+- **Strength: "The problem is real." / "performance comparable to much larger models."** Generic/sycophantic strengths that don't reflect specific evidence from this paper — removed per filtering rules.
+- **Harsh critic's "17× reduction is prima facie surprising" framing.** This is suspicion without evidence; the body presumably contains the per-task numbers. Demoted to the minor "single aggregate accuracy" concern, which is the substantive version.
 
 ## Novel Insights
-
-The use of Huffman-tree-based scheduling as a merge-order heuristic for expert fusion — derived from routing frequency distributions — is a genuinely novel application of classical information theory to the MoE compression problem. Even absent theoretical guarantees of optimality in the lossy weight-space setting, the frequency-driven merge ordering provides a natural, data-driven schedule that avoids the arbitrariness of random or magnitude-only pruning. If the body substantiates this with ablations (Huffman order vs. other orders) and shows the ordering itself is responsible for accuracy preservation, this would be a concrete and actionable contribution to the MoE compression literature.
-
----
+None beyond the paper's own contributions. The core conceptual move — borrowing Huffman-tree structure to order expert fusion — is novel framing but its theoretical grounding remains unestablished from the abstract; whether it is genuinely insightful or merely an analogy depends on body-level argument and ablations.
 
 ## Suggestions
+- Add a pruning baseline at matched parameter budget; if pruning matches ExpertZIP, the Huffman machinery is unjustified.
+- Ablate merge order (Huffman vs. similarity-based vs. random vs. uniform averaging) to isolate the contribution of the Huffman structure.
+- Replace single-number average accuracy with a per-task table including variance.
+- Provide an explicit argument (or empirical evidence) for why utilization-frequency-driven Huffman ordering is appropriate for *weight-space* fusion, beyond the coding-theoretic analogy.
+- Specify the "equivalent number of experts" baseline explicitly and ensure it is matched in training compute/initialization.
+- Evaluate on at least one additional MoE family (e.g., Mixtral, OLMoE) and report wall-clock latency.
 
-1. **Define the "equivalent number of experts" baseline precisely** — state explicitly whether this is a model trained from scratch, randomly merged, or otherwise constructed. This single clarification determines whether the 6.47% gain is a major contribution or a weak comparison.
-2. **Decompose the 17.23× size reduction** — report separately (a) reduction in expert parameters and (b) reduction in total model parameters. If the former is the correct denominator, say so explicitly and report the total model footprint in absolute terms (GB).
-3. **Name all evaluation benchmarks** — "average accuracy" should be replaced with a named benchmark suite and explicit aggregation formula.
-4. **Clarify the Huffman framing** — explicitly state in the introduction whether the Huffman tree is a heuristic scheduling tool or whether any optimality property is claimed.
-5. **Add an ablation on merge order** — even a two-condition comparison (Huffman order vs. random order) would substantially validate the method's core design choice.
-
----
+## Evaluation Axes
+- **Originality:** Moderate. The Huffman-tree-as-merge-schedule framing is novel; the broader MoE-compression problem is well-trodden (cf. Merge-Then-Compress, MoE-Pruner, EEP, MoE-SVD).
+- **Importance:** Solid — MoE compression for deployment is a legitimate, active problem.
+- **Claim support:** Cannot fully assess; headline claims are reasonable but reported in aggregated form, and the key conceptual claim (that Huffman ordering is the right inductive bias) is asserted rather than argued in the abstract.
+- **Experimental soundness:** Uncertain from available signal; the natural baselines (pruning, alternative merge orders) must be present in the body.
+- **Clarity:** Abstract is readable but has internal tension (underutilized vs. essential).
+- **Value to community:** Modest if results hold and ablations are present; the Huffman framing alone is unlikely to drive adoption without the supporting baselines.
 
 ## Score and Decision
 
-**Calibration anchors (all returned by the single calibration_search call):**
+Anchors retrieved:
+- `eFWG9Cy3WK.md` (Merge, Then Compress) — avg 6.33, **accept**. Closest topical match; explicitly investigates "best recipe to merge experts" with strong ablations and conventional-merging baselines. ExpertZIP's abstract lacks the same depth of motivation and baseline coverage.
+- `nT2u0M0nf8.md` (CAMEx) — avg 6.67, accept. Curvature-aware expert merging with clear theoretical grounding; stronger conceptual justification than ExpertZIP's Huffman analogy.
+- `QHzzAU7Qf9.md` (SMEAR) — avg 6.00, reject. Soft expert merging with principled motivation.
+- `uWvKBCYh4S.md` (Mixture of LoRA Experts) — avg 5.00, accept. Moderate originality; comparable scope.
+- `hB6jYbvypa.md` (MoE-Pruner) — avg 4.25, reject. Topic-similar pruning method; lacks strong baselines per reviewers — comparable position to ExpertZIP.
+- `UUZuwDv8iw.md` (Fantastic Experts) — avg 4.33, reject. Expert-level sparsification analysis; reviewers found execution underwhelming — similar caliber.
+- `TTUtPIpaol.md` (EEP) — avg 5.25, reject. Expert pruning via evolutionary search; comparable scope but more thorough methodologically.
+- `ho7ZUS1z8A.md` (MoE-SVD) — avg 5.00, reject. Decomposition-based MoE compression; similar empirical framing.
+- `sMwYn2lZjO.md` (MoE PTQ benchmark) — avg 4.60, reject. Empirical compression study.
+- `fvUVe2gJh0.md` (Model merging at scale) — avg 5.33, reject.
+- `ZClm0YbcXP.md` (UOE) — avg 5.25, reject.
+- `AqRwoHvKtN.md` (DUMoE) — avg 5.33, reject.
+- `LnKDcqOfgy.md` (Rate/Distortion quantization) — avg 5.00, reject.
+- `N23g8eGOiP.md` (NeuZip) — avg 4.67, reject.
+- `ZWi6RpT4mJ.md` (CoINR) — avg 3.50, reject.
+- `J8LYjgi7nH.md` (Free-MoE) — avg 3.50, reject. Weak motivation; comparable to ExpertZIP's conceptual issue.
+- `VAqRZIuW8m.md` (Modular Experts) — avg 3.50, reject.
+- `762u1p9dgg.md` (MOEfication by Masks) — avg 3.40, reject.
 
-| Path | Avg Human Score | Comparison to ExpertZIP |
-|------|----------------|--------------------------|
-| eFWG9Cy3WK (Merge, Then Compress SMoE) | **6.33** (Accept) | Most similar topic; full paper with extensive ablations, permutation alignment, and 8-benchmark validation — much more verifiable than ExpertZIP's abstract-only submission |
-| IC5RJvRoMp (LLM-Streamline layer pruning) | **7.50** (Accept) | High-quality LLM compression; strong methodology and metric novelty — substantially more evidence than ExpertZIP provides |
-| UUZuwDv8iw (Fantastic Experts sparsification) | **4.33** (Reject) | Same MoE compression space; rejected for insufficient justification of design choices relative to baselines — similar concern applies here |
-| qh1goDZ0ZQ (Holistic MoE Compression) | **4.33** (Reject) | MoE compression study on Mixtral; rejected partly for limited novelty — ExpertZIP's Huffman framing is more novel but equally unverifiable |
-| ho7ZUS1z8A (MoE-SVD compression) | **5.00** (Reject) | Decomposition-based MoE compression; rejected despite reasonable results, similar to ExpertZIP's profile |
-| 762u1p9dgg (MOEfication by Experts as Masks) | **3.40** (Reject) | Very low-scoring MoE sparsification; multiple methodological concerns — ExpertZIP's abstract is stronger than this but body is unverifiable |
-| ktiikNTgK5 (Compresso LLM pruning) | **5.25** (Reject) | Structured pruning LLM, medium band; solid but insufficient experiments — ExpertZIP has stronger claimed numbers but equally unverifiable |
-| zZU69H8tcr (SparsitySolver RL pruning) | **3.75** (Reject) | Low-scoring LLM pruning; methodological weaknesses — ExpertZIP's framing is more principled |
-| f4b0YVwKUO (FASP LLM pruning) | **4.00** (Reject) | Low-scoring structured pruning; acceptable methodology but limited novelty |
-| 5lUdTogEL3 (Balancing Discriminative Knowledge) | **1.00** (Reject) | Very low anchor; incomplete submission — ExpertZIP clearly above this floor |
-| LnKDcqOfgy (Rate/Distortion Quantization) | **5.00** (Reject) | Medium-band anchor; comparable compression scope but different domain |
-| LXlTdn9hY9 (HESSO neural pruning) | **4.50** (Reject) | Medium-low structured pruning; adequate framing but moderate results |
+Read in full: eFWG9Cy3WK (Merge-Then-Compress), hB6jYbvypa (MoE-Pruner), TTUtPIpaol (EEP). ExpertZIP's abstract is conceptually weaker than Merge-Then-Compress (which won acceptance partly by carefully addressing the merging-recipe question and showing conventional merging fails), comparable in scope to MoE-Pruner and EEP (which were rejected for limited baselines and unclear motivation), and stronger than Free-MoE-class papers (which were dinged for hand-wavy motivation). The Huffman-as-merge-order framing reads as a slightly novel hook but is under-justified, and the obvious pruning baseline is conspicuously absent from the abstract.
 
-**Calibration reasoning:**
+This places ExpertZIP near the MoE-Pruner / EEP band — roughly 4.0 — with upside if the body contains the pruning baseline and merge-order ablation.
 
-The accepted MoE compression paper (eFWG9Cy3WK, 6.33) had a full body with extensive ablations, neuron permutation alignment analysis, and 8-benchmark evaluations. The rejected MoE compression papers (4.33–5.00) had full bodies with methodological gaps in novelty or baselines. ExpertZIP sits in a paradoxical position: its framing (Huffman tree ordering) is potentially more novel than the rejected papers, but the body is entirely unavailable for evaluation. The two verifiable concerns from the abstract — the undefined "equivalent experts" baseline and the implausible total model-size reduction framing — are substantive enough to constitute major issues. Given that similar-topic papers with full bodies were rejected at 4.33 for weaker concerns, and that we cannot evaluate ExpertZIP's experiments at all, a score at the lower end of the medium band is appropriate.
-
-**Final axes assessment:**
-- *Originality*: Moderate-to-good — Huffman tree ordering for expert fusion is a fresh framing, but the core idea of merging underutilized experts is not new.
-- *Importance*: Moderate — MoE compression is a relevant and active area.
-- *Claims supported*: Weak — the two most important claims (6.47% gain and 17.23× reduction) have unresolved definitional issues in the abstract; full paper body unavailable.
-- *Soundness of experiments*: Unverifiable — no body available.
-- *Clarity of writing*: Adequate at abstract level; key claims are ambiguously framed.
-- *Value to community*: Conditional on the body resolving the baseline and size-reduction concerns.
-
-**Score: 3.5 / 10 — Reject**
-
-The paper addresses an important and active problem with a novel structural idea. However, based on what is reviewable (the abstract only), the two central quantitative claims — the accuracy improvement over "equivalent expert" models and the 17.23× size reduction — are stated in ways that raise serious unresolved methodological questions. Without the paper body to verify the experimental setup, baselines, and size-reduction accounting, there is insufficient basis for acceptance. If the body resolves these concerns (clearly defined baselines, properly attributed size reduction, named benchmarks), the paper could merit a 5–6 range.
-
-MY FINAL SCORE: <pineapple>3.5</pineapple>
+MY FINAL SCORE: <pineapple>4.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

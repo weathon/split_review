@@ -1,126 +1,83 @@
-Now let me run the calibration search to gather scoring anchors.Now I have everything I need to write the consolidated meta-review. Let me synthesize.
-
----
-
 ## Summary
-This paper trains LSTM-based recurrent neural networks using PPO reinforcement learning to model a macaque curl-field (CF) motor adaptation task from Sun et al. (2022). It introduces KL-divergence action regularization terms for biologically plausible kinematics and demonstrates that RL-trained RNNs can replicate key behavioral features (overcompensation reaches, faster relearning after washout) and some neurophysiological features (stable force-predictive subspace, qualitatively uniform preparatory state shifts). Crucially, it shows that CF-pretraining with random curl fields produces near-orthogonal learning-washout geometry, better matching monkey neural data, and posits this is driven by "structured dynamical motifs" from prior experience.
-
----
+The paper trains LSTM agents with PPO on a curl-field (CF) motor adaptation task replicating Sun et al. (2022), introducing two KL-based action-distribution regularizers (zeroness and smoothness) to yield biophysically realistic accelerations. It claims to reproduce behavioral findings (overcompensated reaches, savings) and neural geometry findings (preparatory state circle, stable force-predictive subspace, uniform shifts), and argues that pretraining with random curl fields yields more brain-like near-orthogonal learning–washout shifts.
 
 ## Strengths
-
-- **Novel action distribution regularization with a clear ablation:** The KL-based zeroness and smoothness constraints are a practically useful contribution. Figure 2a cleanly shows that both zeroness-constrained variants saturate peak acceleration around 2 m/s², with Figure 2b–c demonstrating a qualitative match to monkey bell-shaped acceleration profiles. The ablation is a genuine demonstration.
-
-- **Overcompensation emerging from reward maximization alone:** The paper shows in Section 3.2 / Figure 2e–f that the RL agent discovers the physically optimal "overcompensated" curved trajectory without supervision. This is a genuinely interesting observation: supervised learning would require analytically deriving and enforcing this trajectory, while RL discovers it via reward maximization — a meaningful distinction for the modeling philosophy.
-
-- **First RL-trained RNN modeling of monkey motor adaptation neural geometry:** To the authors' knowledge (supported by the paper's literature review), no prior work investigates RL-trained RNN activity during learning and compares it to monkey motor cortex geometry during motor adaptation. The experimental design faithfully replicates the 8-target delayed-reach task from Sun et al. (2022).
-
-- **Honest reporting of model failures:** The paper explicitly acknowledges in Section 3.3 that the baseline model fails to replicate near-orthogonal learning-washout shifts (Figure 3e), rather than obscuring this gap. This intellectual honesty is a strength.
-
-- **CF-pretraining demonstrably improves orthogonality:** Figure 4b shows a statistically significant increase in learning-washout angle for CF-pretrained models across 200 washout epochs, with clear separation from the baseline — a concrete, quantified result for the main claim of neural geometry improvement.
-
----
+- The KL-based zeroness and smoothness action regularizers are a concrete, novel mechanism for shaping RL-trained motor agents toward biophysical acceleration profiles; the ablation in Fig. 2a shows they prevent unbounded acceleration growth and saturate around 2 m/s², qualitatively matching the monkey profiles in Fig. 2c (Section 3.1).
+- The system is end-to-end RL with sparse +1 reward and no demonstration/trajectory supervision, and still recovers overcompensated curved reaches (Fig. 2e–f) — a non-trivial qualitative match.
+- The CF-pretraining → more orthogonal learning–washout shift result (Fig. 4b) is a specific, testable empirical observation that ties model task-set history to neural geometry.
 
 ## Weaknesses
 
 ### Fatal
-*None that invalidate the entire framework.*
+None.
 
 ### Major
+- **The "prior experience increases brain-likeness" claim is confounded by an architectural intervention.** The CF-pretrained model both (a) experiences random curl fields and (b) receives the CF coefficient k as an additional input during pretraining, then has k zeroed at test time (Section 3.3.1, items 1–2 and the "zeroed out" sentence). These are two distinct interventions: experience vs. providing a context variable that lets the network build a parameterized family of dynamics. The orthogonality result (Fig. 4b) is then attributed to "structured dynamical motifs ... from prior experience," but no ablation isolates exposure from the k input. Additionally, feeding k=0 at test time is itself OOD relative to training (the input channel was never trained with k=0). Without disentangling experiments, the headline interpretive claim of Section 3.3.1 — also propagated to the abstract and conclusion — is not supported by the experiment that motivates it.
 
-- **The headline mechanistic claim ("dynamical motifs") is a hypothesis with no supporting analysis.** The abstract states "We argue the increased fit to neurophysiological recordings is driven by more generalizable and structured dynamical motifs," and the Discussion frames it as a hypothesis. However, no characterization of dynamical motifs is ever performed: no fixed-point analysis, no participation-ratio or dimensionality comparison between baseline and CF-pretrained networks *before* the adaptation experiment, no trajectory-space analysis. The paper demonstrates *that* CF-pretraining increases orthogonality but does not demonstrate *why* in any mechanistic sense. The "dynamical motifs" explanation is an unfalsifiable post-hoc label. This gap is arguably acceptable for a preliminary study, but the abstract's "We argue..." framing overclaims relative to what is shown. Future work is explicitly deferred in the Discussion but the disconnect between the claim and the evidence is currently not flagged clearly enough.
+- **n=4 seeds, with several central conclusions resting on non-significant tests interpreted as positive evidence.** The "uniform shift" claim is supported by p=0.08 in Fig. 3g and p=0.38 in Fig. 4c (Wilcoxon rank-sum, n=4), with the authors writing "shifts are not statistically different" as if this supports uniformity. Failure to reject the null with n=4 carries essentially no evidence for the null. The orthogonality comparison in Fig. 4b — the paper's main quantitative model-to-brain bridge — also rests on 4 seeds. The evidential base is thin for the strength of the claims drawn.
 
-- **The "uniform shift" claim is statistically marginal and the trend contradicts it.** The text (Section 3.3) states: "shifts not significantly different, p>0.05, Wilcoxon rank sum test" — but Figure 3g's own caption reports "p=0.08, Wilcoxon rank-sum test (one-sided), **although near shifts are consistently larger than far shifts**." With only 4 seeds, a test at p=0.08 is severely underpowered; non-rejection here is uninformative. Moreover, the caption itself acknowledges a systematic directional trend (near > far) that contradicts the uniformity claim. The paper claims this "reproduces the findings from neurophysiological experiments," but the data offer at most weak support. This is a central claimed result that the data do not adequately establish.
-
-- **The "motor memory" (faster relearning) result has an unacknowledged confound.** Section 3.2 presents faster relearning as evidence of motor memory. However, with gradient-based RL using Adam, at least two non-memory mechanisms can produce this result: (i) Adam's accumulated second-moment gradient estimates bias updates toward directions useful for the CF task; (ii) network weights after washout remain in the basin of a previously successful solution, requiring fewer gradient steps to reconverge. The paper does not acknowledge these confounds or control for them (e.g., resetting the optimizer state between learning and relearning). The Discussion appropriately cautions that "our RNN models may not be using the same underlying mechanisms," but the behavioral result is still presented as "motor memory" without this caveat appearing prominently.
+- **Force-predictive subspace stability is asserted qualitatively, not quantified.** Section 3.3 fits TDR before learning and then visually checks that post-learning preparatory states still occupy a similar region of the same 2D projection (Fig. 3b). The natural quantitative test — does the pre-learning subspace still predict force/acceleration post-learning, with a reported decoding metric — is not performed. As a result, the "stable force-predictive subspace" replication is not actually evaluated, only visualized.
 
 ### Minor
-
-- **Only 4 seeds for all analyses.** Every statistical test in the paper is heavily underpowered. The uniform-shift test (p=0.08) is the most consequential, but the orthogonality comparison (Figure 4b) and behavioral results also rely on n=4. Even the positive results would be more credible with 10–20 seeds.
-
-- **Stable force-predictive subspace is assessed purely qualitatively.** Section 3.3 and Figures 3b–c claim the subspace "remains stable" across blocks, but no quantitative metric is provided (no principal angles, no variance-explained comparison, no CCA). The comparison to monkey data (Figure 3b vs. 3c) is a visual side-by-side, not a formal similarity measurement.
-
-- **The CF-pretrained model receives k as explicit input during pretraining, creating a potential confound.** The paper acknowledges that k is zeroed out after pretraining, so both models behave identically during adaptation. However, the CF-pretrained network develops its dynamics with k as a context signal — effectively a form of meta-learning over curl-field strengths — whereas the monkey has no such scalar context variable. The paper provides a thoughtful motivation for this design (the rock-weight analogy in Section 3.3.1), but does not ablate it: a version pretrained with diverse curl fields but *without* providing k would test whether the effect is due to richer motor experience or the context conditioning.
+- **Savings ("motor memory") lacks a matched-optimization control.** Faster relearning after washout (Fig. 2g) is reported as motor memory, but at the start of relearning the network has had ~100 additional epochs of PPO updates relative to initial learning. A control where a freshly-pretrained model receives the same number of unperturbed PPO updates would be needed to rule out generic continued-training effects. The Discussion acknowledges the mechanism may differ from biological motor memory, but this caveat is not propagated to the Results/Abstract framing.
+- **Regularizer coefficients (0.001/0.001) chosen empirically with no sensitivity analysis.** Since all downstream neural-geometry conclusions rest on regularized behavior, a small sweep would strengthen the link from training choices to claimed neural features.
+- **The "structured dynamical motifs" mechanism is interpretive, not analyzed.** No fixed-point / slow-point / dynamics-by-k analysis is performed on the CF-pretrained net; the motif language is decoration on a correlational finding (Section 3.3.1 / Discussion).
+- **Uniform-shift test uses a 3-vs-3 near/far rank-sum.** A regression of shift magnitude on angular distance from the trained target would be a more powerful and continuous test on the same data.
 
 ### Trivial
-*None worth noting beyond what is addressed above.*
-
----
+- The Fig. 2f assertion that the curved reach is "physically optimal" is stated rather than demonstrated (no optimal-trajectory computation under the CF + acceleration constraints).
 
 ## Nice-to-Haves
-
-- **Optimizer-reset relearning control:** Re-run the relearning experiment after resetting Adam optimizer state (and optionally re-initializing actor/critic heads) to dissociate weight-proximity and gradient-momentum explanations from "motor memory" in the recurrent weights. This would substantially strengthen Section 3.2.
-
-- **Quantitative neural similarity metric:** Add CCA/SVCCA/RSA between the RNN's preparatory geometry and the monkey's geometry from Sun et al. (2022). The current side-by-side figures cannot establish whether the model's geometry *matches* monkey geometry, only that certain geometric features are directionally similar.
-
-- **Dynamical motif characterization:** Compare fixed-point structure, recurrent weight spectra, or participation ratio between baseline and CF-pretrained models *before* the adaptation experiment — minimum evidence for the "dynamical motifs" hypothesis.
-
-- **More seeds (10–20):** This would materially change the credibility of all statistical claims, especially the p=0.08 uniformity result.
-
----
+- Run a 2×2 ablation over {random CF during pretraining} × {k input}, holding other hyperparameters fixed, to attribute the Fig. 4b effect.
+- Quantitative force decoding from the pre-learning TDR subspace evaluated on post-learning preparatory activity.
+- Scale to ≥10–20 seeds for the orthogonality and uniformity tests.
+- Visualize the full preparatory hidden-state trajectories (not just shift vectors) for CF-pretrained vs. baseline.
+- Sensitivity sweep over the smoothness/zeroness coefficients on downstream neural-geometry metrics.
 
 ## Removed Points
-
 *These points are flagged to be removed; treat them with caution.*
 
-- **Harsh Critic — LSTM gating introduces artifact geometry (Section 2.2):** The critic notes that LSTM hidden states h_t = o_t ⊙ tanh(c_t) may inject gating-induced structure into hidden-state geometry. While this is technically true, this concern applies to essentially all LSTM-based computational neuroscience models. The paper is transparent that LSTMs were chosen for convergence reasons. This is scope creep — evaluating whether LSTMs are the right architecture is a separate scientific question, not a flaw of this paper's contribution.
-
-- **Harsh Critic — Figure 3g near/far binary split can't reproduce full Sun et al. pattern:** The critics notes the paper reduces 8 targets to a binary split with 3 vs. 3 targets. This is a simplification, but evaluating a binary uniformity hypothesis using this split is a reasonable starting point and matches the paper's stated scope. This is not a fatal flaw.
-
-- **Strength Finder — "Replication of uniform shift" as a core strength:** Given the p=0.08 result and the directional trend noted in the caption (near > far), the "uniform shift" is not credibly established. This strength conflicts with a verified weakness and is removed per the rules.
-
-- **Strength Finder — "Demonstration of behavioral savings (motor memory)" as a strength:** Given the unacknowledged optimizer-state confound, the motor memory interpretation is not established. Removed as conflicting with a verified weakness.
-
----
+- Harsh critic asked for "more seeds" generically — partially kept in Major because the issue is paired with non-significant tests interpreted as null support. The blanket complaint about seed count alone has been folded in there rather than listed separately.
+- Strength Finder's "well-motivated RL over supervised learning" — kept implicitly via the sparse-reward, no-demo strength, but the standalone "principled argument" framing is generic.
+- Strength Finder's "curriculum learning strategy" — useful but a routine engineering choice, not a contribution on its own.
+- Strength Finder's framing that the orthogonality result "generates a testable hypothesis" — sycophantic spin given the k-input confound; not retained as an unambiguous strength.
 
 ## Novel Insights
-
-The most interesting finding in this paper is that providing structured prior experience (CF-pretraining with a context signal) measurably shifts the learning-washout geometry toward near-orthogonality, without any explicit constraint on the network geometry. This is at minimum a proof of concept that ecologically appropriate task-set priors in RL-trained RNNs can alter the geometric organization of learned representations in ways that better match biological recordings — a potentially impactful observation for the broader agenda of using pretraining to improve neural alignment of computational models. The "dynamical motifs" hypothesis, while unsupported here, is a genuinely interesting framework for future mechanistic study.
-
----
+None beyond the paper's own contributions. The paper's own contribution — that providing the dynamics-parameter as a context input during pretraining yields more orthogonal learning–washout geometry — is genuinely interesting but is exactly the finding the confound critique targets.
 
 ## Suggestions
+- Either weaken the "prior experience" interpretation to "prior experience plus an observable dynamics-context variable," or run the 2×2 disentangling ablation.
+- Replace qualitative subspace-stability visualization with a decoding metric of force from the pre-learning TDR subspace evaluated on post-learning activity, reported numerically.
+- Replace 3-vs-3 rank-sum with a regression of shift magnitude on angular distance to trained target.
+- Add a matched-optimization control for the savings claim, or relabel the result as "faster relearning following continued training" with the mechanism left open.
+- Increase seed count to at least ~10 for the headline statistical comparisons.
 
-1. Report p=0.08 explicitly and consistently in the text (not as "p>0.05"), and either temper the "uniform shift" claim to "suggestive but inconclusive" or run more seeds before making it a central finding.
-2. Add a clearly labeled "Limitations" subsection distinguishing what is empirically demonstrated from what is hypothesized, particularly for the "dynamical motifs" mechanistic claim.
-3. Include an optimizer-reset ablation for the relearning experiment to disentangle gradient-momentum from weight-based motor memory.
-4. Add at least one quantitative neural similarity measure between RNN and monkey preparatory geometry.
-5. Increase n to at least 10 seeds; 4 seeds is insufficient for the statistical claims made.
-
----
+## Axis Assessment
+- **Originality**: Moderate. End-to-end RL training of an RNN through the Sun et al. (2022) CF task with action-distribution KL regularizers is a fresh combination, though the task and analyses are taken directly from the target neurophysiology paper.
+- **Importance**: Moderate. Bridging RL and motor cortex neurogeometry is a worthwhile niche, but the contribution is one model on one prior dataset.
+- **Claims vs. support**: The headline claim about prior experience driving brain-like geometry is undersupported because the manipulation conflates exposure with input-channel architecture, and several "replications" rest on non-significant tests with n=4.
+- **Soundness of experiments**: Mixed. Behavioral ablations are clean; neural-geometry comparisons are statistically thin and partly qualitative.
+- **Clarity**: Generally clear; methods and figure-to-claim mapping are easy to follow.
+- **Value to community**: Worthwhile as a starting point; the regularizer trick is reusable. Current claims require revision and additional experiments to deliver durable value.
 
 ## Score and Decision
 
-**Anchor summary (all calibration queries):**
+Anchor comparison (all from the calibration batch):
+- `ypBYdetYd9.md` (4.20, Reject) — RNN solution degeneracy across tasks. Comparable empirical-neuro RNN paper deemed too narrow/under-supported; this paper has fewer seeds and a confounded headline claim, so sits in the same band.
+- `hyYP9MZeYn.md` (4.75, Reject) — VVC focal degeneration modeling; conceptual contribution outweighed by limited rigor. Similar profile to this paper.
+- `qoGdpin3om.md` (4.33, Reject) — RNN vs. dopamine; another RL-meets-neuro paper rejected for weak evidence; close match.
+- `QcvwVUqnCg.md` (5.50, Reject) — Place-field RL model; cleaner normative framework than the present paper. This paper is below it due to confound + n=4.
+- `TVnkjz4MqV.md` (5.50, Reject) — Neural manifold regularization; comparable methodological novelty but stronger evaluation. Slightly above current paper.
+- `UvfI4grcM7.md` (6.75, Accept) — biologically constrained barrel cortex model with substantial scope; clearly above this paper.
+- `agPpmEgf8C.md` (8.0, Accept) — predictive RL auxiliary objectives mimicking brain learning; broader scope, multiple analyses, stronger results; well above.
+- `kSISSDUYFh.md` (6.33, Accept) — digital twins of mouse V1 population geometry; rigorous evaluation; above.
+- `bcTjW5kS4W.md` (7.50, Accept) — NetFormer interpretable dynamical connectivity; well above.
+- `Xo0Q1N7CGk.md` (8.0, Accept) — grid cell conformal isometry; well above.
+- `dggRphAcCj.md` (6.33, Reject) — GeoCon compositional generalization; tangentially relevant.
+- `mV6cO4mGjH.md` (4.50, Reject) — neural encoding dynamics comparison; comparable evidential band.
+- `9ppkh7L4eQ.md` (5.25, Reject); `BYUdBlaNqk.md` (5.25, Reject); `0CtIt485ew.md` (4.0, Reject); `UUNTAwJIIn.md` (4.0, Reject); `A5utJ4xf27.md` (2.33, Reject); `PlKQ9UDgqp.md` (3.75, Reject); `OCpxDSn0G4.md` (6.0, Accept); `ogmzNfeRl7.md` (5.33, Reject) — neighbors used to calibrate bands.
 
-| Path | Avg Score | Comparison to this paper |
-|---|---|---|
-| `NPzuN3Rxi8.md` | 3.00 | Low anchor — neuroscience RNN paper with weak methodology; this paper is clearly stronger in novelty and rigor |
-| `7eYmijcuqO.md` | 3.00 | Low anchor — RNN dynamics paper with marginal claims; this paper has more genuine novelty |
-| `j0sq9r3HFv.md` | 2.50 | Very low anchor — preliminary LLM application; not comparable |
-| `ypBYdetYd9.md` | 4.20 | Medium-low anchor — task-trained RNN paper with uncontrolled confounds and underpowered tests; very similar profile to this paper |
-| `qoGdpin3om.md` | 4.33 | Medium-low anchor — RL+RNN neuroscience with limited novelty, qualitative comparisons; quite comparable |
-| `HEcbGXzIHK.md` | 4.25 | Medium-low anchor — RNN mechanistic interpretation paper; comparable in rigor |
-| `pXPIQsV1St.md` | 5.25 | Medium anchor — RNN dynamics similarity analysis; better methodological rigor than this paper |
-| `biNhA3jbHc.md` | 5.25 | Medium anchor — RNN sequence attractors with theoretical backing; better supported |
-| `MFCjgEOLJT.md` | 5.75 | Medium anchor — RNN motor control with cleaner claims; more methodologically rigorous |
-| `oYemKnlIrO.md` | 6.00 | Medium-high anchor — neuroscience analysis with quantitative support; stronger experimental design |
-| `UvfI4grcM7.md` | 6.75 | High anchor — biologically constrained motor cortex model with strong ablations; substantially more rigorous |
-| `RWJX5F5I9g.md` | 8.00 | High anchor — mathematically grounded, theoretically rigorous neuro-RL paper; far stronger than this paper |
-| `agPpmEgf8C.md` | 8.00 | High anchor — strong empirical+theoretical RL+neuroscience paper; far stronger |
-| `AP0ndQloqR.md` | 7.50 | High anchor — geometric analysis of RL with theoretical proofs; far stronger |
+This paper is best matched by `ypBYdetYd9` (4.20) and `hyYP9MZeYn` (4.75): an interesting computational-neuro modeling effort with a reasonable methodological nugget, but headline claims undermined by a confounded design and thin statistics.
 
-**Calibrated assessment:** This paper clusters most naturally with `ypBYdetYd9` (4.20) and `qoGdpin3om` (4.33) — RL/RNN neuroscience papers where real but fixable issues, underpowered statistics, and unsupported mechanistic claims led to rejection. It has somewhat more novelty than the dopamine paper (first-of-kind for this task) and comparable rigor issues. The CF-pretraining result is a genuine finding, but the central "dynamical motifs" claim is a hypothesis without analysis, the p=0.08 uniform-shift claim is misrepresented as confirming evidence, and the motor memory result lacks controls. The paper is not ready for acceptance in its current form.
-
-**Axes:**
-- *Originality:* Moderate — genuinely first RL-RNN for this specific motor adaptation comparison, but the individual components (RL, LSTM, TDR, motor adaptation environment) are all standard.
-- *Importance of research question:* High — understanding the factors driving neural geometry during motor learning is important.
-- *Claims well supported:* Weak — the two most prominent scientific claims (uniform shifts, dynamical motifs) are either inadequately supported or not supported at all.
-- *Soundness of experiments:* Moderate — the behavioral ablations are clean; the neural geometry analyses are underpowered and qualitative.
-- *Clarity of writing:* Moderate — the paper is readable but conflates hypothesis and finding in key places.
-- *Value to research community:* Moderate — as a preliminary proof-of-concept with caveats, it adds value; as stated, it overclaims.
-
-**Final score: 4.0**
-
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

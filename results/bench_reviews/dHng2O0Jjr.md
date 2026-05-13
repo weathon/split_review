@@ -1,24 +1,12 @@
-Now let me run the calibration search to anchor my scoring:Now I have enough to write the comprehensive final review. Let me synthesize everything:
-
----
-
 ## Summary
-
-ToolLLM presents a comprehensive framework for enabling open-source LLMs to master tool use. The paper introduces ToolBench, a large-scale instruction-tuning dataset covering 16,464 real-world REST APIs from RapidAPI across 49 categories with 126,486 instruction-solution path pairs; DFSDT (depth-first search-based decision tree), a novel reasoning algorithm that outperforms ReACT by enabling backtracking; and ToolEval, an automatic evaluation framework backed by GPT-3.5-turbo. Fine-tuning LLaMA-2 7B on ToolBench yields ToolLLaMA, which achieves competitive pass rates with ChatGPT in the main ToolBench evaluation and demonstrates zero-shot generalization to the out-of-distribution APIBench benchmark.
-
----
+The paper introduces ToolLLM, a framework comprising: (1) ToolBench, a large instruction-tuning dataset built from 16,464 real RapidAPI REST APIs with 126K solution-path instances generated via ChatGPT; (2) a Depth-First Search-based Decision Tree (DFSDT) reasoning strategy that improves over ReACT by allowing retraction and re-exploration; (3) ToolLLaMA, a LLaMA-2-7B fine-tuned on this data; and (4) ToolEval, a ChatGPT-judge auto-evaluator. The headline claim is that ToolLLaMA achieves performance comparable to its ChatGPT teacher and generalizes OOD to APIBench.
 
 ## Strengths
-
-- **Scale and realism of ToolBench**: 16,464 real-world REST APIs, 126,486 instances with 469,585 real API calls, and multi-tool scenarios represent a genuine and substantial advance over prior datasets (API-Bank: 53 APIs; APIBench: 1,645 APIs; ToolBench prior work: 232 APIs; Table 1). This infrastructure contribution fills a documented gap in the field.
-
-- **DFSDT is a well-motivated and rigorously compared algorithm**: The comparison against a cost-matched ReACT@N baseline (Table 2) is methodologically correct — it controls for inference budget and shows DFSDT achieves 63.8% vs. 44.5% average pass rate with ChatGPT, demonstrating genuine value from the tree structure beyond simply more attempts. The multi-step, complex I2/I3 scenarios show the most benefit (70.6% and 62.8%), consistent with the algorithm's design intent.
-
-- **Neural API retriever substantially outperforms baselines**: Table 3 shows NDCG@1 of 78.0% vs. 18.5% (BM25) and 49.6% (OpenAI Ada embedding), a strong practical result. The retriever integrated with ToolLLaMA also slightly exceeds oracle-API performance (67.3% vs. 66.7%), supporting the claim that it can identify better API alternatives.
-
-- **Three-level generalization design is thoughtful**: Evaluating at instruction, tool, and unseen-category levels provides genuine signal about the depth of tool-use generalization, not merely in-distribution performance.
-
----
+- **Scale and realism of ToolBench (Sec. 2.1, Table 1).** 16,464 real RESTful APIs across 3,451 tools with 469,585 actual API call traces is materially larger and more realistic than prior tool-use datasets, several of which lack any real API calls.
+- **Strong retriever results (Table 2/`tab:IR`).** Average NDCG@5 of 84.9 vs. 45.4 for OpenAI Ada and 17.0 for BM25 is a clean, well-controlled comparison that does not depend on the more contentious ToolEval judge.
+- **DFSDT clearly outperforms a budget-matched ReACT@N (Table 2/`tab:dfsdt_vs_react`)**: 63.8 vs. 44.5 average pass rate. The gap is largest on harder multi-tool splits (I2: 70.6 vs 49.4; I3: 62.8 vs 34.6), supporting the claim that tree search helps on complex instructions.
+- **Generalization split design (Sec. 3.2).** The Inst./Tool/Cat. axes isolate three distinct generalization regimes; this is more rigorous than the typical single held-out split in tool-use papers.
+- **Hierarchical multi-tool sampling using RapidAPI categories/collections (Sec. 2.2)** is a sensible engineering choice that avoids nonsensical tool combinations and is empirically justified.
 
 ## Weaknesses
 
@@ -26,85 +14,70 @@ ToolLLM presents a comprehensive framework for enabling open-source LLMs to mast
 None.
 
 ### Major
-
-- **Circular evaluation in ToolEval — self-preference bias unquantified**: The full pipeline uses gpt-3.5-turbo for instruction generation, solution path annotation (training targets), and then as the ToolEval judge for evaluation. ToolLLaMA is trained to produce outputs structurally and stylistically identical to gpt-3.5-turbo, and is then judged by gpt-3.5-turbo. This is a well-documented self-preference pattern in LLM-as-judge settings. The 80.3% human agreement on win rate (Section 3.1) confirms the judge correlates with humans on average, but does not test whether it is *specifically* biased toward gpt-3.5-turbo–style outputs versus differently structured reasoning traces (e.g., Claude-2, GPT-4). Since all competing baselines produce differently-structured reasoning, systematic self-preference would inflate ToolLLaMA's win rate and suppress competitors'. The headline claim — "comparable performance to ChatGPT" — is primarily grounded in this evaluator and cannot be fully trusted without a measurement of self-preference bias (e.g., using GPT-4 as an independent judge or a human panel on matched pairs).
-
-- **OOD comparison is retrieval-confounded**: Table 5 compares "ToolLLaMA + our trained neural retriever" vs. "Gorilla + BM25" as the primary evidence for OOD generalization advantage. The neural retriever is fine-tuned on in-domain (ChatGPT-generated) training data, while BM25 is a lexical baseline — these are not matched components. Advantages of 16.77 vs. 10.51 (HuggingFace AST) and 51.16 vs. 44.62 (TorchHub AST) could largely reflect retrieval superiority rather than model generalization. In the oracle retrieval condition — the only fair model comparison — Gorilla-RS consistently outperforms ToolLLaMA on all three benchmarks: 89.27 vs. 88.80 (HuggingFace), 93.01 vs. 85.88 (TorchHub), 94.16 vs. 88.62 (TensorHub). The paper's claim that ToolLLaMA "performs on par with Gorilla" is accurate only when comparing against Gorilla-ZS; against Gorilla-RS (the purpose-built, retrieval-aware setting), ToolLLaMA is inferior across the board. A Gorilla+trained-retriever condition would isolate the model quality contribution.
+- **Circular evaluation (Sec. 3.1–3.2, Table 3).** Training paths are generated by ChatGPT+DFSDT, ToolLLaMA is distilled from those paths, and ToolEval uses ChatGPT as judge. The headline "comparable to ChatGPT" claim is therefore measured by a judge sharing priors with both teacher and student. The reported 87.1%/80.3% human agreement is asserted only in the body without describing rater pool, sample size, or breakdown of teacher-vs-student disagreement cases. The win rate uses ChatGPT-ReACT (the weaker prompting strategy) as the comparison anchor, which further inflates apparent parity. A non-circular evaluation — at minimum a stratified human eval on the contested cells, or a functional-correctness metric grounded in API outputs — is needed for the central claim to stand cleanly.
+- **No variance / API-stability control (Sec. 3.1, Table 3).** The paper itself flags RapidAPI's "temporal variability" as the reason ground-truth paths cannot be annotated, but the same drift makes single-shot Pass Rates measured at potentially different times across models hard to compare. Table 3 reports no confidence intervals, no re-runs, and no description of how API state was held constant across models. At 200 instances per cell with stochastic 404s and rate limits, the rank ordering among Text-Davinci-003, Claude-2, ToolLLaMA, and ChatGPT is not demonstrably stable.
 
 ### Minor
-
-- **"Only slightly inferior to GPT-4" overstates the win-rate gap**: In Table 2, ToolLLaMA+DFSDT (win rate 60.0%) vs. GPT-4+DFSDT (win rate 70.4%) is a 10.4-point gap in win rate — not trivial. The pass-rate gap (66.7% vs. 71.1%) is more modest at 4.4 points. The abstract's and Figure 1 caption's framing ("only slightly inferior to GPT4") is fair for pass rate but overclaims for win rate. The "comparable to ChatGPT" claim is defensible since ToolLLaMA actually leads on pass rate (66.7% vs. 64.8%) but trails modestly on win rate (60.0% vs. 64.3%).
-
-- **Instruction diversity claim is qualitative**: The paper references "rigorous human evaluation" for instruction diversity (Section 2.2) but does not describe the methodology, sample size, or criteria of this evaluation in the main text. The Atlas visualization supports diversity visually, but the quantitative claim is unverified within the paper.
+- **OOD claim partially overstated (Sec. 3.3, Table 4/`gorilla-results`).** Under matched oracle retriever, Gorilla-RS beats ToolLLaMA on all three APIBench domains (89.27/93.01/94.16 vs 88.80/85.88/88.62 AST). The "performs on par with Gorilla" reading is fair on HuggingFace, less so on TorchHub/TensorHub. The favorable comparison vs. Gorilla+BM25 mixes retriever quality with model quality. The result still meaningfully supports OOD generalization (ToolLLaMA was not trained on APIBench at all), but the framing oversells it.
+- **DFSDT baselining could be stronger.** ReACT@N is a sensible budget-match, but the paper cites Reflexion as a precursor without comparing to it under matched compute. A direct DFSDT vs. Reflexion (or self-consistency over ReACT with verification) comparison would more cleanly isolate the contribution of tree search vs. the contribution of retraction.
+- **"Retrieved APIs outperform oracle APIs" (Sec. 3.2).** The paper attributes this to the retriever finding functionally superior alternatives. An equally plausible reading is that the ChatGPT-generated "oracle" relevant-API set is itself noisy, so the retriever is denoising bad supervision. Either reading is consistent with the data; the paper picks the flattering one without testing the alternative.
+- **Vicuna/Alpaca scoring 0/0 (Table 3) is implausibly low** without diagnostic detail. Likely a format/function-call parsing issue rather than a pure capability gap; treating these as informative baselines inflates the apparent ToolLLaMA gap.
+- **Training set conditioned on ChatGPT success (Sec. 2.3).** Only passing DFSDT paths are retained, so ToolLLaMA inherits an upper bound tied to ChatGPT's ability. If test instructions are filtered the same way, evaluation is biased toward the regime where the teacher succeeds.
 
 ### Trivial
-
-None significant beyond the above.
-
----
+- The Sec. 2.2 "Through rigorous human evaluation, we find that instructions … have a high diversity" claim has no rater/sample description in the body.
+- The DFSDT vs. ToT contrast in Related Work ("infinite decision space") is more rhetorical than substantive — both are LLM-branched tree search; the practical novelty is the action set and the giving-up function, not the algorithm.
 
 ## Nice-to-Haves
-
-- **Self-preference audit for ToolEval**: Evaluate whether gpt-3.5-turbo as judge systematically rates outputs resembling its own training style higher than functionally equivalent outputs in different reasoning formats. Reporting results with GPT-4 as an alternative judge would materially strengthen the evaluation's credibility.
-- **Fair OOD comparison**: Include ToolLLaMA+BM25 and Gorilla+trained-retriever conditions in Table 5 to decouple model quality from retrieval quality.
-- **Inference cost transparency**: DFSDT uses substantially more LLM calls than ReACT. A per-method cost analysis alongside performance numbers would contextualize the tradeoffs in Table 2.
-- **Scaling beyond 7B**: With 126K high-quality trajectories, ablating ToolLLaMA at 13B or 70B would significantly strengthen the dataset's contribution claim.
-
----
+- A subset re-run of Table 3 on a different day to quantify API drift, and report variance over seeds/runs.
+- Side-by-side DFSDT vs. ReACT trajectories on hard I3 instances to make the retraction mechanism concrete.
+- Failure-mode analysis of cases where ToolLLaMA loses to ChatGPT.
+- A small functional/programmatic correctness check (e.g., verifying final answers against actual API responses) on a subset, to triangulate ToolEval.
 
 ## Removed Points
-
-*These points are flagged as removed — treat with caution in case context is useful.*
-
-- **Harsh Critic — "Test distribution not OOD from train at instruction level"**: Removed as a strawman. The evaluation explicitly holds out unseen tools and unseen categories; the concern that gpt-3.5-turbo-generated test instructions "look like" training instructions at a stylistic level is not demonstrably harmful and not established by the critic.
-
-- **Harsh Critic — "Ground truth APIs may be systematically under-specified (retriever outperforms oracle)"**: Removed as speculation. The paper provides a reasonable alternative explanation (retriever expands search space to better alternatives), which is credible and not rebutted by the critic with evidence.
-
-- **Harsh Critic — Confidence intervals / statistical significance**: Moved to nice-to-have. Large-scale LLM benchmark evaluation without confidence intervals is standard practice in the field. The numbers involved (200-test-instruction per condition) are not trivially small, but demanding CIs is not the community norm here.
-
-- **Harsh Critic — DFSDT vs. ToT "overstated" comparison**: Removed. The paper's claim that ToT targets "relatively simple tasks" like Game of 24 is a characterization of the original ToT paper's evaluation, not a false claim about ToT's potential scope. Scope of comparison is reasonable.
-
-- **Harsh Critic — Scaling to 13B/70B as a missing experiment**: Moved to nice-to-have, not a weakness. This is genuinely interesting future work but does not undermine the paper's current claims.
-
-- **Strength Finder — "Out-of-distribution generalization" as a core strength**: Partially removed/weakened. As verified, ToolLLaMA trails Gorilla-RS in the oracle condition; the OOD advantage only holds over Gorilla-ZS. The strength is real but limited in scope.
-
----
+*These points are flagged to be removed, treat them with caution.*
+- *Harsh critic's "missing related works / methodology comparisons to Reflexion, ToT" framed as fatal*: Reflexion and ToT are discussed in Related Work; the critique is fair as a baseline gap but does not invalidate the paper. Retained as a Minor weakness instead.
+- *Harsh critic's claim that "filtering criteria deferred" is a substantive flaw*: paper explicitly references the appendix, which is standard; not a real weakness.
+- *Generic Strength Finder line "ToolLLaMA … achieves competitive performance with ChatGPT"*: This is the paper's own headline marketing claim and is precisely what is challenged by the circular-evaluation weakness; not retained as an independent strength.
+- *Strength Finder's "Reliable automatic evaluation via ToolEval, 87.1% human agreement"*: directly conflicts with the major weakness on circular evaluation; weakness wins.
 
 ## Novel Insights
-
-The most genuinely novel insight beyond the paper's own claims is the DFSDT vs. ReACT@N comparison (Table 2), which demonstrates that the benefit of tree-structured search is not simply equivalent to more compute spent on ReACT attempts — DFSDT (63.8%) outperforms ReACT@N (44.5%) at matched cost, and the advantage is disproportionately large for complex multi-tool instructions (I2, I3). This suggests that the combinatorial structure of multi-API tasks creates a landscape where ordered backtracking is qualitatively superior to restarting, a result with implications beyond tool use for any multi-step planning problem with irreversible intermediate actions.
-
----
+None beyond the paper's own contributions. The clearest synthesized observation across reviews is that ToolBench (as an artifact) and DFSDT (as a search heuristic) are the durable contributions; the comparative numbers vs. ChatGPT are an artifact of an evaluator co-trained with the system under test, and should be read accordingly.
 
 ## Suggestions
-
-1. Run ToolEval with GPT-4 as the judge on a subset (200 examples) and report the win-rate ordering; if consistent with gpt-3.5-turbo as judge, the core claim is substantially strengthened with minimal additional cost.
-2. Add a Gorilla+trained-retriever row and a ToolLLaMA+BM25 row to Table 5 to enable a clean model-vs-model and retriever-vs-retriever comparison.
-3. Recalibrate the abstract and Figure 1 to say "achieves comparable pass rate to ChatGPT and trails by ~4 points in win rate" and "trails GPT-4 by ~4-10 points depending on metric" rather than "only slightly inferior."
-4. Report number of human annotations used to validate ToolEval and the inter-annotator agreement methodology (in main text, not just appendix).
-
----
+- Add a human-rated stratified subset for at least one block of Table 3 with inter-annotator agreement; report it in the body.
+- Re-run a subset of Table 3 on multiple days; report variance.
+- Add a Reflexion (and ideally best-of-N ReACT with self-verification) baseline at matched compute to isolate the contribution of tree search over retraction.
+- Soften the OOD claim to "competitive with Gorilla, despite zero training exposure to APIBench"; do not claim parity under matched oracle.
+- Diagnose the Vicuna/Alpaca 0/0 results and report whether failures are format-level or reasoning-level.
 
 ## Score and Decision
 
-**Anchor comparison:**
+**Axis evaluation.** *Originality*: the dataset construction pipeline and DFSDT are incremental but well-executed; not radically novel. *Importance*: tool-use is a core capability for open-source LLMs, and a 16K-API resource is high-value. *Soundness of claims*: the dataset and retriever results are well-supported; the central "on par with ChatGPT" claim is undermined by judge/training circularity and lack of API-state control. *Soundness of experiments*: broad coverage of axes and scenarios; weak on variance, baselines for DFSDT, and judge independence. *Clarity*: clearly written and well-organized. *Value to community*: high — the dataset and trained model have become widely used reference points.
 
-| Path | Avg Human Score | Comparison to ToolLLM |
-|------|----------------|----------------------|
-| `OqlmgmS4Wr.md` (AgentTuning) | 6.00 (Reject) | Similar goal (open LLM → agent capability via instruction tuning), but ToolLLM has much larger dataset, novel DFSDT algorithm, and more comprehensive evaluation; ToolLLM is stronger contribution |
-| `Kz3yckpCN5.md` (False Promise of Imitation) | 7.00 (Accept) | Directly relevant to distillation from ChatGPT; makes important negative point about style-vs-capability gap — which is exactly the uncontrolled concern in ToolLLM's circular evaluation |
-| `J1J5eGJsKZ.md` (ToolDial) | 6.67 (Accept) | Also RapidAPI–based, dataset contribution, multi-turn tool use; ToolLLM is broader in scale and adds DFSDT |
-| `kKILfPkhSz.md` (ShortcutsBench) | 6.50 (Accept) | Large-scale real-world API benchmark, similar scope; ToolLLM has larger API pool and training contribution |
-| `roNSXZpUDN.md` (τ-bench) | 6.50 (Accept) | High-quality agent benchmark with careful evaluation design; τ-bench has cleaner evaluation than ToolLLM |
-| `5bUy4F59mk.md` (Tool Decoding) | 6.00 (Accept) | Training-free approach to tool use; narrower scope than ToolLLM |
-| `iShM3YolRY.md` (Tool Manipulation Open LLMs) | 5.25 (Reject) | Similar to ToolLLM but smaller scale, less rigorous; ToolLLM is clearly stronger |
-| `70xhiS0AQS.md` (TaskBench) | 4.75 (Reject) | Task automation benchmark; weaker evaluation design and narrower contribution than ToolLLM |
-| `wtrDLMFU9v.md` (Learning Evolving Tools) | 4.00 (Accept) | Low-scoring Accept; addresses dynamic tool environments, which ToolLLM does not; ToolLLM has stronger empirical results |
+**Anchor calibration.**
+- `kKILfPkhSz.md` — ShortcutsBench (avg 6.50): also a real-world API agent benchmark; ToolLLM has comparable or larger scope but weaker evaluation rigor.
+- `J1J5eGJsKZ.md` — ToolDial (avg 6.67): RapidAPI-based dialogue dataset; cleaner evaluation but narrower scope than ToolLLM.
+- `roNSXZpUDN.md` — τ-bench (avg 6.50): emphasizes faithful evaluation against database state, which ToolLLM lacks.
+- `70xhiS0AQS.md` — TaskBench (avg 4.75): similar tool-automation benchmark scope; reviewers penalized evaluation rigor — closest negative anchor for ToolLLM's circularity concerns.
+- `SgAPzJdAHi.md` — Tailored instruction tuning (avg 4.00): ChatGPT-distilled instruction-tuning data with weak eval; cautionary anchor below ToolLLM.
+- `KzMMv0OygD.md` — TeG-Instruct (avg 4.00): synthetic instruction-tuning data; less ambitious than ToolLLM.
+- `vyHFTsOUWu.md` — Instruction following without instruction tuning (avg 6.00): different topic, less comparable.
+- `CfXh93NDgH.md` — WizardLM (avg 6.00): closest precedent for distilled instruction-tuning with circular-flavored evaluation but accepted; supports a 6-range score for ToolLLM.
+- `5bUy4F59mk.md` — Tool Decoding (avg 6.00): plug-and-play tool-use enhancement; comparable acceptance band.
+- `jolYuxpVn1.md` — FacTool (avg 6.00): tool-augmented factuality framework; comparable.
+- `G0vdDSt9XM.md` — CRAFT (avg 6.67): toolset creation/retrieval; comparable accepted anchor.
+- `PtnttTKgQw.md` — Clever Hans benchmarks (avg 5.00): benchmark validity critique; relevant to ToolEval circularity concern.
+- `iSTMsye6SD.md` — Knowledge-intensive reasoning benchmark (avg 5.25): comparable mid-band.
+- `gsZAtAdzkY.md` — ARB (avg 5.50): another mid-band benchmark anchor.
+- `OdoS6cH8MP.md` — Textual Data Valuation (avg 2.00): far weaker; not comparable.
+- `8QTpYC4smR.md` — LLM systematic review (avg 1.00): not a research paper; not comparable.
+- `Jztt1nrjAM.md` — Misinformation datasets guide (avg 3.50): low band, weaker.
+- `kpL66Mvd2a.md` — Tree Search for LM Agents (avg 5.50): closest reasoning-method anchor; ToolLLM's dataset contribution lifts it above this anchor.
+- `GBIUbwW9D8.md` — R-MCTS (avg 5.75): reflective tree search; comparable methodology band, ToolLLM has stronger artifact.
+- `KgKN7F0PyQ.md` — ReAcTree (avg 4.50): hierarchical tree planning, weaker artifact than ToolLLM.
 
-**Assessment**: ToolLLM sits in the range of ToolDial and ShortcutsBench (6.5–6.67), which are the most topically similar accepted papers. The circular evaluation concern (self-preference in ToolEval) and the confounded OOD comparison are genuine major weaknesses, but the dataset scale, DFSDT algorithm, and training contribution are concrete and valuable — well above the 5.25 Reject territory. The paper is weaker than a 7.0 (False Promise) because that paper's evaluation is self-consistent, while ToolLLM's core performance claims rest on an unvalidated self-preference risk. But it is clearly above the 4.75 Reject papers due to its scope and novelty.
-
-**Final Score: 6.0**
-**Decision: Accept** (weak accept — the contribution justifies acceptance, but the authors should address the circular evaluation concern and OOD comparison fairness before camera-ready)
+Triangulating against the cluster of accepted real-world-API benchmark papers (ShortcutsBench 6.5, ToolDial 6.67, τ-bench 6.5, CRAFT 6.67, WizardLM 6.0), and weighing the substantive evaluation-circularity concern that pulls it slightly below those (closer to Tool Decoding 6.0 / R-MCTS 5.75 / Tree Search 5.5), ToolLLM lands solidly in the 6.0 band — the dataset and DFSDT are durable contributions of clear community value, but the headline performance claim is methodologically compromised in a way that prevents a higher score.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

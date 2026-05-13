@@ -1,26 +1,11 @@
-Now I have enough to write the final review. Let me synthesize everything.
-
----
-
 ## Summary
-
-This paper proposes a general-purpose 3D biomedical representation learning framework consisting of two components: (1) a synthetic data engine that creates richly diverse 3D training volumes using TotalSegmentator binary organ-shape templates combined with a fully randomized appearance model, and (2) a multi-positive label-supervised contrastive pretraining objective applied at multiple UNet decoder scales. The resulting 5.9M-parameter network produces features that are approximately appearance-invariant and spatially stable, enabling both unsupervised multi-modality deformable registration (by feeding frozen features into existing solvers) and few-shot segmentation (as a dataset-agnostic initialization), a first demonstrated simultaneously for any 3D biomedical vision model.
-
----
+The paper proposes a 3D biomedical representation-learning framework with two parts: (1) a "data engine" that synthesizes pairs of volumes from randomized ensembles of biomedical shape templates (drawn from TotalSegmentator binary labels) plus a randomized GMM/Perlin/augmentation appearance model, and (2) a multi-positive, multi-scale supervised contrastive objective that pulls together voxels sharing a label across two appearance-randomized renderings. The resulting features plug into existing registration solvers (ConvexAdam, ANTs) and serve as a dataset-agnostic initialization for few-shot 3D segmentation, with reported gains on L2RAb/MM-WHS registration and Dice leads on 5/6 few-shot segmentation datasets.
 
 ## Strengths
-
-- **Multitask generalization across two qualitatively distinct voxel-level tasks.** Table 2 (multitask capabilities) is the strongest result in the paper: all five competing foundation models (PrimGeoSeg, Models Genesis, SMIT, DAE, MedicalNet) fail to improve upon ANTs-MutualInfo for registration (Dice ranging from 0.38–0.50 vs. the baseline 0.48/0.58 on L2RAb/MM-WHS), while "Ours" achieves 0.70/0.63. The same weights also produce best or second-best segmentation across 6 datasets. To our knowledge, no prior 3D biomedical model had been demonstrated on both tasks simultaneously.
-
-- **Strong out-of-distribution generalization on WUFetal.** Whole-uterus fetal BOLD MRI is genuinely outside any pretraining template pool (no TotalSegmentator organ labels represent this anatomy). The method achieves Dice 0.76 vs. 0.50 (MedicalNet) and 0.70 (Disruptive AE), the strongest performance by a large margin. This is the cleanest evidence for generalization in the paper.
-
-- **Parameter efficiency.** The 5.9M model matches or outperforms models 11× larger (67.2M: PrimGeoSeg, SMIT, Disruptive AE) on most datasets in the few-shot regime (e.g., 0.85 vs. 0.72 on PROMISE12 vs. SMIT; 0.80 vs. 0.76 on FeTA vs. PrimGeoSeg). Even accepting that large models may overfit more in few-shot settings, this efficiency result is noteworthy.
-
-- **Comprehensive, well-structured ablation study (Table 3).** The paper tests 11 configurations covering label source, temperature, pretraining objective (contrastive vs. denoising vs. unsupervised), and augmentation components, evaluated on both tasks. This factorial design connects representational quality (Fig. 5) to downstream performance and demonstrates genuine methodological discipline.
-
-- **Feature stability visualization across modalities and poses (Fig. 1).** Qualitative visualization of six feature channels across paired volumes from diverse anatomical regions (cardiac, abdominal, fetal) provides direct evidence for the claimed cross-modal and cross-pose stability that motivates the approach.
-
----
+- **Demonstrated multi-task transfer of one pretrained backbone.** Table 2 (multitask) shows that features from existing 3D biomedical foundation models (PrimGeoSeg, ModelsGenesis, SMIT, DAE) plugged into the ANTs solver actually *underperform* the mutual-information baseline (e.g., 0.46–0.50 vs 0.48 on L2RAb), while Ours reaches 0.70. This is concrete evidence that segmentation-pretrained features do not transfer to registration, and that the proposed training does.
+- **Substantial registration gains by feature substitution.** Replacing ConvexAdam's handcrafted features with the pretrained features yields +11 Dice on L2RAb and +6 on MM-WHS with comparable folding (<0.5%), and ANTs-Ours improves ANTs-MI by 26/5 Dice points (Sec 4.1).
+- **Coherent, mechanism-revealing ablations.** Table 3 isolates label source, temperature, loss type, and augmentation. The smshapes → 0.68 and Brains → 0.57 rows make a concrete case that biomedically informed shape priors matter, and the denoising vs. contrastive comparison cleanly justifies the loss.
+- **Competitive few-shot segmentation at 1/10× the parameter count.** Ours (5.9M) ties or beats 67.2M baselines (SMIT, PrimGeoSeg) on 5/6 datasets — the asymmetry favors baselines, strengthening the claim.
 
 ## Weaknesses
 
@@ -28,98 +13,69 @@ This paper proposes a general-purpose 3D biomedical representation learning fram
 None.
 
 ### Major
-
-- **Overstated "no real data" claim and potential template-to-evaluation leakage on AMOS-CT.** The abstract states the method operates "without (pre-)training on any existing dataset of real images" and the Introduction says "minimal influence from any existing biomedical dataset." However, the data engine uses ~45,000 binary volumes from TotalSegmentator — a dataset of 104 organs expert-annotated from 1,204 real CT scans (Sec. 3, first paragraph). These are not abstract geometric primitives: they encode the real 3D morphology (shape, scale, spatial relationships) of abdominal and thoracic organs as they appear in CT, derived from real expert annotations. Using them as shape templates is a direct transfer of organ-specific morphological knowledge from a real CT dataset, even if intensity values are subsequently randomized. The paper should not claim the method operates with "minimal influence" from real biomedical data; the correct framing is that it does not train on real image *intensities*, which is a more limited but still valuable claim.
-
-  This framing issue becomes a concrete empirical concern for AMOS-CT: that benchmark evaluates segmentation of 15 abdominal CT organs — exactly the organs whose 3D shapes appear in TotalSegmentator templates. Competing baselines (PrimGeoSeg, SMIT, Disruptive AE, Models Genesis) do not have this template advantage. The paper presents AMOS-CT as evidence of generalization, but it is the benchmark where the template source most directly benefits the proposed method through anatomical shape priors. The paper does not acknowledge this confounder. (Notably, the method is *second* on AMOS-CT at 0.61 vs. PrimGeoSeg's 0.63, which limits the severity, but does not remove the concern entirely.)
-
-- **Registration headline result relies on n=7 test pairs.** L2RAb provides 8 intra-subject MRI-CT pairs; 1 is used for validation and 7 for testing (Sec. 4.1). The ConvexAdam grid search tunes four hyperparameters against this single validation pair. The 11-point median Dice improvement, which is cited as "new standards" for multi-modality registration, is derived from these seven subjects. While the effect size is large (suggesting it is unlikely a chance finding), no confidence intervals or statistical tests are reported. The "new standards" framing is not adequately supported at n=7. MM-WHS provides 15 test pairs and is stronger evidence. The authors should qualify the L2RAb claim and, ideally, add leave-one-out cross-validation.
+- **"No real images" framing partially misrepresents the dependence on TotalSegmentator.** The abstract and contributions repeatedly claim the method works "without (pre-)training on any existing dataset of real images" and contrast this with GAN/diffusion methods "limited to reproducing their training distribution." But the label ensemble engine samples from ~45,000 binary masks expert-annotated on 1,204 real CT volumes (Sec 3, label ensemble), and the ablation shows this provenance is *the* dominant lever: replacing it with shape-prior-free smshapes drops L2RAb Dice 0.74 → 0.68, and Brains-only collapses to 0.57. The framing should be "no real *intensity* images, real shape priors," which is still a meaningful contribution but materially weaker against the GAN/diffusion comparison the paper makes.
+- **Registration test sets are very small (7 and 15 pairs) with no significance testing or per-seed variance.** With L2RAb's 1 validation / 7 test pairs and four-hyperparameter grid search, the +11 Dice headline rests on a tiny held-out set. The paper does apply grid search to *both* ConvexAdam and ConvexAdam-Ours (so the harsh critic's "only Ours is tuned" reading is incorrect — see Sec 4.1: "perform a grid search for both the original implementation and our variant"), but the absence of significance tests, cross-validation, or leave-one-pair-out sweeps still makes the magnitude of the SOTA gap less calibrated than it could be.
+- **Few-shot segmentation variance is computed over test volumes within a single training-volume draw.** Bootstrapped std deviations (0.01–0.06) cover test-set variance, not the dominant source of noise in N=1–3 finetuning: *which* volumes are selected for training. Several headline margins (0.01–0.03 Dice) are within this uncaptured variance, and PrimGeoSeg already beats Ours on AMOS-CT (0.63 vs 0.61). The "new state of the art" wording is therefore overstated relative to the measurement methodology.
 
 ### Minor
-
-- **Parameter count confound in few-shot segmentation.** PrimGeoSeg (67.2M), SMIT (67.2M), and Disruptive AE (67.2M) are each more than 11× larger than the proposed model (5.9M). The paper does not test whether large models underperform in the few-shot regime because of the pretraining strategy or because they overfit with only 1–3 labeled volumes. An experiment finetuning the proposed method with a larger backbone, or finetuning a large baseline with additional regularization, would separate architecture from pretraining. Without this, the comparison conflates two variables.
-
-- **Temperature choice (τ=0.33) is optimized for registration, not segmentation.** Table 3 shows that τ=0.20 strictly dominates τ=0.33 on all three segmentation datasets (WUFetal: 0.78 vs. 0.76; MSD-Heart: 0.91 vs. 0.89; AMOS-CT: 0.62 vs. 0.61), while τ=0.33 is better for registration (0.74 vs. 0.64). The paper does acknowledge this tradeoff in the ablations section (Sec. 4.3), and choosing τ=0.33 to optimize the harder task of registration is a defensible design decision. However, since τ=0.20 could improve the segmentation numbers (which are the primary Table 1 results) without catastrophically hurting registration, reporting both would be more transparent. Currently the reported configuration appears registration-biased.
-
-- **Multitask comparison (Table 2) is framed more strongly than what it demonstrates.** The conclusion "other methods are limited to segmentation" (Table 2 caption, Sec. 4.3) goes beyond what the experiment shows. The experiment tests segmentation-pretrained models as *raw* feature extractors for registration without any adaptation. What this demonstrates is that raw features from segmentation-objective models are not appearance-invariant enough for direct registration use — a genuine and interesting finding — but not that these models *cannot* support registration with appropriate adaptation or finetuning.
+- **Multi-scale loss is asserted but not ablated** (Sec 3, "we use this loss on multiple decoder layers"). One ablation row would close the loop.
+- **Asymmetry between Brains' registration collapse (0.57) and decent segmentation (0.74 WUFetal) is interesting but undiscussed.** It points toward "anatomical coverage" rather than "synthesis procedure" being the active ingredient, which the paper does not engage with.
+- **No discussion of failure on AMOS-CT** (the one dataset where Ours loses to PrimGeoSeg, 0.61 vs 0.63), nor of compute cost (600k pretraining iterations on 128³ volumes is substantial and not reported in comparable units).
+- **uniGradICON / SynthMorph are limited to single-channel inputs and so cannot consume the 16-channel features.** A PCA-to-1-channel or per-channel registration variant would make the deep-baseline comparison fairer.
 
 ### Trivial
-
-- The paper honestly reports that PrimGeoSeg beats it on AMOS-CT (0.63 vs. 0.61), which is appropriate, but the introduction and abstract could be more explicit that the method is not state-of-the-art on every individual benchmark.
-
----
+- The introductory claim "no biomedical vision foundation model has been demonstrated for multiple disparate 3D tasks yet" is sweeping; a softer qualifier ("to our knowledge, none for 3D registration *and* segmentation jointly") would be safer.
 
 ## Nice-to-Haves
-
-- **Ablation replacing TotalSegmentator templates with isotropic random shapes at matched biomedical scale** (correct voxel-scale statistics but no organ-specific morphology). The current ablation tests "smshapes" (fully abstract) and "Brains" (domain-specific brain shapes). A middle-ground condition would isolate whether the benefit of TotalSegmentator comes from organ-specific 3D morphology or simply from having shapes at the right spatial scale and complexity, which would sharpen the claim about the data engine.
-
-- **Template source scaling analysis** (how does performance change as a function of the number of TotalSegmentator templates used: 100 vs. 1,000 vs. 10,000 vs. all 45,000?). This would characterize whether the method is bottlenecked by template diversity and whether a smaller, more easily-collected template set suffices.
-
-- **Leave-one-out cross-validation on L2RAb.** Eight pairs is enough for LOO-CV, which would provide variance estimates and strengthen the registration claim without requiring new data collection.
-
----
+- Multi-seed few-shot evaluation with resampled training-volume draws (3–5 seeds) to put error bars on the segmentation margins.
+- A same-architecture baseline pretrained with the same contrastive loss on *real* intensities (e.g., TotalSegmentator volumes) to disentangle "synthetic intensities" from "shape diversity" from "this loss."
+- Reframe the contribution as "synthetic intensities + real shape priors"; this is honest and still novel.
+- Report pretraining compute (GPU-hours / FLOPs) alongside Dice.
 
 ## Removed Points
+These points are flagged to be removed, treat them with caution.
 
-*These points are flagged to be removed; treat them with caution.*
-
-- **Harsh Critic: "Mechanism of pose equivariance not explained."** The paper trains on pairs with shared geometry and different appearance. The critic argues that pose equivariance is unexplained. However, affine augmentations are applied identically to both views, and the shape templates in the data engine naturally appear in varied spatial orientations across training batches, providing implicit pose diversity. Fig. 1 is offered as qualitative validation. The absence of a full mechanistic ablation is a minor gap, not a substantive flaw, and is consistent with the empirical systems framing of the paper.
-
-- **Harsh Critic: "Contrastive loss subsamples only 512 of ~2HWD voxels (~0.025%).** The paper explicitly states this is "due to memory limitations" and is standard practice in dense contrastive learning. This is an implementation constraint, not a methodological flaw; no evidence is provided that more samples would meaningfully change results given the 600,000-iteration pretraining. This is a nitpick about an undisclosed implementation detail that falls under the reproducibility/hyperparameter removal rule.
-
-- **Strength Finder: "Effective training without any real images."** Removed as a generic strength, and in direct conflict with the verified weakness regarding TotalSegmentator binary masks encoding real organ morphology. As stated in the rules, where strength and weakness conflict, the weakness wins.
-
-- **Strength Finder: "Superior parameter efficiency" (framed as comparing 5.9M vs. 67.2M as a pretraining strength).** Kept in weakened form: demoted from a pure strength to a nuanced point. The parameter efficiency is real and impressive, but the comparison is confounded by the fact that larger models may overfit more in 1–3 shot settings independently of pretraining quality.
-
----
+- **"ConvexAdam baseline gets default settings while Ours gets a grid search" (Harsh Critic point 2 inner claim).** Removed — factually wrong. The paper explicitly states "we perform a grid search for both the original implementation and our variant over four hyperparameters" (Sec 4.1).
+- **"5.9M vs 67.2M parameter mismatch is unfair" (Harsh Critic point 4).** Removed — the asymmetry favors the baselines, not Ours, so per the hard rules this is not a valid weakness; if anything, the parameter-efficiency makes Ours' wins more impressive.
+- **Generic "important problem / scarce 3D data" strengths from the Strength Finder.** Removed as superficial.
+- **Missing related work / appendix concerns implied by harsh review** — removed per hard rules.
 
 ## Novel Insights
-
-The paper's most genuinely novel observation — surfaced especially by the multitask capability experiment (Table 2) — is that appearance-invariance is the key missing property in existing 3D biomedical foundation models that prevents them from generalizing beyond segmentation to registration. All tested models (PrimGeoSeg, SMIT, DAE, Models Genesis) were trained with objectives that reward semantic discrimination but not appearance invariance; their features are semantically meaningful but modality-dependent. The synthetic-data randomization approach enforces appearance invariance by construction, and this appears to be the crucial inductive bias missing from current biomedical foundation models. This insight — that the pretraining *objective* rather than just scale or data diversity is the bottleneck — is the paper's core contribution and is well-supported by the ablation study.
-
----
+The cleanest novel contribution is the empirical demonstration that existing 3D biomedical foundation models' features *actively hurt* a generic registration solver compared to mutual information (Table 2), while a multi-positive contrastive objective trained on appearance-randomized paired renderings of shared shape ensembles produces features that *do* drive a solver to SOTA registration. The asymmetric ablation results — Brains-only labels yield decent few-shot segmentation but collapse registration to 0.57 Dice — also surface an under-explored axis: the anatomical *coverage* of the shape prior, not the synthesis procedure per se, is the dominant driver. This reframing is a useful insight the paper itself does not fully articulate.
 
 ## Suggestions
+- Revise the abstract and contributions to say "no real intensity images" rather than "no existing dataset of real images," and explicitly acknowledge the role of TotalSegmentator label distributions.
+- Run multi-seed few-shot finetuning (≥3 training-volume draws) and report cross-seed std on Table 1; reduce the strength of "new state of the art" claims where margins are within seed variance.
+- Add a leave-one-pair-out sweep on L2RAb's 8 pairs to calibrate the registration gap; report a Wilcoxon signed-rank or bootstrap test against ConvexAdam.
+- Add a baseline pretrained with the same contrastive loss on real intensities, to disentangle "synthetic" from "this loss + shape diversity."
+- Ablate the multi-scale loss; add a same-arch real-data pretraining row; report pretraining compute.
 
-1. Revise the abstract and introduction to accurately characterize the dependence on TotalSegmentator: the method does not train on real image *intensities*, but does use real organ *morphology* encoded in binary mask templates. This distinction matters for reproducibility and scientific accuracy.
-2. Add explicit acknowledgment of the TotalSegmentator–AMOS-CT template overlap and provide either a supplementary experiment using templates that exclude abdominal CT organs, or a discussion of how this might (or might not) inflate AMOS-CT performance.
-3. Report leave-one-out cross-validation or bootstrapped variance for the L2RAb registration result (n=7) to support the "new standards" framing.
-4. Include a brief experiment varying τ: report both τ=0.33 and τ=0.20 configurations in Table 1, noting that τ=0.20 slightly improves segmentation at modest cost to registration.
-5. Soften the Table 2 conclusion from "limited to segmentation" to "raw features from segmentation-trained models are not appearance-invariant enough for direct registration use."
-
----
+## Evaluation Axes
+- **Originality:** Solid. The pairing of biomedical-shape-prior synthesis with multi-positive supervised contrastive learning at multiple decoder scales, then dropped into off-the-shelf solvers, is a novel composition.
+- **Importance:** High — generalist 3D biomedical representations are a real bottleneck.
+- **Claims vs. support:** Mixed. Mechanism claims are well supported by ablations; "no real data" is partially misleading; SOTA claims rest on small test sets without significance tests or seed variance.
+- **Soundness of experiments:** Reasonable in coverage (6 segmentation datasets, 2 registration datasets, broad ablation table), weaker in statistical rigor and variance reporting.
+- **Clarity:** Generally clear; framing wording should be tightened.
+- **Value to the community:** Substantial — the multi-task negative result (Table 2) alone is informative, and the recipe is broadly applicable.
 
 ## Score and Decision
 
-**Anchor comparisons (all retrieved papers):**
+Anchor comparison (all returned anchors):
+- `rawj2PdHBq.md` (avg 6.00, "MedVLP with purely synthetic data") — closest topical match (purely-synthetic-data medical pretraining); like the present paper, has strong empirical case but reviewer concerns about scope/framing. The present paper has stronger multi-task evidence and ablation depth, similar framing concerns.
+- `0JcPJ0CLbx.md` (avg 3.75, "Revisiting MAE pretraining for 3D medical segmentation") — same domain (3D biomedical SSL), but mostly a benchmarking study; the present paper offers a genuine new method and a broader evaluation, so it ranks above this anchor.
+- `nYpPAT4L3D.md` (avg 7.50, "Large-scale fine-grained CT VLP, Accept") — relies on real large-scale data and is more polished; the present paper does not reach this bar (smaller eval, framing issues).
+- `xz3dmxfFva.md` (avg 3.67, "Video reps without natural videos") — analogous "no real data" pretraining, but weaker results; this paper is clearly stronger.
+- `oClr2P7V0T.md` (avg 4.25, "Synthetic classifiers as good as real?") — similar framing dispute but weaker results; this paper is stronger.
+- `9RLC0J2N9n.md` (avg 4.50, "SynBench") — task-agnostic synthetic eval; weaker contribution than the present paper.
+- `Gvg3nXZvyg.md` (avg 3.00, "INTRABENCH") — benchmark paper, less methodologically novel than this one.
+- `EtJWnTnqku.md` (avg 5.00, "Medical Vision Generalist") — analogous multi-task ambition with reviewer concerns about evaluation; similar tier.
+- `czvVNVLr7R.md` (avg 4.75, "P²SAM"); `GDDqq0w6rs.md` (4.75); `P5jreWnIjV.md` (4.00); `wRkfniZIBl.md` (4.33) — biomedical/contrastive/benchmark papers below the present paper in either novelty or breadth.
+- `H9UnNgdq0g.md` (avg 6.25, "MediConfusion, Accept") — accepted medical foundation-model paper; broadly comparable acceptance bar.
+- `iuxaCU3DI7.md` (avg 7.50, "RASO surgical, Accept") — stronger and more polished than the present paper.
+- `OqZDfIknDe.md` (avg 3.50, "UniRiT few-shot non-rigid registration") — narrower contribution; below the present paper.
+- `G9HV5upWhx.md` (avg 2.33) — clearly weaker than the present paper.
 
-| Path | Avg Human Score | Comparison to paper under review |
-|---|---|---|
-| `rawj2PdHBq.md` | 6.00 (Reject) | Synthetic data for medical VLP — similar theme but weaker results and less novel methodology; our paper's multitask generalization is clearly stronger |
-| `nYpPAT4L3D.md` | 7.50 (Accept) | Large-scale CT-language pretraining with 69K patients; higher data scale and different scope; our paper is methodologically more original but empirically narrower |
-| `zcTLpIfj9u.md` | 6.33 (Accept) | 3D medical pretraining with time-to-event supervision; comparable novelty and evaluation breadth; similar tier |
-| `QG31By6S6w.md` | 6.25 (Accept) | 3D zero-shot lesion segmentation via VLP; solid contribution in a narrower problem; our paper is broader in scope |
-| `0JcPJ0CLbx.md` | 3.75 (Reject) | Revisiting MAE for 3D medical segmentation — incremental and narrow; clearly weaker than the paper under review |
-| `xz3dmxfFva.md` | 3.67 (Reject) | Synthetic video representation learning — analogous concept but weaker results and less principled; our paper performs better against its baselines |
-| `g7xZkiHcGO.md` | 5.00 (Reject) | Indoor 3D domain gap benchmark — not directly comparable; used as mid-band anchor |
-| `zi3MEZRCqd.md` | 4.60 (Reject) | Unified self-supervision for medical images — related but narrower and weaker |
-| `EtJWnTnqku.md` | 5.00 (Reject) | Medical vision generalist — similar multitask ambition but less rigorous evaluation |
-| `KRhcZIAcoM.md` | 3.50 (Reject) | Semi-supervised medical segmentation via knowledge mining — significantly weaker |
-| `QNW42cjkym.md` | 3.50 (Reject) | Cold-start problem in biomedical classification — narrow, low-novelty |
-| `omM5m7mRy5.md` | 3.00 (Reject) | Single-domain generalization for rare events — much weaker |
-| `7LZjuA4AB2.md` | 3.00 (Reject) | Pre-training distribution shift analysis — different problem |
-| `czvVNVLr7R.md` | 4.75 (Reject) | Part-aware SAM for patient-specific segmentation — narrower scope |
+The paper sits between `rawj2PdHBq` (6.00) and `H9UnNgdq0g` (6.25) — a methodologically interesting biomedical synthetic-data paper with concrete multi-task gains, but with framing overclaim and small/under-quantified registration eval that prevent it from reaching the 7.5 tier.
 
-The paper is clearly above the 5.0 reject cluster and comparable to the 6.0–6.5 accept cluster. The multitask novelty and evaluation breadth push it toward the top of this range, while the framing issues and thin registration test set pull it back. The most directly comparable accepted papers (`zcTLpIfj9u`, `QG31By6S6w`) sit at 6.25–6.33, and this paper's contribution (first 3D model for both tasks, strong OOD performance) is at least as strong — but the overclaiming and n=7 registration concern are real enough to prevent a 7.
-
-**Originality**: High — first 3D model demonstrated on both registration and segmentation, novel data engine design.  
-**Importance of research question**: High — 3D biomedical generalist models are a pressing problem.  
-**Claims supported by experiments**: Mostly yes, with caveats around registration sample size and "no real data" framing.  
-**Soundness of experiments**: Good (comprehensive ablations), with noted gaps (n=7 registration, parameter confound).  
-**Clarity of writing**: Good overall; framing of "no real data" needs revision.  
-**Value to the research community**: High — releases a practical 5.9M pretrained model usable out-of-the-box for registration and as initialization for segmentation.
-
-**Final Score: 6.5 — Accept**
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

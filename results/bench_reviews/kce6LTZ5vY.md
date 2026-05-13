@@ -1,118 +1,85 @@
-Now I have all the information I need. Let me write the final consolidated review.
-
----
-
 ## Summary
-
-InstructMining proposes a two-stage pipeline for automatic instruction data selection: (1) proxy inference loss is used to define dataset quality, approximated via a linear combination of four natural language indicators (reward score, UniEval understandability, naturalness, coherence); (2) BlendSearch identifies an optimal subset size, exploiting an observed non-monotonicity in performance as data size grows. The method claims SOTA performance on LLM-as-a-judge and OpenLLM benchmarks using only 2.5% of a 100K dataset.
-
----
+The paper proposes InstructMining, which fits a linear regression of four natural-language indicators (reward score, UniEval naturalness/coherence/understandability) on finetuning inference loss to score instruction examples, and uses BlendSearch to pick a subset size. It claims state-of-the-art on OpenLLM and LLM-as-a-judge using only ~2,500 examples from a 100k pool and reports a "double descent" w.r.t. instruction-tuning data size.
 
 ## Strengths
-
-- **Principled two-stage decomposition**: The approach of using proxy finetuning loss to define quality, then approximating it with cheap NL indicators (Eq. 6), is well-motivated. The pipeline avoids costly per-candidate finetuning during deployment, directly addressing the efficiency bottleneck. The regression over 129 independently finetuned models grounds the indicator weights in actual training outcomes.
-
-- **Ablation study with actionable insights**: Table 4 shows that removing the reward score ($Rew$) causes the largest degradation (mt-bench loss increase of 0.051), substantially more than any single UniEval indicator. This directly ranks indicator importance and gives practitioners clear guidance on which signals matter most.
-
-- **Multi-setting validation attempt**: The paper evaluates across LLaMA-1-7B, LLaMA-2-13B, and LoRA settings, and demonstrates real gains for the full-finetuning regime across model sizes (e.g., LLaMA-2-13B selected: 0.6531 vs. random: 0.6589 on mt-bench, LLaMA-1-7B: 0.798 vs. 0.844). The effort to validate generality is legitimate even if results are uneven.
-
-- **BlendSearch on inference loss**: Table 2 shows that the BlendSearch-selected 2,532 examples achieve the lowest mt-bench loss (0.699) among all OpenOrca subsets evaluated, validating the utility of the optimal-subset-size search for the inference-loss metric.
-
----
+- Framing instruction-data quality as a regression of cheap natural-language indicators onto post-finetuning evaluation loss is a sensible, computationally efficient operationalization (Eq. 1, Eq. 4–5).
+- Reasonable breadth of candidate indicators (Table 1: length, reward, perplexity, MTLD, KNN-i, UniEval scores) covers length, model-judgment, and lexical/semantic dimensions.
+- The ablation in Table 5 cleanly isolates the dominant role of the reward score (Rew), the strongest single signal of the four.
+- Useful empirical artifact: a fair-time comparison showing comparable OpenLLM scores with ~2.5% of the training data and far less compute (Table 4, Table 2 time column).
 
 ## Weaknesses
 
 ### Fatal
-None. The core approach (proxy loss → NL indicators → data selection) is not invalidated, and smaller-scale results on inference loss do support partial claims.
+None.
 
 ### Major
-
-- **The headline "SOTA on both benchmarks" claim is directly contradicted by the paper's own tables.** Table 3 (OpenLLM) shows StableBeluga-7B at 59.59 as the highest scorer, beating every InstructMining variant (best: 59.25 at 40K). More critically, at the 10K data point—the most practically relevant size evaluated—**random selection (58.74) outperforms InstructMining quality-guided selection (58.65)**, directly undermining the paper's core value proposition at that scale. Furthermore, the BlendSearch-selected 2,532 examples—the configuration the abstract explicitly centers on as achieving SOTA—are **never evaluated on OpenLLM at all**. Table 2 only shows inference loss for this configuration. The central SOTA claim on the OpenLLM benchmark is unverified for the paper's headline model. The paper body does temper this (Section 4.2: "can achieve *similar* performance compared to StableBeluga-7B"), but the abstract and introduction state it flatly as SOTA.
-
-- **LoRA results effectively show zero benefit.** Table 5 reports LoRA-selected vs. random: 1.0698 vs. 1.0700 (self-instruct), 0.8624 vs. 0.8631 (mt-bench). These differences (0.0002 and 0.0007) are negligible and fall well within any reasonable margin of variance. Despite this, the paper claims InstructMining is "scalable to parameter efficient finetuning." This claim is unsupported by the evidence presented.
-
-- **The counterintuitive Understandability ($Und$) coefficient is not explained.** Equation 4 shows $+0.4421 \cdot Und$: higher UniEval understandability increases predicted log-loss, meaning more "understandable" responses are predicted to yield worse finetuning performance. The paper acknowledges the negative correlation with data quality but provides no explanation. Three non-exclusive possibilities—(a) UniEval's dialogue-centric understandability conflates simplicity with understandability, (b) the 129-sample regression on four specific datasets picks up a spurious correlation, (c) the quality theory is incomplete—are not distinguished. If (b), the fitted rule is dataset-specific and the ablation generalizations may not hold; the paper never validates the regression on a held-out dataset source.
+- **The headline SOTA claim is contradicted by the paper's own numbers.** Table 4 shows StableBeluga-7B at 59.59 vs InstructMining-Selected-40k at 59.25 (and InstructMining-Random-40k at 58.95). The abstract/intro phrase "achieves state-of-the-art performance on … OpenLLM" is not supported; the more honest framing is "comparable to" SOTA. Also, the gap to Random (59.25 vs 58.95 = 0.30) is well within typical seed noise on these benchmarks and is reported single-run.
+- **Rule fitting and primary validation share the same evaluation distribution.** The coefficients in Eq. 5 are fit by regressing self-instruct loss on indicator values across 129 sampled datasets; Table 2 then uses self-instruct loss as the headline metric demonstrating the rule works. By construction this is partly circular. The mt-bench column is the only out-of-distribution loss number; differences there (e.g., 0.711 vs 0.746 on OpenOrca-1k Selected vs Random) are modest and never accompanied by variance estimates or multiple seeds.
+- **Sign on Und (understandability) is positive in Eq. 5 and is not interrogated.** Higher "understandability" predicts higher loss / lower quality (+0.4421·Und). The paper acknowledges the direction in one sentence but never asks whether this is collinearity with Nat/Coh (which are themselves UniEval dialogue scores known to correlate). A VIF / multicollinearity diagnostic is needed before reading these coefficients as stable quality signals; absent that, the rule risks being a noisy fit of 4 parameters chosen from a powerset of 9 indicators on only 129 points.
+- **Indicator-selection procedure is opaque.** The paper says it "choose[s] regression results with the highest R² … then prioritize[s] the rule with the most significant p values," but never reports the R², which subsets were searched, or what multiple-testing correction was applied. With ~2^9 candidate subsets and 129 fit points, spurious significance is a real risk. The four selected indicators differ from intuitively useful ones (length, perplexity, MTLD) that are dropped without explanation.
 
 ### Minor
-
-- **Feature selection from 9 to 4 indicators is not described.** Table 1 lists 9 indicators (including input/output length, perplexity, MTLD, KNN-i), but the fitted rule uses only 4. The procedure for eliminating the remaining five is absent. Were they dropped for statistical insignificance? Collinearity? A practitioner cannot reproduce the regression or assess whether a different selection would yield a different—possibly better—rule.
-
-- **Regression diagnostics are not reported.** The paper states the rule is selected by "highest R² and most significant p-values" (Section 4.1) but reports neither R², p-values, nor confidence intervals. Given that the fitted rule produces a counterintuitive coefficient for $Und$, these diagnostics are particularly needed to assess whether the regression is reliable.
-
-- **"Double descent" framing is imprecise.** The observed non-monotonicity (Table 2 and Figure 2) appears in **both** quality-selected and random subsets. With random data, loss for OpenOrca goes: 1K→1.001, 20K→0.991, 90K→1.010 (mt-bench: 0.746→0.751→0.763). This suggests the non-monotonicity is a general feature of incremental finetuning data scaling, not specifically attributable to quality-dilution from ranked selection. The comparison to classical double descent (which is a model-capacity/interpolation-threshold phenomenon) is loose; the paper does acknowledge it is "similar to" rather than identical, but the conceptual analogy is overstated in framing.
+- **BlendSearch's added value is unclear.** On OpenOrca, BlendSearch (2,532 ex) gives self-instruct 0.973 vs Selected-1k at 0.958 (worse) and mt-bench 0.699 vs 0.711 (better by 0.012, single seed). The motivation for BlendSearch was the double-descent landscape, but a simple "top-K" is competitive; a grid sweep over K with matched compute against BlendSearch would be needed to show the search machinery is doing real work.
+- **"Double descent" is shown on a single dataset and a single base model.** Table 2 self-instruct values for OpenOrca-Selected (0.958 → 0.991 → 1.014) and mt-bench (0.711 → 0.730 → 0.735) are monotone increases in loss. The double-descent claim leans on Figure 3 for OpenOrca only, without seeds; mapping this to Nakkiran-style double descent (which is over model size/training steps at fixed data) is an analogy, not the same phenomenon.
+- **LoRA robustness gap is essentially zero** (1.0698 vs 1.0700 self-instruct; 0.8624 vs 0.8631 mt-bench, Table 6). Presenting these as positive evidence for scalability is overstated; the honest reading is that the method has no measurable effect under LoRA.
+- **Evaluation set is small and narrow.** D_eval is 80 instructions randomly sampled from self-instruct's 252, GPT-4-generated. The Section 4 LLM-as-a-judge comparison is against a single model (Vicuna-1.5-7B) with GPT-4 as judge and no positional-bias controls reported.
+- **Dataset quality labels ("High"/"Normal"/"Both") in Table 1 are author priors** with no operationalization, then mixed into the rule-fitting pool, so the regression partly recovers the authors' presumed quality ordering.
 
 ### Trivial
-
-- The paper's conclusion section (Section 6) is unusually sparse, providing little synthesis of what was learned about instruction quality measurement beyond restating the method.
-
----
+- The "2,532 out of 100,000" framing is misleading because the 100k is itself a random subsample of OpenOrca, not the full corpus.
+- Equation shipped as an image artifact (`equation.pdf`) — minor presentation issue.
 
 ## Nice-to-Haves
-
-- **Evaluate BlendSearch-selected 2,532 examples on OpenLLM.** This is the specific model the abstract highlights; adding this row to Table 3 would either validate or refute the central claim.
-- **Single-indicator (reward-score only) baseline.** Ablations remove one indicator at a time but never compare against using reward alone, which Table 4 identifies as by far the most important signal. Showing the full rule beats reward-only would meaningfully justify the multi-indicator complexity.
-- **Qualitative examples at score quantiles.** Showing what a high-scoring vs. low-scoring pair looks like under the InstructMining rule—particularly why a highly "understandable" response is penalized—would help validate or challenge the rule's face validity.
-- **Held-out source validation of the regression.** The rule is fit on Alpaca/Open-Assistant/StackExchange/wikiHow and applied to OpenOrca and Dolly; reporting the regression's out-of-distribution predictive accuracy would strengthen generalization claims.
-
----
+- 3+-seed runs for the headline OpenLLM and mt-bench numbers, with reported standard deviation.
+- k-fold CV across the 129 fit datasets, reporting R² distribution and whether the same four indicators survive across folds.
+- A comparison against contemporary automatic data-selection baselines (not only random sampling), so readers can locate this method relative to prior selectors.
+- Qualitative examples of what the rule rates "high" vs "low" on OpenOrca, to check the indicators are not just picking surface artifacts like length or formality.
 
 ## Removed Points
+These points are flagged to be removed, treat them with caution.
 
-*These points are flagged to be removed; treat them with caution.*
-
-- **[Harsh Critic] "Two hours" efficiency claim ignores feature-extraction cost.** The critic claims InstructMining's speed advantage ignores running reward + UniEval + SentenceBERT over 100K examples. However, Table 2 explicitly reports total time including "150(Rule)+15(Train)" = ~165 min for OpenOrca 1K, and compares against 30 hours for full fine-tuning. The paper is transparent about all costs; this is not a hidden omission. **REMOVED: misreads the paper's own reported timings.**
-
-- **[Harsh Critic] "Circularity risk" in self-instruct evaluation.** The critic notes that self-instruct loss is used both to fit the regression and to evaluate model quality. However, the paper explicitly uses mt-bench as a separate held-out evaluation set (Section 3.2: "we use the gpt-4 labeled mt-bench dataset as an unseen evaluation set"), and the BlendSearch is optimized on mt-bench loss. The concern is addressed; removing as a strawman. **REMOVED: paper addresses this concern directly.**
-
-- **[Harsh Critic] BlendSearch search range "512 to 10,000" vs. 40K evaluation.** The critic suggests the 40K evaluation is inconsistently outside the BlendSearch range. But the 40K experiments are separate quality-guided selection experiments to understand performance at larger scales—not BlendSearch results. These are logically distinct experiments. **REMOVED: misunderstands the paper's experimental structure.**
-
-- **[Strength Finder] "Achieving competitive or SOTA performance with 2.5% of training data."** The strength claims InstructMining-10K (58.65) "surpasses Vicuna-1.5-7B (57.99)" on OpenLLM as evidence of the efficiency claim. While the 10K model does beat Vicuna, random selection at 10K also beats Vicuna (58.74 > 57.99). This strength partially conflicts with the verified weakness that quality-selection provides no benefit over random at 10K on OpenLLM. **REMOVED: conflicts with verified weakness.**
-
----
+- Strength Finder claim that the paper achieves "state-of-the-art" on OpenLLM — dropped because the verified numbers contradict it (kept the weaker, accurate "comparable" framing).
+- Strength Finder claim about "discovery of double descent" — dropped because the evidence is single-dataset/single-seed and the analogy to Nakkiran is not fully justified.
+- Harsh critic complaint about the equation being shipped as a PDF image — kept as Trivial but should not influence scoring; this is borderline presentation.
+- No criticisms about missing related work, missing proofs in appendix, typos, or undisclosed minor hyperparameters were carried forward, per the rules.
 
 ## Novel Insights
-
-The most genuinely novel observation is the non-monotonic (double-descent-like) behavior of generative LLM finetuning performance as data size grows, documented in both quality-selected and random sampling regimes across multiple metrics. This motivates treating the subset size as a hyperparameter to be searched rather than defaulting to all available data—a practically important insight regardless of the precise theoretical framing. The paper's evidence that this phenomenon appears even under random selection (not only quality-ranked) is worth further investigation, as it suggests a more fundamental data-scaling behavior in instruction finetuning beyond quality dilution.
-
----
+None beyond the paper's own contributions. The two observations that could have been novel — the double-descent-in-data-size phenomenon and the quality/quantity crossover — are interesting but the supporting evidence in the submitted version is too thin (one dataset, one base model, one seed) to count as established findings.
 
 ## Suggestions
+- Rewrite the abstract/intro to drop the SOTA claim on OpenLLM and use "comparable to" with the correct numbers; the rest of the contribution still stands.
+- Report 3+-seed mean ± std on every headline number (Table 2, 4, 5, 6); without this, the gap vs Random cannot be defended.
+- Add a held-out indicator-stability analysis (k-fold CV across the 129 datasets, VIF for Eq. 5) and interrogate the positive Und coefficient explicitly.
+- Replace the Random-only baseline with at least one contemporary automatic data-selection method to demonstrate the rule's value over alternatives, not just chance.
+- Either substantiate the double-descent claim across multiple datasets/base models with seeds, or downgrade it to a single-setting empirical observation.
 
-1. Add a row for the BlendSearch 2,532-example model to Table 3 (OpenLLM), and either revise the SOTA claim or retract it depending on results.
-2. Report R², p-values, and standard errors for the fitted regression; explain or investigate the positive $Und$ coefficient.
-3. Describe the feature selection procedure that reduced 9 indicators to 4.
-4. Either (a) add a reward-only baseline to the ablation, or (b) explicitly scope the multi-indicator claim and argue for it relative to the simpler reward-only baseline.
-5. Report LoRA results with larger data sizes or multiple seeds; the current single-point comparison at 1K examples is insufficient to claim LoRA scalability.
-6. Temper the "double descent" framing to distinguish from classical double descent; describe the phenomenon as "non-monotonic data scaling" and show whether it disappears under uniform random data from a fixed distribution.
-
----
+## Evaluation by Axis
+- **Originality:** moderate. Regressing indicators onto post-finetuning loss is a useful framing but each individual indicator and the BlendSearch tool are off-the-shelf.
+- **Importance of question:** high. Automatic instruction-data selection is a real, actively studied problem.
+- **Claims well supported:** weak. The SOTA claim is contradicted by Table 4; gaps over Random are within plausible noise and not seeded; the rule is validated largely on its fitting distribution.
+- **Soundness of experiments:** below standard. Single-seed across the board, opaque indicator selection, one-dataset double-descent figure, LoRA gap is essentially zero, no contemporary baselines.
+- **Clarity of writing:** acceptable; methodology section is readable.
+- **Value to community:** modest. The indicator + regression framing and the reward-score-dominates finding are reusable; the rest needs more evidence before others can build on it.
 
 ## Score and Decision
 
-**Anchor comparison:**
+Anchors retrieved (all listed):
+- `7qMrDf9zFU.md` — avg 4.75, Reject. Very similar topic (instruction data selection via per-example quality scores). Comparable scope but slightly more principled than this paper; this paper has the additional SOTA overclaim.
+- `BTKAeLqLMw.md` — avg 6.33, Accept. Comprehensive controlled study of automatic data selection along complexity/quality/diversity. Much more rigorous than the submission; clearly stronger.
+- `Fty0wTcemV.md` — avg 6.00, Accept. DELIFT: principled pairwise utility metric, multi-stage. Substantially more principled than this submission.
+- `che9LCwPQM.md` — avg 4.75, Reject. Data selection via gradient trajectory pursuit; similar tier of evidence concerns.
+- `xGs7Ch3Vyo.md` — avg 7.50, Accept. Regression-aware finetuning; tangential.
+- `OdoS6cH8MP.md` — avg 2.00, Reject. Weak language-data valuation paper; clearly worse than the submission.
+- `GLmqHCwbOJ.md` — avg 6.33, Reject decision but mid-band scores; tangential.
+- `9wvVFldF0u.md` — avg 5.00, Reject. InsBank evolving subset selection; comparable tier.
+- `DNvzCsQG1D.md` — avg 3.75, Reject. InstructionGPT-4 with similar "few high-quality examples" framing but multimodal; comparable evidence-thinness.
+- `EOPLy80bBm.md` — avg 3.00, Reject. Data pruning roles study; tangential.
+- `5lokEzttBF.md` — avg 4.00, Reject. SCAR style consistency selection; comparable tier and weaknesses.
+- `E2RyjrBMVZ.md` — avg 4.17, Reject. About benchmark variance — directly relevant to one of this paper's weaknesses (single-seed reporting).
+- `pcIDLhnYL9.md` — avg 3.75, Reject. Training-loss as OOD predictor; tangential.
+- `VhQUwxIHER.md` — avg 5.00, Reject. Fairness/variance; tangential.
 
-| Path | Avg Human Score | Comparison |
-|---|---|---|
-| BTKAeLqLMw (What Makes Good Data for Alignment) | 6.33 ✓ Accept | Stronger: more comprehensive evaluation, cleaner SOTA claims supported by data, covers quality+complexity+diversity |
-| FdVXgSJhvz (AlpaGasus) | 6.00 ✓ Accept | Comparable scope but cleaner results: ChatGPT-based filtering clearly outperforms random; no analogous internal contradiction |
-| pszewhybU9 (InsTag) | 6.25 ✓ Accept | Different approach (diversity/complexity tagging) but concrete evidence across larger model zoo |
-| 1fwZJzGdKj (Multi-Agent Data Selection) | 5.50 ✗ Reject | Similar ambition but weaker; paper under review has more principled methodology |
-| 7qMrDf9zFU (Priority on High-Quality) | 4.75 ✗ Reject | Very similar topic; paper under review has more methodological depth (129-model regression) but similar evidentiary problems |
-| qUJsX3XMBH (Rethinking Data Selection at Scale) | 4.40 ✗ Reject | Shows random selection is competitive—directly relevant to this paper's weakness at 10K |
-| DNvzCsQG1D (InstructionGPT-4) | 3.75 ✗ Reject | Simpler, narrower scope; paper under review is more substantive |
-| OdoS6cH8MP (Language Models for Textual Data Valuation) | 2.00 ✗ Reject | Much weaker; paper under review is clearly above this bar |
-
-**Calibrated assessment**: The paper has genuine methodological substance—the two-stage pipeline is principled, the 129-model regression is a real experimental investment, and the non-monotonicity finding is interesting. However, three concrete problems push it below the accepted papers (6.0–6.33): (1) the headline SOTA claim is directly refuted by the paper's own Table 3, (2) the BlendSearch headline model is never evaluated on the benchmark used in the central claim, and (3) LoRA scalability results show negligible benefit. These are not framing issues—they are evidentiary gaps in the central claims. The paper sits between the high-rejected (4.40–4.75) and low-accepted (6.0) tiers. Given that the core methodology works on inference-loss metrics but the broader benchmark claims are unsupported, a score of **4.5** is appropriate: above the reject papers with similar topics but without the evidentiary problems, and below the accepted papers that show cleaner evidence for their claims.
-
-**Axes summary:**
-- *Originality*: Moderate—two-stage pipeline is a reasonable design; BlendSearch for subset size is borrowed but apt.
-- *Importance of research question*: High—automated instruction data selection is genuinely valuable.
-- *Claims well-supported*: Weak—the central SOTA claim on OpenLLM is contradicted internally; LoRA claim is essentially unsupported.
-- *Soundness of experiments*: Moderate—regression methodology is reasonable, but feature selection unexplained, diagnostics missing, headline model unevaluated on main benchmark.
-- *Clarity of writing*: Fair—mostly clear but abstract overclaims relative to body.
-- *Value to the research community*: Moderate—the non-monotonicity finding and indicator-based pipeline have value, but the current evidentiary problems limit trust in the specific claims.
-
-**Decision: Reject** — The paper needs at minimum: (1) evaluating the 2,532-example model on OpenLLM to substantiate or revise the central claim, (2) explaining or investigating the Und coefficient, (3) honest treatment of random vs. selected at 10K on OpenLLM, and (4) LoRA results with adequate power to support scalability claims.
+The submission sits closest to `7qMrDf9zFU` (4.75) and `che9LCwPQM` (4.75) — same problem space, similar weaknesses (thin evidence, single-seed, overclaiming) — but is somewhat worse on the SOTA-overclaim axis and somewhat better in having a clean ablation. It is clearly below `BTKAeLqLMw` (6.33) and `Fty0wTcemV` (6.00), which exhibit substantially more rigorous methodology. It is clearly above the 2.00–3.00 band.
 
 MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

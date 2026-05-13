@@ -1,26 +1,11 @@
-Now let me run calibration search and continue reading the paper simultaneously.Now let me read two calibration anchors in full before writing the review:Now I have enough to write the comprehensive final review.
-
----
-
 ## Summary
-
-PEARL introduces a distributionally robust optimization (DRO) framework for improving LLM robustness against permutations of in-context learning demonstrations. The core mechanism is a Hard Permutation Mining Network (P-Net) that uses the Sinkhorn algorithm (a differentiable OT solver) to generate adversarial orderings of demonstrations, combined with minimax adversarial training to harden the LLM against them. The paper evaluates this in two regimes: a controlled synthetic setting (in-context linear regression with GPT-2 trained from scratch) and instruction tuning of real LLMs (LLaMA, Mistral, Gemma).
-
----
+PEARL formulates ICL demonstration-order robustness as a distributionally robust optimization (DRO) problem over the convex hull of permutation-induced empirical distributions, and solves the inner max via a "P-Net" that produces hard permutations through a differentiable Sinkhorn–Gumbel operator. The framework is validated on a synthetic in-context linear regression task and on instruction tuning over 13 train / 4 held-out tasks from Super-NaturalInstructions across five LLMs, showing worst-case and average gains and additivity with inference-time methods.
 
 ## Strengths
-
-- **Principled DRO formulation as the ambiguity set**: The paper formally defines the ambiguity set Q as the convex hull of all permuted empirical distributions (Equations 6–8, Section 4.1) and frames the robustness problem as a minimax over this set. This is a clean, principled abstraction that is distinct from ad hoc augmentation and correctly targets worst-case permutation performance.
-
-- **Consistent worst-case AND average-case improvements over ERM+DS in Section 6**: Table 2 shows that PEARL outperforms not only ERM but also ERM+DS (random demonstration shuffling) across all LLMs tested, with worst-case gains of 14.2–29.4% and average gains of 5.7–9.8% on LLaMA-3-8B over four held-out tasks. The comparison to ERM+DS is included (Section 6.1) and establishes the adversarial mechanism contributes beyond data augmentation alone in the real setting.
-
-- **Cross-model generalization across five architectures**: Section 6.1 and Appendix E report experiments on LLaMA-3-8B, LLaMA-2-7B/13B, Mistral-7B, and Gemma-7B, showing the benefit is not model-specific.
-
-- **Complementarity with inference-stage methods**: The paper demonstrates that combining PEARL with CurStable yields an additional 3–5% improvement over either method alone (Section 6.2), establishing that the training-time and inference-time approaches address different aspects of the problem.
-
-- **Many-shot generalization**: Figure 5 shows PEARL achieves 24–40% worst-case gains when evaluated on larger shot counts than those seen during training, suggesting the learned robust features generalize to unseen combinatorial spaces.
-
----
+- **Clean differentiable hard-permutation mining.** Casting "find the worst permutation" as an OT problem solved by Sinkhorn iterations (Eq. 11) with Gumbel sampling (Eq. 12) is the right technical tool for what is otherwise an n!-search problem, and yields a fully end-to-end trainable minimax loop.
+- **Worst-case gains scale with shot count.** Worst-case ROUGE-L gains over ERM grow from 14.2% (2-shot) to 29.4% (4-shot) on the four held-out tasks (Table 2), and average performance also improves (5.7–9.8%), so robustness is not bought by trading off the average case.
+- **Composes with inference-time fixes.** Combining PEARL with CurStable / Batch-ICL yields an extra 3–5% (Table 2). This is the cleanest empirical signal that PEARL is contributing something orthogonal to existing order-sensitivity work.
+- **Many-shot generalization despite few-shot training.** Fig. 5 shows 24–40% worst-case gains at up to 64 shots even though training used 2–5 demonstrations — a non-trivial extrapolation result.
 
 ## Weaknesses
 
@@ -28,89 +13,69 @@ PEARL introduces a distributionally robust optimization (DRO) framework for impr
 None.
 
 ### Major
-
-- **Missing ERM+DS baseline in Section 5 (synthetic experiment)**: Section 5.2 uses only ERM+CL as the baseline (following Garg et al., 2022). Random demonstration shuffling (ERM+DS) is the most natural cheap alternative for improving permutation robustness. While ERM+DS *is* included in Section 6 (where PEARL outperforms it), the synthetic Section 5 experiment—which is used to validate the mechanism in a fully controlled, enumerable setting—never rules out that a simple augmentation baseline performs comparably. Without this comparison in the regime where worst-case performance is exactly computable, it is unclear how much the P-Net's adversarial machinery contributes over basic shuffling in the synthetic domain.
-
-- **FLAN-large P-Net creates an uncontrolled knowledge-transfer confound in Section 6**: In Section 5, the P-Net is BERT-base trained from scratch—a reasonable ablation. In Section 6, the P-Net is initialized as **FLAN-large**, a model instruction-tuned on a large corpus that likely overlaps with the Super-Natural Instructions evaluation set. The paper does not ablate this choice; there is no comparison using a randomly initialized or weaker P-Net (e.g., BERT-base as in Section 5) in the instruction tuning setting. The improvements over ERM+DS in Table 2 could stem partly from FLAN-large's implicit task understanding guiding which permutations are semantically harder, rather than solely from the adversarial DRO mechanism. This uncontrolled variable makes it difficult to attribute Table 2's gains unambiguously to the proposed framework.
+- **Threat-model framing is loose.** §3 frames demonstration permutation as a "natural attack… imperceptible to the model provider" with ~80% ASR, but never specifies who the attacker is or what they control. In standard ICL pipelines the provider chooses demonstrations; an actor that can permute them generally has stronger attack surface available. The phenomenon is real and worth studying as a *robustness* problem, but the "attack" rhetoric inflates the contribution. Recasting as worst-case order sensitivity (which the technical content already addresses) would be more honest.
+- **ASR metric systematically exaggerates severity.** ASR (Eq. 1) uses relative degradation (μᵢ − ωᵢ)/μᵢ with ωᵢ defined as the *min over all n! permutations*. The min-over-n! estimator is monotonically worse as n grows by construction, and dividing by μᵢ blows up cases where mean ROUGE-L is small. Reporting absolute worst-case scores in parallel would let readers separate "the model is fragile" from "the metric is a tail statistic."
+- **DRO framing is largely decorative.** The ambiguity set Q (Eq. 8) is the convex hull of permutation-induced distributions, so the sup is attained at an extreme point — a single permutation per sample. The objective therefore reduces to per-sample worst-case adversarial training over orderings; no DRO-specific machinery (divergence radius, dual reformulation, generalization bound) is actually used. The contribution is still valid as adversarial training, but should be described as such rather than dressed up as DRO.
+- **No matched-compute hard-mining baseline.** ERM+DS (random shuffling) is included, but the load-bearing claim is that a *learned* P-Net beats random/cheap hard mining. A "worst-of-K random permutations per step" baseline at matched compute is the natural control and is absent; without it, one cannot rule out that the P-Net's gains are largely from acting as an extra regularizer / curriculum signal.
+- **Single-seed, four-task held-out evaluation.** Generalization claims rest on CSQA, CurDial, CoLA, TMW with no multi-seed variance reporting, despite the worst-case metric being a high-variance min statistic. A broader held-out suite (e.g., FLAN held-outs, BBH subsets) and at least a few seeds would substantially strengthen the empirical case.
 
 ### Minor
-
-- **No convergence analysis connecting P-Net optimization to the formal DRO objective**: The paper frames the method as solving the minimax in Equation (6) but the P-Net implements an approximation via Gumbel-Sinkhorn sampling. There is no analysis of whether the alternating optimization converges, nor any bound on how close the P-Net's distribution is to the true worst-case distribution. This gap between "we frame this as DRO" and "we solve DRO" matters for the strength of the theoretical claims.
-
-- **Limited evaluation scope in Section 6**: Only 4 held-out tasks are used (CSQA, CurDial, CoLA, TMW). With so small an evaluation set, idiosyncratic task behavior could dominate aggregate numbers. No significance tests or confidence intervals are reported, which makes it hard to assess result reliability.
+- **P-Net capacity is uncontrolled.** In §5 the P-Net (BERT-base) is larger than the protected LM (GPT-2 base), and in §6 FLAN-large is used. An ablation varying P-Net capacity, or matching it to the LM, would clarify whether the gains come from "hard permutations" or simply from the auxiliary network's representation power.
+- **"Entropy" constraint is misnamed.** ∑ Πᵢⱼ(1 − Πᵢⱼ) (Eq. 14) is a binarity penalty pushing Π toward {0,1} entries, not an entropy. The paper does not check empirically that the learned permutations are far from identity / non-trivial; a qualitative analysis of what P-Net produces would help.
+- **Cross-shot relative-gain comparisons are awkward.** "14.2% → 29.4%" worst-case gain over ERM mixes shot-dependent denominators that themselves decay rapidly. Reporting absolute worst-case ROUGE-L alongside relative gains would prevent over-reading the trend.
 
 ### Trivial
-
-- The abstract's "nearly 80% success rates" refers to the most favorable single data point (TMW, δ=50%, 6 shots, exhaustive search). The paper text (Section 3) is more precise ("over 50% and 80% on two datasets respectively"), but the abstract conflates the best-case figure with the general capability of the attack. This minor framing issue could be clarified.
-
----
+- Eq. 17 reads as `argmax` for the LLM update where `argmin` is clearly intended.
+- Optimization schedule details (P-Net inner steps per LLM step, β, Gumbel τ schedule) are under-specified in the main text.
 
 ## Nice-to-Haves
-
-- Add ERM+DS as a baseline in the linear function (Section 5) experiments to complete the comparison in the synthetic regime where worst-case is exactly computable.
-- Ablate P-Net initialization in Section 6 (compare FLAN-large P-Net vs. BERT-base P-Net) to isolate the adversarial training contribution from FLAN-large knowledge transfer.
-- Visualize what permutations P-Net generates across training (e.g., does it learn semantically structured orderings or effectively random ones?) — this would validate that P-Net finds genuinely challenging permutations rather than arbitrary reorderings.
-- A learning curve analysis (performance vs. number of adversarial training iterations) would clarify whether the average-performance gains arise from a curriculum effect or a DRO effect.
-
----
+- Qualitative case studies of P-Net-selected permutations vs. random, with side-by-side LM outputs.
+- Broader held-out evaluation (FLAN held-outs, BBH) and multi-seed runs for the worst-case metric.
+- A real threat-model section, or a reframing that drops "attack" language in favor of worst-case robustness.
 
 ## Removed Points
-
-*These points are flagged as removed. Treat them with caution.*
-
-1. **Entropy constraint claimed to be an error (Harsh Critic, Issue in Section 4.2)**: The critic claimed that the constraint $\sum_{i,j} \Pi_{ij}(1-\Pi_{ij})$ maximizes at $\Pi_{ij}=0.5$ (the uniform matrix) and therefore defeats the paper's stated intent. This is incorrect. The P-Net's combined objective is $\arg\max_\phi (L_{lm} - \beta L_{ent})$ (Equation 16), so the P-Net *minimizes* $L_{ent}$, which pushes entries toward 0 or 1 (hard permutations), away from 0.5. The formulation is self-consistent and the critic misread the sign of the entropy term. **Removed as factually incorrect.**
-
-2. **"Attack is trivially detectable" (Harsh Critic, Introduction)**: The critic argues that reordering demonstrations is visible to a model provider. The paper's threat model involves a *malicious user* (attacker) manipulating the order of shots before sending them to a model—not a prompt injection attack needing to hide from the model provider. The "less noticeable" claim is about the attack being a clean, semantically preserving reordering rather than appending adversarial suffixes. This is a reasonable framing of a naturally-arising distributional variant, not a misrepresentation. **Removed as strawman.**
-
-3. **"80% is misleading headline" (Harsh Critic)**: The abstract says "nearly 80% success rates." The paper (Section 3) reports "over 50% and 80% on two datasets respectively" at δ=50%. The abstract is paraphrasing the results at the more aggressive threshold and on the more vulnerable dataset. This is minor framing and not fabricated. **Downgraded to Trivial.**
-
-4. **Neural search attack trains P-Net on in-distribution samples (Harsh Critic, Section 3)**: The critic flags that P-Net used in Section 3 has seen the model during meta-training, questioning generalization. Section 3 uses P-Net to demonstrate vulnerability (upper bound approximation of exhaustive search), not as a practical deployed attacker. The claim is about the existence of the vulnerability, not whether the attack is deployable without model access. **Removed as out of scope.**
-
-5. **"Hundreds of LoRA updates" efficiency claim not substantiated with experiment (Harsh Critic)**: This is a supporting efficiency claim made in the introduction and conclusion. While no explicit table compares update counts, it characterizes the practical setting described in Section 6. Removing this would require a trivial ablation rather than indicating a core flaw. **Removed as minor presentation concern.**
-
----
+These points are flagged to be removed, treat them with caution.
+- **Harsh critic's "first to solve from adversarial perspective" complaint and related-work coverage requests** — borderline missing-related-work territory; removed per hard rule.
+- **Demand that the paper not use the "attack" framing at all** — kept as a framing critique above, but the related sub-claim that §3 is "self-referential" because P-Net appears both in §3 and §4 is unfair: the paper explicitly uses neural search as an empirical approximation to the exhaustive upper bound, and the comparison to exhaustive search validates rather than circularly motivates the framing.
+- **Parser-level formatting artifacts** (garbled symbols, "argmax/argmin," broken math glyphs in the extracted text) — these are extraction issues, not author errors.
+- **Strength Finder's "compelling demonstration of vulnerability"** — kept implicitly in strengths section but de-emphasized because the harsh critic's metric-inflation concern is partly valid.
+- **Strength Finder's "principled DRO formulation"** — dropped/softened because the DRO scaffolding collapses to adversarial training (see Major weakness).
 
 ## Novel Insights
-
-The most genuinely novel insight from the reviews is the potential confound between FLAN-large's pretrained representations and the adversarial training contribution in the instruction-tuning setting. This points to a broader design question for DRO-based ICL robustness: when the hard-example generator is itself a powerful pretrained model, its representations may implicitly supervise which orderings are "hard" in a way that conflates task understanding with adversarial discovery. Separating these two mechanisms—comparing matched-capacity P-Net initializations across Section 5 and Section 6—could illuminate how much of the robustness gain is algorithmic versus empirical knowledge transfer. This is an insight the paper does not address.
-
----
+None beyond the paper's own contributions. The observation that adding shots can *worsen* worst-case performance even while improving the average (§3) is genuinely useful for practitioners, and the demonstration that training-time robustness composes with inference-time order-sensitivity fixes is the most empirically interesting takeaway.
 
 ## Suggestions
+- Drop or qualify the "attack/ASR ~80%" framing; report absolute worst-case ROUGE-L alongside relative ASR.
+- Replace the DRO presentation with an explicit "worst-case adversarial training over permutations" framing, since the convex-hull sup collapses to that.
+- Add a worst-of-K random-permutations baseline at matched compute; this is the single most informative experiment to run.
+- Run ≥3 seeds and expand to a broader held-out task suite; report variance on the min-statistic.
+- Provide an ablation varying P-Net capacity, and a qualitative analysis of how far the learned permutations are from identity.
 
-1. Add ERM+DS as a baseline in Section 5. This is the most important actionable fix: it would directly answer whether the adversarial P-Net mechanism contributes beyond random augmentation in the controlled, enumerable regime.
-2. Run a BERT-base P-Net in Section 6 as an ablation to isolate the FLAN-large knowledge-transfer confound. Even if FLAN-large P-Net is better, showing that a weaker P-Net also outperforms ERM+DS would substantially strengthen the mechanistic claim.
-3. Report statistical significance (e.g., bootstrap standard errors) or results from multiple seeds for the 4 held-out evaluation tasks in Section 6.
-
----
+## Axis Evaluation
+- **Originality:** Moderate-to-high. Adversarial Sinkhorn-Gumbel permutation mining for ICL is a fresh combination, though the underlying tools (Sinkhorn networks for permutation learning, adversarial training) are well-established.
+- **Importance of research question:** High — ICL order sensitivity is a well-documented and practically annoying problem.
+- **Support for claims:** Mixed. Core empirical claims (worst-case gains, compose with inference methods) are supported; broader "robust to all permutations" / "generalization" claims rest on thin (4-task, single-seed) evidence and a metric that amplifies severity.
+- **Soundness of experiments:** Adequate but narrow. Lacks the matched-compute hard-mining control and variance reporting.
+- **Clarity:** Generally clear; the DRO derivation is more notationally heavy than the content warrants, and some optimization details are deferred.
+- **Value to research community:** Solid — the framework is reusable, the empirical finding that training-time and inference-time fixes compose is useful, and the code/setup is a reasonable basis for follow-up.
 
 ## Score and Decision
 
-**Anchor comparison table (all retrieved):**
+Anchors retrieved:
+- `q1UyoY3MgJ.md` — *Rethinking Invariance in In-context Learning* — avg **6.00**, Accept. Most directly comparable: same problem (ICL permutation invariance), proposes an architectural fix. PEARL is more empirically broad on instruction tuning and integrates cleanly with inference methods, but has weaker framing discipline and narrower held-out coverage. Comparable tier.
+- `H8Qg1IIMaR.md` — *Fool Your LLMs with Permutations* — avg **5.50**, Reject. Same vulnerability framing but mostly descriptive; PEARL goes further by proposing a training fix.
+- `1Iu2Yte5N6.md` — *Rapid Selection and Ordering of ICL Demonstrations* — avg **6.00**, Accept. Same problem area from the inference-time side; comparable contribution depth.
+- `YPIA7bgd5y.md` — avg **6.50**, Accept. Higher-quality ICL analysis paper; PEARL is more applied and slightly less rigorous in framing.
+- `pudmhZdV78.md` — avg **5.25**, Reject. ICL with spurious correlations, weaker empirical case than PEARL.
+- `CbfsKHiWEn.md` — *Dr. DPO* (DRO for DPO) — avg **6.20**, Accept. Methodologically related (DRO for LLMs); PEARL's DRO is less rigorous but its empirical story is comparable.
+- `eC4WlSZc4H.md` — avg **6.75**, Reject. Higher avg score but rejected, illustrating high-band variance.
+- `s5orchdb33.md` — *ReFAT* — avg **5.75**, Accept. Comparable adversarial-training-for-LLM-robustness paper.
+- `IAFLoDz6H5.md` — avg **4.60**, Reject. Lower-tier robustness paper with weaker empirical claims; PEARL is clearly above this.
+- `OLi39lZS9Y.md` — avg **3.50**, Reject. ICL paper with weak methodology; PEARL is clearly above.
+- `Vo1FUQ4aQI.md`, `KSPBh07jEO.md`, `1zt8GWZ9sc.md` — all <4 avg, Reject. PEARL is well above these.
+- `leSbzBtofH.md`, `hXA8wqRdyV.md`, `87YOFayjcG.md`, `94d2OjTags.md`, `nLxH6a6Afe.md`, `JVFRwCx3Dy.md` — peripheral matches, used only as range anchors.
 
-| Path | Avg Human Score | Comparison to PEARL |
-|---|---|---|
-| `/calibration/H8Qg1IIMaR.md` | 5.50 (Reject) | Demonstrates LLM permutation vulnerability but proposes no solution; PEARL is strictly more contributive |
-| `/calibration/frRDT6EOhg.md` | 6.50 (Accept) | ICL improvement paper (demonstration-free), tight methodology, no major gaps; PEARL has larger scope but structural gaps |
-| `/calibration/1Iu2Yte5N6.md` | 6.00 (Accept) | ICL demonstration ordering paper with strong theoretical analysis; PEARL has comparable empirics but weaker theory |
-| `/calibration/pudmhZdV78.md` | 5.25 (Reject) | ICL spurious correlation paper, limited scope, missing key ablations; similar to PEARL's methodological gaps |
-| `/calibration/Af7CsWMUNI.md` | 5.25 (Reject) | ICL representation-level method, rejected for limited scope; PEARL has broader scope |
-| `/calibration/CbfsKHiWEn.md` | 6.20 (Accept) | DRO applied to LLM alignment (DPO), theoretical grounding + ablations; PEARL uses DRO similarly but lacks the clean ablations |
-| `/calibration/TTrzgEZt9s.md` | 8.00 (Accept) | DRO theory paper with formal convergence guarantees; much stronger theoretical work than PEARL |
-| `/calibration/OF5x1dzWSS.md` | 6.67 (Accept) | Adversarial training + DRO for image models, strong theoretical support; PEARL is in the same vein but empirical-only |
-| `/calibration/vY4iBYm9TU.md` | 3.50 (Reject) | Transfer learning for adversarial robustness, weak contribution; substantially weaker than PEARL |
-| `/calibration/xdnoULh5Sv.md` | 4.00 (Reject) | Adversarial defense blending paradigms without strong ablations; comparable methodological gap to PEARL |
-| `/calibration/eC4WlSZc4H.md` | 6.75 (Reject) | Longitudinal LLM adversarial robustness study; richer analysis but similar empirical scope |
-| `/calibration/3P87ptzvTm.md` | 5.00 (Reject) | Sinkhorn-based optimal transport for multiple distributions; limited contribution |
-| `/calibration/j8HU5aNpd3.md` | 4.75 (Reject) | Many-shot ICL evaluation paper, limited methodology; narrower than PEARL |
+PEARL sits closest to `q1UyoY3MgJ` (6.0, Accept) and `CbfsKHiWEn` (6.2, Accept): same problem domain, similar methodological depth, comparable empirical breadth. The framing/metric issues and missing matched-compute baseline argue against scoring above those anchors, but the cross-method compositionality result and many-shot generalization argue for parity. I land slightly below `q1UyoY3MgJ` because of the load-bearing framing problems and single-seed evaluation, but well above the <4 cluster.
 
-**Calibration reasoning:**
-
-PEARL sits above H8Qg1IIMaR (5.5, reject) which demonstrates the same vulnerability class but contributes no training-time solution. PEARL's solution works, and the core claim (PEARL > ERM+DS) is established in Section 6 with 5 LLMs. However, it sits below CbfsKHiWEn (6.2, accept) and OF5x1dzWSS (6.67, accept), which provide formal grounding and clean ablations for their DRO/adversarial training claims. The two structural gaps (missing ERM+DS in Section 5; FLAN-large confound in Section 6) are real but not fatal — Section 6 does show PEARL > ERM+DS, and Section 5 partially validates the mechanism with a weaker P-Net. The paper lands squarely in the borderline zone.
-
-**Score: 5.5 — Weak Reject**
-
-The paper makes a genuine and practically relevant contribution to ICL robustness with a principled DRO framework. However, the unresolved FLAN-large confound in the primary (Section 6) experiments and the absent ERM+DS comparison in the controlled (Section 5) experiment together leave the mechanistic claim — that the Sinkhorn-based adversarial P-Net specifically drives the robustness gains, beyond what FLAN-large's knowledge transfer and simple augmentation would provide — not fully established. These are addressable in revision but require non-trivial additional experiments.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

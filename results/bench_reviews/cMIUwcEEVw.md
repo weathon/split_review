@@ -1,26 +1,12 @@
-Now let me run the calibration search:Now I have all the information I need. Let me write the final consolidated review.
-
----
-
 ## Summary
-
-RAVL identifies and formalizes the "edge-of-reach problem" in offline model-based RL: states reachable only in the final step of limited-horizon rollouts are never visited as input states during Bellman updates and thus accumulate pathologically overestimated Q-values, analogous to the out-of-sample problem in model-free methods. The paper supports this with a confounded-but-suggestive oracle dynamics experiment (Table 1), a clean causal patching experiment in a simple environment (Section 5.3), and proposes RAVL (MBPO + EDAC-style ensemble pessimism) as a practical solution that achieves competitive D4RL results without explicit dynamics penalization.
-
----
+The paper identifies the "edge-of-reach problem" in offline model-based RL: states reachable only at the final step of bounded-horizon rollouts appear as Bellman targets but never as Bellman inputs, leading to pathological value overestimation analogous to the out-of-sample problem in model-free RL. It supports this with a surprising oracle-dynamics failure on D4RL, a controlled toy environment whose 0.4% value-patching experiment cleanly isolates edge-of-reach states as the cause, and an algorithm (RAVL = MBPO rollouts + EDAC critic) that matches state-of-the-art on D4RL MuJoCo without any dynamics penalty.
 
 ## Strengths
-
-- **The edge-of-reach problem is a genuine, previously unidentified structural issue.** The observation that finite-horizon rollouts from a fixed offline dataset create a set of states permanently excluded from Bellman updates as inputs—creating a persistent analogue of the model-free out-of-sample problem—is a conceptually valuable and unifying insight. Prior work had not articulated this clearly.
-
-- **The oracle value patching experiment (Section 5.3) is rigorous and causally compelling.** Replacing Q-values in Bellman targets with oracle values *only at edge-of-reach states* (just 0.4% of all states evaluated over training) fully resolves training failure in the simple environment, while leaving all other states unpatched. This constitutes strong causal evidence that the edge-of-reach states are the root cause and not just correlated with failure.
-
-- **Figure 3 provides direct mechanistic verification** that RAVL's effective penalty (Q-ensemble variance) is concentrated specifically at edge-of-reach states in the simple environment, confirming the algorithm captures the intended signal rather than acting as a generic pessimism mechanism.
-
-- **Section 7.3 honestly reinterprets prior methods.** Showing a positive correlation between dynamics uncertainty penalties and RAVL's ensemble variance, and acknowledging that prior methods "accidentally" mitigate the edge-of-reach problem, reflects genuine intellectual integrity and provides a more complete theoretical unification of model-free and model-based approaches.
-
-- **Table 3 supports the model accuracy claim independently**, showing that per-step rollout rewards in MBPO and RAVL closely match true environment rewards, consistent with prior findings (Janner et al., 2019; Lu et al., 2022) that short rollouts are generally accurate—thereby strengthening the argument that dynamics errors are not the primary bottleneck.
-
----
+- **Clean causal evidence in the toy environment.** SAC-OraclePatch (Sec. 5.3, Fig. 2) corrects values at only 0.4% of states — those provably edge-of-reach — and fully resolves the failure. This is unusually direct causal evidence for the proposed mechanism rather than a correlational story.
+- **Surprising and pedagogically useful oracle-dynamics result (Table 1).** Even with proper caveats (see Weaknesses), the demonstration that replacing learned dynamics with true dynamics in MOPO causes collapse on most MuJoCo datasets is a striking and informative finding that motivates rethinking the field's dominant narrative.
+- **Conceptual reframing that unifies two subfields.** Recasting the model-based pathology as a *state-side* analogue of the model-free out-of-sample problem is a clarifying perspective that suggests porting model-free pessimism tools (EDAC) into model-based pipelines.
+- **Competitive empirical result without dynamics penalization (Table 2).** Matching MOBILE on D4RL MuJoCo using only EDAC's critic over MBPO rollouts is a useful negative result for the field: dynamics-uncertainty penalties may be doing less work than assumed.
+- **Mechanistic check on the toy (Fig. 3).** Ensemble variance is empirically elevated at edge-of-reach states, confirming RAVL's penalty targets the intended set in a setting where that set is exactly definable.
 
 ## Weaknesses
 
@@ -28,89 +14,65 @@ RAVL identifies and formalizes the "edge-of-reach problem" in offline model-base
 None.
 
 ### Major
-
-- **The oracle experiment (Table 1) conflates removing dynamics error with removing conservatism.** MOPO's penalty is `η·σ` where `σ` is ensemble disagreement. Replacing the learned ensemble with a single oracle dynamics function sets `σ = 0` everywhere, so "Oracle MOPO" simultaneously eliminates both dynamics error *and* the only conservatism mechanism. The resulting algorithm is equivalent to MBPO applied offline without any penalty—a setting already known to fail. As the paper states, Oracle MOPO is "equivalent to MBPO (the base optimizer for most other offline model-based RL methods) with a perfect uncertainty-free model." The paper then claims this result "indicates the failure of all existing methods" and that "dynamics model errors do not explain the behavior of model-based methods"—but neither conclusion is established by this experiment alone. A clean test would require preserving some form of conservatism (e.g., a density penalty on distance from the offline dataset, or a constant rollout-length cap) while substituting the oracle dynamics. Without this control, Table 1 cannot distinguish: (a) dynamics errors are irrelevant (paper's interpretation) from (b) uncertainty penalties are necessary for offline stability, irrespective of model accuracy. The edge-of-reach hypothesis itself is independently supported by Section 5, but the specific "dynamics errors don't explain failure" framing in the motivating experiment is not established.
-
-- **Missing ablation isolating edge-of-reach mechanism from general ensemble pessimism on D4RL.** RAVL is MBPO + SAC + EDAC-style ensemble minimum. D4RL results show RAVL matches MOBILE, but there is no ablation of MBPO + SAC *without* ensemble pessimism. Without this baseline, it is impossible to determine whether improvements come specifically from the edge-of-reach-motivated pessimism or simply from EDAC applied to a larger dataset that happens to include synthetic rollouts. The oracle patching experiment in the simple environment provides clean mechanistic evidence for the hypothesis there, but the gap to MuJoCo (where edge-of-reach states are not exactly defined) is not bridged.
+- **The "all existing methods fail" claim from Table 1 is supported only by MOPO.** Under oracle dynamics, MOPO's ensemble-disagreement penalty is identically zero, so Table 1's "Oracle" column effectively reduces MOPO to MBPO+SAC. The paper claims the result generalizes because "other dynamics penalty-based offline model-based RL algorithms share the same base MBPO optimizer," but this glosses over methods whose mechanisms do not vanish under oracle dynamics (e.g., RAMBO's adversarial model update, COMBO's value-side conservatism). The headline framing — that the field has misunderstood the problem — should be supported by re-running the oracle experiment on at least one non-MOPO-style method. As written, this is overclaim relative to evidence.
+- **Algorithmic novelty is thin and not ablated.** RAVL = MBPO rollouts + EDAC update (Eq. 3 is EDAC's update). Table 2 shows it matches but does not exceed MOBILE, and only improves on EDAC on a subset of tasks. There is no ablation isolating (a) MBPO rollouts vs. (b) the EDAC min-ensemble critic vs. (c) EDAC's diversity regularizer, nor a sensitivity study over $N_{\text{critic}}$. Given the conceptual claim that "edge-of-reach is the central issue," readers cannot tell whether D4RL gains over EDAC come from addressing edge-of-reach specifically or from incidental hyperparameter retuning.
+- **The mechanistic verification (Fig. 3) is shown only on the toy; D4RL has no analogous diagnostic.** The paper's central claim is that RAVL's ensemble variance is elevated at edge-of-reach states. Demonstrating this on the toy is appropriate as proof of concept, but the absence of any D4RL-side diagnostic (e.g., variance at terminal-rollout states vs. interior states; Q-value trajectories on D4RL for MOPO-oracle/MBPO/EDAC/RAVL) leaves a gap between conceptual narrative and benchmark gains.
 
 ### Minor
-
-- **The formal definition of edge-of-reach states is ill-posed for continuous domains without specifying ε.** Definition 1 requires `p_{t,π}(s) = 0` for t < k under all policies, which is only well-defined for deterministic dynamics and policies over discrete or bounded spaces. The paper relaxes this to `p_{t,π}(s) < ε` for stochastic settings but never specifies ε, making it unclear what the theoretical statement in Proposition 1 covers in the MuJoCo setting.
-
-- **Comparison baselines in Table 2 are narrow.** CQL and TD3+BC are widely-used offline RL baselines that would help contextualize RAVL's performance in the broader landscape. Their absence makes the D4RL comparison harder to interpret for readers outside the model-based subfield.
-
-- **The claim that "failure of MOPO with oracle dynamics indicates the failure of all existing methods" (Section 4.1) is an overreach.** Methods like COMBO, MORS, and MOBILE have different penalty structures and rollout schedules; they would not trivially fail in the same way as MOPO when given oracle dynamics, because their conservatism mechanisms differ.
+- **Edge-of-reach vs. out-of-sample is more a re-coordinate than a new phenomenon.** The paper acknowledges (Sec. 4.2 end) the close relation, and Proposition 1 is explicitly "analogous to Kumar et al. (2019)" — i.e., the standard $\gamma^{k-t}$ propagation bound. The reframing has pedagogical value, but the paper offers no diagnostic that empirically separates "edge-of-reach overestimation" from generic OOD overestimation on D4RL, which weakens the claim of identifying a *new* problem rather than relabeling a known one.
+- **The reinterpretation of prior methods (Sec. 7.3, Fig. 6) is correlational.** A positive correlation between dynamics-uncertainty and Q-ensemble-variance penalties is consistent with the "accidentally addresses edge-of-reach" hypothesis but equally consistent with both penalties simply tracking distance from $\mathcal{D}_{\text{offline}}$. A counterfactual (e.g., MOPO + RAVL ensemble layered in; MOPO with a uniform vs. real penalty) would strengthen this argument.
+- **D4RL MuJoCo locomotion is increasingly saturated.** Evaluating only on MuJoCo v2 leaves the conceptual contribution untested on tasks with stitching or exploration structure (AntMaze, Adroit), where the edge-of-reach intuition could either shine or fail more clearly.
+- **The $\epsilon$-relaxation of Def. 1 is unspecified.** For stochastic Gaussian dynamics models, every $s'$ has positive density, so $\epsilon$ entirely determines the partition and is not chosen or analyzed.
 
 ### Trivial
-
-- The simple environment uses rollout length k=10 relative to episode horizon H=30, a ratio much higher than D4RL (k≤5 vs. H=1000). This makes the edge-of-reach set larger and more distinct in the simple environment, which may overstate how sharply the phenomenon manifests in MuJoCo tasks.
-
----
+- Table 3 (per-step rewards) supports short-horizon model accuracy but does not directly bear on Q-value blow-up; the conclusion that "model exploitation is not the main issue" would be more cleanly supported by comparing Q-values rather than rewards.
 
 ## Nice-to-Haves
-
-- **Controlled oracle experiment**: An "Oracle MOPO with retained conservatism" variant (e.g., a constant or density-based penalty applied alongside oracle dynamics) would cleanly separate the dynamics accuracy effect from the conservatism effect and decisively support the paper's central diagnostic claim.
-
-- **Rollout length ablation on D4RL**: Since edge-of-reach states are parametrically tied to k, varying k from 1 to 10 on a representative task and observing Q-value overestimation would provide explicit quantitative support for the hypothesis in MuJoCo.
-
-- **Q-value distribution analysis in MuJoCo**: Low-dimensional projections of Q-value distributions (analogous to Figure 2 for the simple environment) at states near vs. far from the rollout boundary in MuJoCo would help verify that the mechanism transfers from the designed simple setting to the benchmark.
-
-- **Investigate why RAVL matches but doesn't exceed MOBILE**: The paper suggests combining RAVL's edge-of-reach pessimism with dynamics uncertainty penalization; preliminary results on even one environment would strengthen the claim that these mechanisms are orthogonal and complementary.
-
----
+- Combine RAVL with a dynamics penalty on a noisier or stochastic benchmark to validate the paper's orthogonality claim (mentioned as future work).
+- Q-value trajectory plots on D4RL for MOPO-oracle, MBPO, EDAC, and RAVL.
+- An oracle-dynamics evaluation of at least one non-MOPO-family method (RAMBO or COMBO) to back up the field-wide claim.
 
 ## Removed Points
-
-*These points are flagged to be removed; treat them with caution.*
-
-- **Harsh Critic (Section 4.1): "this result indicates the failure of all existing methods" is overreach.** Partially valid, but moved to Minor because it targets one sentence rather than a fundamental methodological flaw.
-
-- **Strength Finder: "sets new SOTA on Halfcheetah datasets."** Kept as a factual statement (Table 2), but noted that margin over MOBILE is modest and dataset-specific—does not constitute a robust SOTA claim across the benchmark.
-
-- **Harsh Critic: Conclusion speculation about Offline DreamerV2.** The remark in Section 8 that DreamerV2 "could be drastically simplified" is speculative, but this is a future directions claim in a one-sentence conclusion—not a core scientific claim. REMOVED as too minor to count as a weakness.
-
----
+*These points are flagged to be removed, treat them with caution.*
+- **(Harsh) "Methods like MOBILE, RAMBO, COMBO would behave differently."** Kept in slightly different form: the point about MOBILE specifically is partly handled by the paper noting MBPO is the shared base; the criticism is folded into the Major weakness about the field-wide claim rather than removed wholesale.
+- **(Harsh) "Strawman that toy patching at 0.4% of states actually weakens the model-based interpretation because any aggressive minimum-over-ensemble would also address it."** This is speculative and not clearly correct — the paper's point is that *only edge-of-reach states need correction*, which is itself the strong finding. Removed as inflated.
+- **(Harsh) "Proposition 1 implies novelty but is textbook."** The paper itself states it is analogous to Kumar et al. (2019); the critique is half-acknowledged in the text. Downgraded to the Minor section.
+- **(Strength Finder) "Formal definition and error propagation bound" framed as a core strength.** Filtered: Proposition 1 is acknowledged by the authors as analogous to existing results, so it is supporting framing rather than a genuine theoretical contribution. Not retained as a standalone strength.
+- **(Strength Finder) Generic "unification" claim.** Kept only insofar as it ties to the concrete EDAC-into-MBPO design; the abstract unification framing alone is not a strength.
 
 ## Novel Insights
-
-The oracle patching result in Section 5.3—that correcting Q-targets at only 0.4% of states (exactly the edge-of-reach set) fully resolves training failure while leaving 99.6% of states uncorrected—is the most striking finding in the paper. It provides unusually precise causal localization of a training pathology, a form of evidence rarely seen in the offline RL literature. Combined with the reinterpretation that prior dynamics-uncertainty penalties succeed partly by *accidentally* penalizing edge-of-reach states (since both signals co-vary with distance from the offline dataset), the paper provides a genuinely unifying lens: the out-of-sample problem in model-free RL and the edge-of-reach problem in model-based RL are structurally isomorphic, differing only in whether the out-of-distribution element is the *action* or the *state*. This connection is novel and practically valuable for guiding future algorithm design.
-
----
+The genuinely novel synthesis is the observation that the model-free out-of-sample problem persists in model-based offline RL in a state-side form — i.e., terminal-rollout states are Bellman targets that are never Bellman inputs — together with the empirical demonstration (oracle dynamics + 0.4% patching) that this state-side gap, not model error, drives the dominant pathology in oracle settings. The reinterpretation that dynamics-uncertainty penalties succeed by incidentally correlating with edge-of-reach variance is a useful, if correlational, contribution. Beyond these the reviews do not produce insights beyond the paper's own.
 
 ## Suggestions
+- Re-run Table 1's Oracle protocol on at least one method whose mechanism does not vanish under perfect dynamics (RAMBO, COMBO, or MOBILE evaluated with its full update under true dynamics) to substantiate the field-wide claim.
+- Add ablations on D4RL: (a) EDAC with no rollouts, (b) MBPO + clipped double-Q only, (c) sweep $N_{\text{critic}}$ and the EDAC diversity coefficient — these are needed to attribute gains to addressing edge-of-reach rather than to retuned EDAC.
+- Provide a D4RL-side diagnostic: ensemble-variance histogram split by "terminal-rollout state" vs. "interior" (approximating edge-of-reach), and Q-value trajectories over training across MOPO-oracle, MBPO, EDAC, RAVL.
+- Evaluate on AntMaze and/or Adroit to test whether the framing generalizes beyond saturated locomotion.
+- Soften the abstract/intro claim from "existing algorithms completely fail" to specify "dynamics-uncertainty-penalty methods built on MBPO."
 
-1. Add a controlled "Oracle MOPO + preserved conservatism" variant to Table 1 to separate the dynamics error effect from the conservatism effect. Even a simple implementation (e.g., using a fixed penalty magnitude or capping rollout length) would resolve the confound.
-2. Report MBPO + SAC (no ensemble minimum) on D4RL as an ablation baseline. This is computationally cheap and would conclusively establish whether the data augmentation or the edge-of-reach pessimism drives D4RL performance.
-3. Specify ε in the relaxed Definition 1 for stochastic settings, or add a brief discussion of how sensitive Proposition 1's conclusion is to ε.
-4. Add CQL and TD3+BC to Table 2 for completeness.
-
----
+## Axes
+- **Originality:** Moderate. The reframing is clean and pedagogically useful; the underlying phenomenon is closely related to known OOD overestimation.
+- **Importance:** Reasonable. If correct, it redirects attention from dynamics-error mitigation to value-side pessimism — a constructive shift.
+- **Claims well-supported:** Partially. The toy story is rigorous; the field-wide claim and benchmark mechanism story are not fully supported.
+- **Soundness of experiments:** Adequate for D4RL MuJoCo, but missing ablations and harder benchmarks.
+- **Clarity:** Strong. The narrative arc (surprising failure → hypothesis → toy verification → scaled method) is well executed.
+- **Value to the community:** Real. The conceptual reframing plus the negative result that explicit dynamics penalties are not needed to match MOBILE are useful contributions.
 
 ## Score and Decision
 
-**Anchor comparison:**
+Anchor comparison:
+- `OATPSB5JK1.md` — *Lower Expectile Q-Learning for Model-Based Offline RL*, avg **6.00**: very similar territory (low-bias value estimation for model rollouts); accepted with solid empirical results. The paper under review is comparable in conceptual clarity but weaker in empirical breadth (locomotion-only; matches but doesn't exceed SOTA).
+- `7zY781bMDO.md` — *Free from Bellman Completeness*, avg **6.00**: conceptually-driven offline RL paper with clean reframing and reasonable experiments; accepted. Comparable to the paper under review in spirit.
+- `3w6xuXDOdY.md` — *Generalization Gap in Offline RL*, avg **6.50**: benchmark/empirical-insight paper, accepted; the paper under review is somewhat narrower in scope but more mechanistically pointed.
+- `lWe3GBRem8.md` — *Offline RL for Online RL*, avg **6.00**: insight-paper format, mixed reception; comparable balance of strengths/limitations to this paper.
+- `M992mjgKzI.md` — *OGBench*, avg **7.00**: benchmark paper, larger contribution than this paper.
+- `fo5IUCMoFg.md` — *Offline vs Online Learning in MBRL*, avg **4.25**: similar empirical-insight framing but received as too shallow; the paper under review is stronger conceptually and methodologically.
+- `0YxvqG9SsJ.md` — *Offline Model-Based Skill Stitching*, avg **3.67**: weaker baseline of comparison.
+- `fWx1CKgPCc.md` / `UoYxPYMUWd.md` / `P895PSh41Z.md` — offline RL papers around **4.0–4.5**: weaker contributions than this paper.
+- `Aj1wftldeR.md` — *D5RL*, avg **4.75**: scope/empirical critique outcome.
+- `kHfIuagAq6.md` / `R6klub5OXr.md` / `Tk1VQDadfL.md` — RL empirical/conceptual studies; range 4.0–7.0, not closely analogous.
 
-| Anchor | Path | Avg Human Score | Comparison to RAVL |
-|---|---|---|---|
-| Model-based Offline RL with LEQ | `OATPSB5JK1.md` | 6.00 (Accept) | Similar scope (model-based offline RL, D4RL benchmark), somewhat stronger ablations and more thorough experimental coverage; conceptual novelty is comparable |
-| Scaling Offline Model-Based RL (JOWA) | `T1OvCSFaum.md` | 6.60 (Accept) | Much larger scale and broader empirical coverage; RAVL has stronger conceptual novelty per contribution unit |
-| Reflect-then-Plan | `6jr94SCjH6.md` | 4.60 (Reject) | Weaker contribution with more presentation issues; RAVL clearly above this |
-| Any-step Dynamics Model (ADM) | `JZCxlrwjZ8.md` | 6.00 (Accept) | Algorithmic contribution with clean ablations; RAVL has more conceptual depth but weaker experiment design |
-| ADEPT (diffusion world model offline RL) | `1zuJZ1jGvT.md` | 5.00 (Reject) | Similar in terms of a novel offline model-based approach with some methodological gaps; RAVL has stronger mechanistic evidence |
-| Offline vs. Online Learning in Model-based RL | `fo5IUCMoFg.md` | 4.25 (Reject) | Primarily empirical without strong theoretical framing; RAVL's edge-of-reach insight is more original |
-| Model-Free Offline RL with Enhanced Robustness | `QyVLJ7EnAC.md` | 6.40 (Accept) | Solid methodological contribution with thorough theory; RAVL has a more striking conceptual insight but weaker experimental rigor |
+The paper sits closest to the 6.0-band anchors (LEQ, Free-from-Bellman-Completeness): solid conceptual contribution + competitive (not winning) empirical results, with real but non-fatal critiques (overclaim of generality, thin ablations, locomotion-only). Slightly above the 5.0 band because the SAC-OraclePatch causal experiment is unusually clean and the reframing is genuinely useful.
 
-**Score rationale**: RAVL's core conceptual contribution—the edge-of-reach problem and its relation to the out-of-sample problem—is genuine and the oracle patching experiment is compelling evidence. However, the paper's central diagnostic experiment (Table 1) is structurally confounded, the key ablation isolating the mechanism on D4RL is missing, and the algorithm is a relatively direct combination of MBPO and EDAC. Compared to the LEQ anchor (6.0, accepted) which has cleaner experimental design but arguably less conceptual novelty, and to the 4.6 reject anchors which are weaker overall, RAVL sits in the 5.0–6.0 range. The confounded oracle experiment is a significant enough methodological gap that it needs revision before the diagnostic claims can be fully trusted. I settle on **5.5**.
-
-**Axes summary:**
-- *Originality*: High — the edge-of-reach framing is novel and unifying
-- *Importance of research question*: High — identifying and correcting a misconception in offline model-based RL is valuable
-- *Claims well-supported*: Moderate — mechanistic support in simple environment is strong; D4RL mechanism isolation is weak; oracle experiment is confounded
-- *Soundness of experiments*: Moderate — oracle patching compelling, but key ablation missing
-- *Clarity of writing*: Good
-- *Value to research community*: Moderate-to-high — the insight is useful even if experiments need strengthening
-
-**Decision: Weak Reject** — the paper has genuine merit and the edge-of-reach insight is valuable, but the confounded oracle experiment undermines the specific framing of the main diagnostic claim, and the missing D4RL ablation prevents isolation of the mechanism. These are addressable in a revision but cannot be fully resolved in a rebuttal.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

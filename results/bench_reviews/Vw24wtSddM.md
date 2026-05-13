@@ -1,20 +1,11 @@
-Now let me run calibration search and read key sections simultaneously.Now I have sufficient information to write the consolidated review. Let me synthesize:## Summary
-
-Tree Cross Attention (TCA) organizes context tokens in a tree structure and uses a Reinforcement Learning policy to navigate the tree at inference time, retrieving an O(log N) subset of nodes per query. The paper introduces ReTreever, an architecture built on TCA, and evaluates it against Perceiver IO and Transformer + Cross Attention on Copy Task, GP Regression, Image Completion, and Human Activity classification — consistently showing that ReTreever matches or beats Perceiver IO while using the same token budget.
-
----
+## Summary
+The paper proposes Tree Cross Attention (TCA), a cross-attention variant that organizes context tokens into a (k-d) tree, uses a REINFORCE-trained policy to walk root-to-leaf, and applies cross attention over the O(log N) nodes visited/passed. Built on TCA, ReTreever is presented as a token-efficient alternative to Perceiver IO. Empirically it matches Cross Attention with far fewer tokens on a Copy Task, GP regression, image completion, and Human Activity, and outperforms Perceiver IO at equal token budgets.
 
 ## Strengths
-
-- **Novel O(log N) retrieval mechanism**: Using an RL policy to learn navigable internal node representations in a tree, enabling logarithmic-cost inference, is a creative and mechanistically sound approach. The full-receptive-field guarantee (every token is either in S or a descendant of a node in S) is a concrete and meaningful property that distinguishes TCA from partial-coverage methods like Treeformer-A.
-
-- **Consistent empirical outperformance of Perceiver IO at identical token budgets**: Across four benchmarks (Copy Task Table 1, GP Regression Table 2, Image Completion Table 3, Human Activity Table 4), ReTreever beats Perceiver IO when both use the same number of inference tokens. The Copy Task result is especially stark: TCA achieves 100% accuracy at 6.3% tokens versus Perceiver IO's 15.2%.
-
-- **Non-differentiable objective optimization via RL**: The paper demonstrates a real practical advantage. Table (acc/CE comparison) shows that using accuracy as RL reward achieves 99.6 ± 0.6% at N=1024 on the Copy Task, versus 80.3 ± 14.8% when using negative cross-entropy. The mechanism is legitimate and the evidence is direct.
-
-- **Encoder-agnostic design**: Unlike Perceiver IO, which requires a specialized iterative-attention encoder, ReTreever's efficiency is achieved through TCA regardless of encoder choice, which is a genuine flexibility advantage.
-
----
+- **Logarithmic token / memory footprint of the cross-attention step is empirically demonstrated.** Figure 4 (left) shows TCA's inference memory grows logarithmically while CA grows linearly; Table 1 shows TCA matches CA accuracy on the Copy Task using ~50× fewer tokens.
+- **Non-differentiable reward formulation is a real, validated design choice.** Table 5 shows accuracy-as-reward substantially stabilizes RL training over negative cross-entropy (99.6 vs 80.3 at N=1024), giving a concrete motivation for the RL framing.
+- **Path-based retrieval guarantees coverage in a different sense than Treeformer.** Section 3.3's invariant that every token is either selected or has a selected ancestor distinguishes TCA from leaf-only tree attention (Treeformer's TF-A) and is a cleanly stated design property.
+- **Useful loss-weighting ablations.** Figure 3 (middle/right) characterizes the roles of $\lambda_{CA}$ (early-stage stability) and $\lambda_{RL}$ (necessity for convergence), giving actionable training guidance.
 
 ## Weaknesses
 
@@ -22,92 +13,72 @@ Tree Cross Attention (TCA) organizes context tokens in a tree structure and uses
 None.
 
 ### Major
-
-- **No wall-clock time or throughput measurements.** The paper's central motivation is efficient inference — NVIDIA/Amazon ML workloads, IoT devices, growing Bayesian Optimization datasets — yet the only efficiency evidence provided is (a) a memory-usage plot and (b) the "% Tokens" metric. Memory grows logarithmically by construction; this is a tautology from the algorithm, not an empirical efficiency result. There is not a single latency, throughput, or inference-time number in the paper. The O(N) tree construction phase must be amortized over inference calls, and the RL policy requires log(N) sequential attention forward passes. Whether TCA is actually *faster* in wall-clock time than Cross Attention — the paper's explicit goal — is never tested. For an efficiency-focused paper this is a critical evidentiary gap.
-
-- **Experiments operate at scales where logarithmic vs. linear complexity is practically irrelevant.** GP Regression uses N ~ U[3, 47), so at most 47 context points; Image Completion uses N ~ U[3, 197); Human Activity uses 50 time points; the largest task (Copy Task) uses N ≤ 1,024. At these scales, standard Cross Attention is computationally trivial, and the factor of log(N) versus N is small (log(47) ≈ 6 vs 47, log(1024) = 10 vs 1024). The practical efficiency motivation — ML inference at scale, IoT devices, growing datasets — is not demonstrated at any scale (N ≥ 10K) where logarithmic versus linear complexity actually becomes decisive.
+- **The "O(log N) inference" headline materially overstates what the method delivers end-to-end.** §3.5 explicitly defines ReTreever's encoder as $\mathbb{R}^{N\times D}\to\mathbb{R}^{N\times D}$ (e.g., a Transformer encoder), so the per-context cost is at best linear and typically quadratic, and the per-query retrieval traversal performs an attention-parameterized policy step at each of $\log N$ levels. The "% Tokens" metric in Tables 1–4 measures only the cross-attention buffer at the final step, not FLOPs or wall-clock. The abstract and introduction do not qualify this; only a careful read of §3.5 reveals it. This is the central marketing claim of the paper.
+- **All evaluated benchmarks have queries that are spatially aligned with the k-d tree's split axis.** §3.1 builds the tree by splitting on time (Copy Task / time series), or x/y coordinates (images), and in every task the query is itself a coordinate in that same space. Tree descent then reduces largely to a positional lookup, which trivially explains the perfect Copy Task accuracy. The paper claims TCA as a general efficient cross-attention but never evaluates a setting where the query is not coordinate-aligned with the tree (e.g., content-based / associative retrieval, RAG-style key-value lookup). Without that, "learned retrieval" is conflated with "deterministic spatial indexing wrapped in attention."
+- **Missing comparison to natural efficient-attention competitors.** Treeformer (TF-A) is discussed in §5 but never benchmarked; top-k cross-attention, Linformer, Nyströmformer, BigBird are absent from both discussion and experiments. The headline framing — efficiency gains over $\mathcal{O}(N)$ cross attention — needs at least one direct baseline from the efficient-attention family to be informative.
 
 ### Minor
-
-- **Copy Task is structurally aligned with TCA's tree organization, limiting what the result demonstrates.** The k-d tree splits sequence data on the x-axis (position), and the Copy Task requires retrieving position i+1 given a query for position 2^k − i. The tree is effectively a balanced binary search tree over indices, so the RL policy needs to learn position-guided binary search — the canonical use case for this exact structure. The 100% accuracy result is impressive but demonstrates TCA on a task that is nearly optimally suited to its design. This does not invalidate the contribution but weakens the claim of "general-purpose retrieval capability."
-
-- **Training sensitivity to λ_RL is not adequately analyzed.** As shown in Figure 3 (right), the model fails to solve the Copy Task when λ_RL ∈ {0.0, 0.1, 10.0} and works only at λ_RL = 1.0. The paper frames this as demonstrating the importance of the RL loss term, but it simultaneously reveals that training is brittle: a 10× perturbation in either direction collapses performance. The high variance in TCA(Neg. CE) at N=1024 (80.3 ± 14.8%) further signals training instability that is noted but not explained or addressed.
-
-- **"Significantly outperforms Perceiver IO" on Human Activity is overclaimed.** Table 4 reports ReTreever at 88.9 ± 0.4% versus Perceiver IO at 87.6 ± 0.3%, a gap of 1.3 percentage points. The full Cross Attention baseline achieves 89.1 ± 1.3%, meaning ReTreever essentially matches the full baseline — a useful result — but the claim of "significant" gain over Perceiver IO overstates the practical impact of a 1.3 pp margin.
-
-- **No experimental comparison against Treeformer despite identifying it as the closest prior work.** The related work section articulates three specific advantages of TCA over Treeformer (full receptive field, guaranteed log complexity, learned policy vs. decision tree). None of these are verified empirically, making the comparison purely qualitative.
+- **"Full receptive field" is overstated.** §3.3 calls $\mathbb{S}$ full-receptive-field because every leaf is either in $\mathbb{S}$ or descends from a node in $\mathbb{S}$. But the descendants are represented only by a single aggregated parent vector — high-resolution access exists only along the single chosen path. This is a structural ceiling that helps explain the persistent gap to full Cross Attention in Tables 2–4 (e.g., 3.52 vs 3.88 on CelebA) and deserves explicit acknowledgement.
+- **Perceiver IO comparison operating point is questionable.** Forcing $L\approx\log N$ on the Copy Task — a task where, by construction, every token can be queried — operates Perceiver IO below its design capacity. The paper does include Perceiver IO at $L=32$ in Table 2 (matching ReTreever's RBF log-likelihood at higher token cost), which is informative; but §4.1 still draws a general conclusion ("methods which distill information to a lower dimensional space are insufficient") from a task tailored to defeat compression. A more balanced framing would help.
+- **No ablation isolating spatial indexing vs. learned policy.** A baseline using the same k-d tree but a fixed coordinate-routing policy (no RL) would clarify how much of TCA's gain is the structure vs. learning, and is missing.
+- **Tree-construction heuristic never ablated.** §3.1 advertises tree-construction flexibility but every experiment uses k-d splits on physical coordinates; ball-tree, learned tree, and random tree are never tried.
+- **REINFORCE variance is large and alternatives unexplored.** Table 5 shows σ=14.8 at N=1024 with CE reward. Standard differentiable alternatives (Gumbel-softmax / straight-through / soft tree routing) are not compared.
 
 ### Trivial
-
-- **Weight-sharing between the RL policy and the Cross Attention module lacks ablation.** The policy's action probabilities are the attention weights over child nodes, meaning the same weights must simultaneously guide tree navigation and compute attended representations. The paper states this sharing "improves training" but no ablation isolates its effect. This design choice warrants even a brief sensitivity analysis.
-
----
+- §3.4 states the policy and CA share weights; an inference-time diagram showing this clearly would help readers.
 
 ## Nice-to-Haves
-
-- Wall-clock latency and throughput benchmarks at N ∈ {1K, 10K, 100K}, including tree construction amortized over query batches, to show where the crossover point between TCA and CA occurs.
-- Evaluation on a genuinely large-N task (long document, large point cloud, or high-resolution image) where Cross Attention is measurably expensive.
-- Ablation of tree construction strategy (random tree vs. k-d tree vs. learned), since the k-d tree encodes spatial assumptions that drive performance on spatially structured tasks.
-- Qualitative visualization of which nodes are selected by the policy (e.g., which pixels are covered in S for image completion queries), to validate interpretability of the retrieval.
-
----
+- An end-to-end FLOPs and wall-clock plot including encoder + tree construction + traversal, separating "asymptotic cross-attention cost" from "end-to-end inference cost."
+- A non-spatial retrieval benchmark (associative recall with random key bindings, or document retrieval) to test the generality claim.
+- A multi-path variant retrieving $k$ leaves to address the single-path resolution ceiling.
+- Visualizations of selected tree paths for representative queries to show whether the policy is learning anything beyond coordinate descent.
 
 ## Removed Points
-
 *These points are flagged to be removed; treat them with caution.*
 
-- **"Tautological memory scaling"** (Harsh Critic): Partly valid as an observation, but the memory plot still serves a useful pedagogical purpose showing the empirical growth rate matches theory. Relegated to an observation rather than treated as a flaw in the Minor tier.
-- **"Copy task is circular / not general-purpose retrieval"** (Harsh Critic): The critic's framing of this as "nearly circular" is too strong — TCA still has to *learn* the navigation policy. Retained as a milder Minor weakness about structural alignment.
-- **Cross-reference label error (`\ref{alg:training_retrieval}` in text pointing to copy task table)**: Parser artifact or minor cross-reference issue; removed per formatting rules.
-- **"Mechanism is a black box"** (Harsh Critic): The complaint that "claims about relevant token retrieval are not validated" is reasonable as a nice-to-have, but does not constitute a weakness given the paper's empirical results.
-- **Perceiver IO hyperparameter fairness concern**: The harsh critic questions whether Perceiver IO received comparable hyperparameter tuning. No concrete evidence of unfair treatment is presented. Removed.
-- **"Rewards are simple / credit assignment"** (Harsh Critic): Valid as a methodological note but standard in the REINFORCE literature; the paper discloses the approach. Moved to nice-to-have.
-- **Strength Finder: "Logarithmic memory scaling"** as a core strength: This follows trivially from the algorithm design (O(log N) nodes retrieved). Removed as a standalone strength.
-- **Strength Finder: "Flexible tree construction"** as a supporting strength: The paper only ever uses k-d trees in experiments. Removed as insufficiently grounded.
-
----
+- *Harsh critic claimed Treeformer comparison is missing.* This is real and kept as a Major concern — but the broader claim of "missing related works" in general is dropped per instructions.
+- *Critic asked for confidence intervals / significance testing on Perceiver IO vs ReTreever gap.* Standard deviations across multiple seeds are already reported (e.g., $3.52\pm 0.01$ vs $3.20\pm 0.01$), so the gap is well outside reported noise; this criticism is largely addressed.
+- *Strength Finder #1 (large-margin superiority over Perceiver IO).* Dropped as a top-line strength because the Copy Task margin (100% vs 15.2%) reflects a task designed to defeat fixed-latent compression, not a general superiority; Table 2's L=32 row shows the gap closes when Perceiver IO is given headroom. The narrow valid version is captured under "logarithmic memory/token footprint."
 
 ## Novel Insights
-
-The paper's most interesting observation — not fully exploited — is that RL decouples the training signal from differentiability, enabling the model to optimize the exact evaluation metric rather than a surrogate. The empirical evidence that accuracy reward dominates negative cross-entropy reward on the Copy Task (99.6% vs. 80.3% at N=1024) is a concrete, specific illustration of why RL-based retrieval is qualitatively different from differentiable attention. This insight extends beyond TCA: any model that must solve a sparse, combinatorial retrieval problem could benefit from this framing. The severity of the gap also suggests that standard cross-entropy-trained retrievers may be systematically misaligned with downstream accuracy at scale.
-
----
+None beyond the paper's own contributions. The most genuinely interesting observation — that an RL policy parameterized as attention can directly optimize a non-differentiable reward like classification accuracy and outperform CE-as-reward — is already the paper's contribution.
 
 ## Suggestions
+- Restate the complexity claim honestly: "$\mathcal{O}(\log N)$ cross-attention cost per query, with encoder cost determined separately by the chosen encoder."
+- Add at least one non-spatial retrieval task and one efficient-attention baseline (top-k cross-attention, Treeformer TF-A, or Linformer) to support generality.
+- Add the fixed-routing tree baseline to disentangle "tree structure" from "learned policy."
+- Acknowledge the single-path resolution ceiling in §3.3 and discuss when it matters.
 
-1. **Include timing benchmarks**: Report inference latency (ms/query) and throughput at N ∈ {512, 2K, 8K, 32K}, separately accounting for tree construction amortized over realistic batch sizes. Show the crossover point where TCA beats CA in wall-clock time.
-2. **Test at large N**: A task with N ≥ 10K (e.g., long document QA, point cloud retrieval, or Bayesian Optimization with a large observation history) is essential to substantiate the practical efficiency motivation.
-3. **Report confidence intervals for Human Activity more carefully**: Given overlapping error bars, avoid "significantly outperforms" language; instead, report statistical tests or use appropriately hedged language.
-4. **Add a Treeformer baseline**: Even on one task, a direct comparison against the claimed-closest prior work is standard due diligence.
-5. **Add weight-sharing ablation**: Train a version without shared weights between policy and CA to quantify whether the sharing helps or constrains the policy.
-
----
+## Evaluation Axes
+- **Originality:** Moderate. Tree-structured attention is well established; the novelty is applying it specifically to cross-attention with an RL-trained traversal and the path-based selection invariant.
+- **Importance:** Reasonable. Token-efficient cross-attention is a useful goal, though the evaluated regime (N≤1024) is modest.
+- **Claim support:** Weak on the headline complexity claim; reasonable on the narrower "fewer tokens at the CA step" claim.
+- **Soundness of experiments:** Adequate within scope but the scope is narrow and biased toward spatial-coordinate queries; efficient-attention baselines are absent.
+- **Clarity:** Good — method and ablations are easy to follow.
+- **Value to community:** Moderate — the path-selection invariant and RL framing are reusable ideas, but the empirical case for generality is not yet made.
 
 ## Score and Decision
 
-**Anchor comparison:**
+Anchors considered:
+- `nkUQPOwYy0.md` (Fast Multipole Attention) — avg 5.00. Closest analog: hierarchical/multi-resolution attention, $\mathcal{O}(N\log N)$ claim, small-scale experiments, missing strong baselines and ablations. Reviewers rejected on similar grounds (missing vanilla baseline, no ablations). TCA is comparable: stronger ablations on losses and a more specific RL contribution, but suffers analogous issues with limited baselines and overstated generality.
+- `jMZglnlwf7.md` (Tree Attention for decoding) — avg 5.00. Tree-structured attention efficiency paper; mixed reception. Comparable territory.
+- `ESq3U7z6FD.md` (EHI: hierarchical index for dense retrieval) — avg 6.00. End-to-end learned hierarchical index; more directly tests retrieval, stronger experimental scope than TCA. TCA is weaker than this anchor.
+- `xvhjRjoFCN.md` (BiXT: bi-directional cross-attention vs Perceiver) — avg 4.33. Similar Perceiver-comparison framing; received a 1 from one reviewer.
+- `VjHOGqHC4I.md` (Long LoRA Perceiver variants) — avg 3.50, clearly weaker than TCA.
+- `PWtx9fJqM5.md` (Linear transformations in attention) — avg 5.00, comparable methodological scope.
+- `v0FzmPCd1e.md` (Selective Attention) — avg 6.75, accept. Larger-scale LM experiments, cleaner generality; TCA is weaker.
+- `s1kyHkdTmi.md` (Evolved Universal Transformer Memory) — avg 7.00, accept. More extensive evaluation and stronger generality; TCA is weaker.
+- `IIVYiJ1ggK.md` (Rodimus efficient attentions) — avg 6.00, accept. LM-scale evaluation; TCA does not match this scope.
+- `fi9LF92Cak.md` (Trident block) — avg 4.75, comparable lower-end.
+- `xThb6APBoG.md` (RL for retrieval task-specific goals) — avg 4.00, RL-for-retrieval framing, similar concerns about scope.
+- `BPAZ6yW3K7.md` (LeReT, RL-enhanced retrieval) — avg 6.00, accept, broader and more convincing evaluation.
+- `oqRe1KvD17.md` (Reward-RAG) — avg 3.00, weaker than TCA.
+- `vnp2LtLlQg.md` (Optimizing Attention) — avg 3.00, weaker.
+- `moXtEmCleY.md` (Hierarchical tree memory for LLMs) — avg 6.00, accept; broader empirical case.
+- `TbTJJNjumY.md` (Linear cross-attention for VRP) — avg 6.25, accept.
+- `J5s6EG6ual.md`, `q541p2YLt2.md` — avg 3.0 / 2.5, clearly weaker than TCA.
 
-| Paper | Path | Avg Human Score | Comparison to TCA |
-|---|---|---|---|
-| Tree Attention (topology-aware decoding) | jMZglnlwf7.md | 5.00 (Reject) | Tree-based attention with actual wall-clock timing results shown; stronger experimental evidence of efficiency than TCA, yet still rejected for lacking deeper analysis |
-| Fast Multipole Attention | nkUQPOwYy0.md | 5.00 (Reject) | Hierarchical divide-and-conquer attention, O(n log n); missing key baselines and ablations; similar experimental maturity to TCA |
-| Radar (fast decoding) | ZTpWOwMrzQ.md | 6.60 (Accept) | Token-efficient inference with actual GPU speedup results and larger-scale experiments; substantially stronger evidence than TCA |
-| LoLCATs | 8VtGeyJyx9.md | 6.75 (Accept) | Linearized LLMs with scalable experiments up to 405B; strong experimental support; much stronger than TCA |
-| Rényi Neural Processes (GP + NP tasks) | b9w9b6naQG.md | 5.00 (Reject) | Uncertainty estimation / meta-regression tasks similar to TCA's GP Regression benchmark; borderline case |
-| Adapting Retrieval Models via RL | xThb6APBoG.md | 4.00 (Reject) | RL for retrieval with limited experimental scope; similar pattern of novel framing but insufficient evaluation |
-| Optimizing Attention (no trainable matrices) | vnp2LtLlQg.md | 3.00 (Reject) | Weak efficiency paper with inadequate experiments and novel-but-unsubstantiated claims |
-
-**Assessment**: TCA sits closest to the Tree Attention and Fast Multipole Attention anchors (both 5.0, both rejected). It shares their pattern: genuinely novel mechanism, solid theoretical grounding, but insufficient experimental evidence of the central efficiency claim. The absence of wall-clock timing results is particularly damaging because, unlike Tree Attention (which demonstrated real GPU speedups), TCA provides no direct evidence of practical speedup. The very small N values tested further weaken the efficiency case compared to the rejected anchor papers. The paper is above the 3.0–4.0 range (it has consistent outperformance over Perceiver IO and a well-motivated mechanism), but it falls below the 6.0+ accepted papers due to the fundamental gap between the stated efficiency goal and the evidence provided.
-
-**Scores by axis:**
-- *Originality*: High — RL-guided tree traversal for cross-attention retrieval is genuinely novel
-- *Importance of research question*: High — efficient inference is a pressing practical problem
-- *Support for claims*: Low–Medium — efficiency claim unsupported by timing; task performance claims are reasonable
-- *Soundness of experiments*: Low–Medium — consistent results but small N, no timing, structurally aligned flagship task
-- *Clarity of writing*: Good
-- *Value to community*: Medium — idea is worth following up, current evidence does not substantiate practical value
-
-**Final score: 5.0** — Borderline reject. The idea merits exploration and the paper is not below conference threshold, but the core efficiency contribution requires actual timing evidence and experiments at scales where the claimed advantage materializes.
+TCA most closely aligns with Fast Multipole Attention (5.00): a reasonable hierarchical-efficiency idea with solid narrow experiments but overstated complexity claims, limited baselines, and a narrow evaluation regime. It is clearly above the 3.0–4.0 cluster (real method, real ablations, clean writing) and clearly below the 6+ accept cluster (which all bring substantially more evaluation breadth or stronger generality evidence).
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

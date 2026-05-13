@@ -1,24 +1,10 @@
-Now let me run calibration search to anchor my scoring:Now let me read one or two key anchor papers for better calibration:Now I have enough information to write the final consolidated review.
-
----
-
 ## Summary
-
-JPEG-DL proposes a trainable JPEG compression layer that can be prepended to any DNN architecture, enabling joint optimization of JPEG quantization tables and DNN weights. The key technical contribution is a differentiable soft quantizer (Q_d) formulated as a conditional expectation over a softmax-weighted reconstruction grid, which smoothly approximates the standard non-differentiable uniform quantizer. The framework adds only 128 trainable scalar parameters (the quantization step sizes Q) to the pipeline. Experiments span CIFAR-100, four fine-grained classification datasets, and ImageNet-1K across multiple CNN and transformer architectures.
-
----
+The paper proposes JPEG-DL, prepending a trainable JPEG compression layer (with a differentiable soft quantizer Q_d based on a conditional PMF over reconstruction levels) to an arbitrary DNN, training only 128 extra parameters (the Y/C quantization tables). Experiments cover CIFAR-100, four fine-grained datasets, and ImageNet-1K, plus adversarial robustness and a Q_d→Q_u inference-time swap that preserves accuracy while enabling 2–3× input compression.
 
 ## Strengths
-
-- **Clean, analytically elegant soft quantizer formulation.** The conditional probability mass function (Eq. 6-7) provides a principled, differentiable relaxation of rounding with a clear limiting behavior: as α→∞, Q_d→Q_u. The connection to the attention mechanism (Section 3.2) is useful for interpretability and situates the contribution within the broader literature.
-
-- **Parameter efficiency with practical deployability.** Only 128 scalar step sizes are learned. The ablation study (Table 4) confirming that replacing Q_d with Q_u at inference preserves accuracy while achieving up to 2.92× compression is practically significant — it means the trained quantization tables are deployment-ready for standard JPEG entropy coding without any inference-time overhead.
-
-- **Architecture-agnostic breadth.** Experiments span ResNet, VGG, MobileNet, ShuffleNet, DenseNet, SqueezeNet, and EfficientFormer, consistently demonstrating positive gains. This breadth strengthens the general applicability claim.
-
-- **Consistent improvement across all CIFAR-100 architectures.** All seven models show improvements (Table 1), with reported standard deviations over three runs, providing some statistical confidence for these mid-scale results.
-
----
+- The CPMF-based soft quantizer (Eqs. 5–7) is a clean, closed-form, everywhere-differentiable proxy for uniform quantization, and the α→∞ limit recovering Q_u is rigorous.
+- The Q_d vs Q_u inference-swap ablation (Table 4) is a genuinely useful empirical result: accuracy is preserved within 0.13% while inputs become entropy-codable at 1.85–2.92× compression — a practical side benefit, not just a sanity check.
+- Architecture-agnostic, only 128 extra trainable parameters — verified in Sec. 3.3 and consistent across CIFAR/fine-grained/ImageNet experiments.
 
 ## Weaknesses
 
@@ -26,93 +12,74 @@ JPEG-DL proposes a trainable JPEG compression layer that can be prepended to any
 None.
 
 ### Major
-
-- **No comparison with JPEG_Compliant and salamah2024jpeg.** These two methods — cited prominently in the Introduction — also optimize JPEG quantization tables for a given DNN. The central claim of the paper is that *joint* training of Q and θ outperforms *fixed-model* optimization of Q alone. This claim is left entirely without direct experimental support. The paper uses sensitivity-based Q initialization *from* these prior methods yet never benchmarks against them. Without this comparison, the paper cannot distinguish whether performance gains come from joint training (the proposed contribution) or from the initialization strategy alone.
-
-- **Headline 20.9% gain derived from an artificially impoverished baseline.** Table 2 shows DenseNet-121 achieves 51.32% on Flowers-102 under the experimental protocol of Zhang et al. (Mixup), which trains from scratch on sub-1k fine-grained datasets without ImageNet pretraining. This regime (fewer than 10 images per class, no pretrained features) is severely underfitted, and any regularizing preprocessing — including fixed JPEG, dropout, or label smoothing — would produce dramatic overfitting reduction. The paper does not evaluate JPEG-DL under ImageNet-pretrained baselines, where Flowers-102 baselines would sit around 85–95%. The 20.9% headline gain is technically real but does not translate to any practical deployment scenario, and the abstract/introduction present it without qualification.
-
-- **Adversarial robustness claim is evaluationally ambiguous.** Section 5 reports up to 15% FGSM and 6% PGD improvement but does not specify whether adversarial examples were generated with white-box access through the differentiable JPEG layer or only against the bare DNN. If attacks were not adapted to the JPEG pipeline, the observed improvement is the well-known JPEG purification effect, already documented since 2016–2018 and explicitly cited in Section 2. Since Q_d is differentiable, white-box attacks through the full pipeline are straightforward to generate; their absence makes this claim uninterpretable as a genuine robustness contribution.
+- **Stated "joint optimization over θ, Q, α" is contradicted by the implementation.** Eq. 8 (and the contributions list) advertise joint optimization of θ, Q, and α. Section 4 "JPEG-layer settings" explicitly says "we choose not to train over α" for CIFAR-100 and fine-grained tasks (α fixed at 5), and for ImageNet α is deterministically tied to q via ℏ_m = α_m q_m². With α not free, the only learnable JPEG parameters are the 128 entries of Q. The contribution should be reframed as "learned per-DCT-frequency quantization tables with a soft surrogate for gradient flow," not joint optimization. This is a real disconnect between framing and method.
+- **Q_d ≈ Q_u at inference undermines the mechanistic claim about the differentiable quantizer.** Table 4 shows replacing Q_d with hard Q_u at inference changes accuracy by ≤0.13% on every (model, dataset) pair. Combined with α fixed at 5 (so Q_d is a fixed smooth nonlinearity, not learned), this means the soft quantizer's *role at inference* is essentially nil — the gains live in the learned Q. The paper does not run the most informative control: a fixed (non-trained) Q layer initialized with sensitivity, which would isolate "learning Q" from "having a JPEG layer at all." Without it, the source-of-gain story is incomplete.
+- **CIFAR-100 baseline numbers are imported from Tian et al. 2019 rather than re-run under the authors' own pipeline.** Table 1's caption states this explicitly ("The Baseline results are from Tian et al. 2019"). The reported gains (0.67–1.55%) are within the seed/recipe variation typical for these networks, and without matched pipelines the comparison is not clean.
+- **The 20.9% headline gain rests on a from-scratch fine-grained setup with no ImageNet pretraining** (Sec. 4 follows Zhang et al. 2017 mixup setup; baselines are 51–70% on CUB/Dogs/Flowers/Pets — well below the standard >90% achievable with pretraining). This is a regularization gain in a data-starved regime, not evidence the method offers ~20% improvements in standard practice. The abstract/intro/conclusion all advertise "up to 20.9%" without this qualification.
 
 ### Minor
-
-- **CIFAR-100 baselines sourced from a different paper (CRD).** Table 1 states: "The Baseline results are from [tian2019crd]." CRD is a knowledge distillation paper; its training setup (augmentation schedule, learning rate, possibly distillation-specific regularization) may differ from the JPEG-DL training setup. The gains are 0.67–1.55%; minor protocol differences could account for some or all of this range. The authors should retrain baselines under identical conditions.
-
-- **α parameter not trained — insufficiently disclosed.** The paper introduces α as a second trainable parameter in Eq. 8 (the full JPEG-DL objective includes both Q and α), then in Section 4 states "we choose not to train over α in our framework" because "gradients w.r.t. α won't be updated effectively." This reduces the effective trainable component to 128 step sizes. The framework section implies a richer parameterization than is actually optimized; this discrepancy should be addressed more prominently.
-
-- **No standard deviations on ImageNet.** Table 3 reports point estimates (e.g., +0.38%, +0.23%) without multi-run variance. Given the small magnitude of these gains, statistical significance is unverifiable.
-
-- **Different initialization strategies across datasets, not ablated.** CIFAR-100/fine-grained use sensitivity-based initialization (from JPEG_Compliant); ImageNet uses a data-statistics-based scheme (from Esser et al.). The large gains on fine-grained tasks versus marginal ImageNet gains may partly reflect initialization quality rather than joint optimization. No ablation isolates these factors.
+- **ImageNet gains (0.23–0.38%) are single-run, no variance reported** (Table 3), and the "+0.51% with 5 rounds of Q_d" is mentioned in prose but the multi-round procedure is not defined. Given the magnitude, seed variance and a clear definition are warranted.
+- **Adversarial robustness baseline is an undefended DNN, not the well-known fixed-JPEG-preprocessing defense** (which the paper itself cites in Sec. 2). Fixed JPEG preprocessing is a known FGSM/PGD attenuator; without that control, gains in Fig. 4 cannot be attributed specifically to *trained* JPEG vs. *any* JPEG.
+- **No head-to-head with Yang 2021 or Salamah 2024**, the two most directly competing methods the paper repeatedly positions itself against; orthogonality with Yang 2021 is asserted but not shown empirically.
+- **Two different Q-initialization strategies (sensitivity-based vs. coefficient-magnitude-based) for CIFAR/fine-grained vs. ImageNet, with no ablation.** Since training only adjusts 128 numbers, initialization plausibly contributes a non-trivial share of the gain.
+- **Gradient Scaling Constants ℏ_m for ImageNet is presented as stability hack but couples α to q in a non-trivial way**; deserves a brief ablation.
 
 ### Trivial
-
-- Feature map and GradCAM examples (Figs. 5–6) are drawn exclusively from cases where the baseline fails and JPEG-DL succeeds. No failure cases or random sample analysis is provided; a systematic analysis would be more informative.
-
----
+- The feature-map / GradCAM++ visualizations are a single hand-picked image where the baseline misclassifies and JPEG-DL classifies correctly — by construction this will show contrast. Either provide aggregate metrics (e.g., pointing-game scores) or scale back the "improved interpretability" claim.
+- Fig. 3 shows that at α=5, q=1, Q_d is visibly far from Q_u; the prose elsewhere treats Q_d as "near-quantizer." Brief consistency cleanup would help.
 
 ## Nice-to-Haves
-
-- Evaluate JPEG-DL against fixed-JPEG-preprocessing (at various quality levels) as a data augmentation baseline. This is a one-line baseline that would isolate the value of trainable quantization versus simple JPEG input randomization.
-- Fine-grained experiments with ImageNet-pretrained backbones to assess practical significance of the method in modern deployment settings.
-- White-box adversarial attack evaluation through the full differentiable JPEG pipeline, which is technically feasible given the differentiability of Q_d.
-- Sensitivity analysis: why do fine-grained gains (up to 20.9%) dwarf ImageNet gains (≤0.38%)? A systematic breakdown (dataset size, resolution, baseline quality, compression ratio) would make the contribution's scope clearer.
-
----
+- A pixel-space 128-parameter learned-preprocessing control (or fixed-Q JPEG layer with sensitivity init) to isolate whether anything *JPEG-specific* drives the gain.
+- ImageNet-pretrained fine-grained baselines.
+- Variance/significance numbers on ImageNet.
+- Brief ablation on Q initialization.
 
 ## Removed Points
-
-*These points are flagged to be removed; treat them with caution.*
-
-- **Harsh Critic: "Only 128 scalar parameters reduces novelty."** The paper is transparent about this limitation ("we choose not to train over α"). The decision is justified empirically. The contribution is the framework and Q_d formulation, not the number of parameters — indeed, parameter efficiency is a stated strength.
-- **Strength Finder: "Improved model interpretability."** The GradCAM and feature map visualizations are cherry-picked success cases (explicitly stated in the paper). These cannot serve as evidence for systematic interpretability improvement. Removed as a strength.
-- **Strength Finder: "Significant accuracy improvements with negligible overhead."** The 20.9% figure is tied to the from-scratch setup and is not representative; this is directly contradicted by a verified weakness. The CIFAR-100/ImageNet improvements are real but modest.
-- **Harsh Critic: "EfficientFormer results relegated to appendix."** The paper notes this experiment follows Xu et al. (2023), and the main claim breadth is adequately covered by the CNN results. The appendix placement is within the paper's scope discretion.
-- **Harsh Critic: "JPEG_Compliant/salamah2024jpeg existence questioned."** Not raised — these methods are cited and their existence is accepted throughout.
-
----
+*These points are flagged to be removed, treat them with caution.*
+- (From Strength Finder) "Soft quantizer learns meaningful discrete representations" — overstates Table 4: with α fixed at 5, Q_d is a smooth surrogate; Table 4 shows the inference is robust to swapping in Q_u, but does not show that Q_d itself learned "discrete representations" beyond what Q would have given.
+- (From Strength Finder) "Significant accuracy improvements on fine-grained tasks (+20.9%)" — this is kept in the Strengths section only in the qualified form (the unqualified version is misleading because of the from-scratch baseline; see Major weakness).
+- "Abstract literally ends with 'git}' — LaTeX artifact" — formatting/parser artifact; not a real paper issue per the hard rules.
 
 ## Novel Insights
-
-The most genuinely novel observation from the reviews — verified against the paper — is the Q_d/Q_u substitution at inference (Table 4): joint optimization of the quantization table during training with a soft quantizer, followed by hard quantization at inference, preserves accuracy gains while enabling entropy coding. This is a practically important finding beyond simply "JPEG helps." The attention-as-quantizer interpretation is also an intellectually interesting bridge between the signal processing and deep learning communities, though its practical implications are not developed.
-
----
+None beyond the paper's own contributions. The most interesting empirical observation — that Q_d trained but Q_u used at inference works equally well and yields compressible inputs — *is* the paper's own.
 
 ## Suggestions
+- Restate the contribution honestly as "learned per-DCT-frequency quantization tables with a soft surrogate for training-time gradient flow"; drop the "joint optimization over α" framing or actually train α and report gains.
+- Add a fixed-Q (sensitivity-initialized, non-trained) JPEG-layer baseline and a learned per-channel pixel-space scaling baseline to isolate the source of the gain.
+- Re-run CIFAR-100 baselines under your own pipeline; report ImageNet with at least 3 seeds.
+- For fine-grained tasks, add ImageNet-pretrained baselines and report the gain under standard practice — even a smaller positive gain would be a more credible headline than +20.9% vs. an under-trained baseline.
+- Compare adversarial robustness against fixed-JPEG preprocessing, not just an undefended baseline.
 
-1. **Directly compare with JPEG_Compliant and salamah2024jpeg on CIFAR-100 and at least one fine-grained dataset.** This is the single most important experiment for supporting the paper's core claim.
-2. **Retrain CIFAR-100 baselines under identical training protocols** rather than borrowing from CRD.
-3. **Add ImageNet-pretrained backbone experiments on fine-grained datasets** to contextualize the headline fine-grained gains.
-4. **Clarify robustness evaluation setup**: specify whether FGSM/PGD attacks were adapted to the JPEG pipeline; run white-box attacks through Q_d.
-5. **Report multi-run standard deviations on ImageNet** to establish statistical significance for the sub-0.5% improvements.
-6. **Restructure the method section** to more prominently disclose that α is not trained, making the 128-parameter characterization clearer from the outset.
-
----
+## Axis Evaluation
+- **Originality**: Moderate. The DCT-domain trainable quantization layer is incremental over Yang 2021 / Salamah 2024 / Luo 2020. The CPMF/soft-quantizer formulation is clean but draws on a cited prior patent.
+- **Importance of question**: Moderate — using DCT-domain preprocessing to help DNNs is a real and useful niche.
+- **Claim support**: Weak in places. Headline number is unrepresentative; ImageNet gains are within noise and single-run; CIFAR baselines are cross-paper; the soft-quantizer's contribution at inference is essentially nil per the authors' own ablation.
+- **Soundness of experiments**: Mixed. Q_d vs Q_u ablation is strong; baseline hygiene and missing controls (fixed-Q, fixed-JPEG defense, head-to-head with Salamah/Yang) are weak.
+- **Clarity**: Generally readable; method framing is misaligned with what is actually trained.
+- **Value to community**: Moderate. The compression-side finding (2–3× input compression with no accuracy loss) is the most concretely useful takeaway.
 
 ## Score and Decision
 
-**Axis assessment:**
-- *Originality*: Moderate. The differentiable JPEG layer concept builds directly on prior work (JPEG_Compliant, yang2021compression); the specific Q_d formulation via CPMF is novel and clean.
-- *Importance*: Moderate. Integrating task-aware compression into DNN pipelines is relevant, but the gains at scale (ImageNet) are marginal.
-- *Claims supported*: Weak. The headline claim is tied to an impractical baseline setup; the robustness claim is methodologically unclear; the core comparison (joint vs. fixed-model optimization) is absent.
-- *Soundness of experiments*: Weak. Missing direct comparisons with closest competitors; borrowed CIFAR-100 baselines; no significance testing for ImageNet.
-- *Clarity of writing*: Good. The paper is clearly written and well-organized.
-- *Value to research community*: Limited in current form; significant revision required to establish practical relevance.
+Anchors retrieved (with brief comparison):
+- `44cMlQSreK.md` — avg **7.20** (Accept): NeuroQuant variable-rate quantization for INR-VC — clearer theory, broader contribution; stronger than this paper.
+- `aQ7qYnY2nF.md` — avg **4.00** (Reject): task-aware video QP control with RL; comparable in scope, marginal gains — similar level to current paper.
+- `LnKDcqOfgy.md` — avg **5.00** (Reject): rate/distortion-constrained model quantization; cleaner theoretical contribution but mixed empirical case — slightly above current paper.
+- `3d6awrrpUq.md` — avg **3.50** (Reject): compressed-language models on JPEG byte streams; less rigorous — current paper is more substantive than this anchor.
+- `4XHyThqt1C.md` — avg **3.50** (Reject): alternating optimized stochastic VQ — similar "soft quantizer for compression" framing, with similar limited empirical leverage.
+- `5bdcDl6mC7.md` — avg **5.50** (Reject): distribution-aware diffusion quantization — broader contribution, similar mid-tier outcome.
+- `PhnGhO4VfF.md` — avg **5.67**: pretraining-granularity study — different topic, useful only as a mid-band anchor.
+- `xJ5CF1aOOX.md` — avg **2.50**: weak pre-training paper; far below current paper.
+- `Op1XmdxFk8.md` — avg **4.75**: ProtoReg fine-grained transfer — comparable empirical-claim-vs-baseline issues; close in level.
+- `0mJZplhexS.md` — avg **4.25**: two-pass image classifier — similar marginal-gain concerns; comparable.
+- `ndRkLsoQ1Q.md` — avg **3.75**: noisy-label regularization — similar "simple recipe, modest gains" feel.
+- `UrmnIDCzLA.md` — avg **5.00**: FSCIL pipeline — similar mid-tier outcome.
+- `ltutP1Iwqq.md` — avg **5.00**: infant-inspired distribution shift — different topic but mid-tier.
+- `Iip7rt9UL3.md` — avg **4.75**: Presto remote sensing — similar empirical-validation concerns.
+- `PVHoELf5UN.md` — avg **6.40** (Accept): low-light DCT decomposition — uses similar DCT machinery but with stronger empirical case.
+- `jX2DT7qDam.md` — avg **7.50** (Accept): jointly-learned exit + inference — much cleaner "joint" story, stronger paper than this one.
+- `wryFCrWB0A.md` — avg **6.20** (Accept): 2D autoregressive transformer — broader, stronger contribution.
 
-**Anchor comparison:**
-| Path | Avg Score | Comparison |
-|---|---|---|
-| `44cMlQSreK.md` | 7.20 ✓ | Accepted quantization paper with strong theory + proper experiments — clearly stronger than this paper |
-| `LnKDcqOfgy.md` | 5.00 | Rejected; combines quantization+compression, similar profile of interesting idea with limited/missing baselines |
-| `5bdcDl6mC7.md` | 5.50 | Rejected; sound formulation but weak experimental comparison — comparable |
-| `aQ7qYnY2nF.md` | 4.00 ✓ | Rejected; task-aware compression with RL, no key baselines — similar critical gap |
-| `3d6awrrpUq.md` | 3.50 ✓ | Rejected; JPEG+ML paper with marginal contribution and limited scope — weaker than this paper |
-| `JYTQ6ELUVO.md` | 6.50 | Accepted; strong empirical study with comprehensive baselines — this paper lacks that rigor |
-| `kQCHCkNk7s.md` | 6.25 | Accepted; compression benchmark with clear novel contribution and proper evaluation — stronger |
-
-The paper's weakness profile most closely aligns with `LnKDcqOfgy.md` (5.00, rejected) and `aQ7qYnY2nF.md` (4.00, rejected): a genuine core idea with missing critical baselines that prevent the main claim from being substantiated. The paper is more comprehensive than `aQ7qYnY2nF` but has three simultaneous major weaknesses (missing prior-method comparison, misleading headline number, unvalidated robustness claim). I place this at **4.5**.
-
-**Final Score: 4.5 / Reject**
-
-The core technical contribution is real, but the paper cannot be accepted in its current form because (1) the central experimental claim — that joint training outperforms fixed-model quantization table optimization — has no direct supporting evidence, (2) the headline gain is derived from a non-representative baseline setup that overstates practical impact, and (3) the adversarial robustness contribution is not adequately distinguished from the well-known JPEG purification effect.
+This paper is most similar in profile to the 4.0–5.0 cluster (aQ7qYnY2nF, 0mJZplhexS, Op1XmdxFk8, LnKDcqOfgy): a coherent method with one nice empirical observation (Q_d→Q_u compression) but real issues with baseline hygiene, framing-vs-implementation mismatch, and a headline number that does not survive a fair setup. Below LnKDcqOfgy (5.0), above ndRkLsoQ1Q (3.75) and aQ7qYnY2nF (4.0). Lands around 4.5.
 
 MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

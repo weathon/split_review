@@ -1,26 +1,12 @@
-Now let me run the calibration search:Now let me read the most relevant anchor papers in full:Now I have sufficient information to write the final review. Let me synthesize everything:
-
----
-
 ## Summary
-
-This paper proposes a three-level **knowledge preference hierarchy** (instruction knowledge ≻ context knowledge ≻ parametric knowledge) to unify settings such as RAG, knowledge editing, and personalized QA under a common framework. The authors compile a benchmark from existing datasets (IfQA, MQuAKE-CF-3k, MRQA) to systematically evaluate how well LLMs obey this hierarchy, and propose an automated data synthesis pipeline (~7.4K examples from Wikipedia/Wikidata + GPT-4o) to fine-tune a 7B Mistral model toward internalizing the hierarchy. The resulting model shows substantial gains on IfQA and MRQA over Alpaca-tuned and instruction-tuned baselines, and an extreme 61-point F1 gain on the authors' own MQuAKE-adapted benchmark.
-
----
+The paper formalizes a three-level "knowledge preference" hierarchy (instruction ≻ context ≻ parametric), assembles a benchmark by adapting IfQA, MQuAKE, and MRQA, and proposes a Wikidata/Wikipedia-grounded synthesis pipeline that produces ~7.4K instruction-tuning examples (counterfactual single- and multi-hop QA) for Mistral-v0.3-7B. Fine-tuning on Alpaca + the synthesized data yields large gains on the constructed benchmarks, including 28.48% → 89.36% F1 on the MQuAKE adaptation and 50.71% → 77.85% F1 on IfQA with mixed passages.
 
 ## Strengths
-
-- **Unified problem formulation with direct empirical payoff.** The three-level hierarchy (Section 2) cleanly separates instruction knowledge from retrieved context—a distinction prior work conflates—and directly informs both the benchmark design (covering all pairwise conflict types) and the data synthesis procedure. This is not merely notational; it shapes what gets measured and what gets trained.
-
-- **Substantial, verifiable improvements on independent human-annotated benchmarks.** On IfQA (Table 1), the fine-tuned model achieves 80.53 F1 (zero-shot) vs. 71.26 for the best open-source baseline (Mistral-Instruct at 5-shot) and 67.98 for the closest direct comparison (Mistral+Alpaca at 5-shot). On MRQA (Table 3), the overall F1 rises from 60.51 (Alpaca 3-shot) to 73.52—across all six subdomains. Both benchmarks are human-annotated and structurally independent from the training distribution.
-
-- **Demonstrated robustness to noisy retrieval.** Table 1 shows the proposed model degrades only 2.7 F1 points when shifting from gold to mixed passages (80.53 → 77.85), while Mistral-Instruct drops 12.1 points (71.26 → 59.13). This indicates the model learns to identify relevant knowledge rather than simply copying context blindly.
-
-- **Principled data sourcing with verifiable structure.** The Wikipedia-FEVER corpus filtering and Wikidata BFS fact chain extraction (Section 4.1) are deterministic and clearly described. The counterfactual chain editing procedure (randomly choosing edit count, iteratively replacing tail entities, propagating downstream) is specific enough to be reproduced.
-
-- **Ablation validates individual design choices.** Table 6 shows that removing random noise contexts causes a 9-point F1 drop on IfQA mixed passages (77.85 → 68.99); removing shuffling of gold contexts and assumptions reduces multi-hop performance. Each component addresses a distinct failure mode.
-
----
+- **Unified problem framing** (Sec. 2 / Sec. 6.1): instruction/context/parametric ordering provides a clean lens that subsumes RAG faithfulness, in-context knowledge editing, and counterfactual QA. The framing helps organize previously fragmented threads.
+- **Well-specified synthesis pipeline** (Sec. 4.1–4.3): BFS over Wikidata, recursive counterfactual edits that propagate downstream entity changes (line 170), and probe-then-filter for context-vs-parametric conflict cases (line 219). The recursive edit propagation in particular is a non-trivial design.
+- **Internalization vs. prompting**: the trained model achieves ~89 F1 on MQuAKE-Adapted with the normal prompt, essentially matching its explicit-prompt score (89.36 vs. 89.49, Table 2), whereas GPT-4o needs explicit prompting to jump from 86.46 to 93.37. This is consistent with the claim that the hierarchy is internalized rather than prompt-elicited.
+- **Robustness to noisy context on IfQA**: while baselines drop sharply from gold to mixed passages (Mistral-Alpaca 67.98 → 50.71), the trained model stays roughly stable (80.53 → 77.85, Table 1). The "−Random Noise Contexts" ablation (Table 3) corroborates that this is an effect of the training-data design.
+- **Useful negative result on prompting**: showing that explicit "Assumption-in-X" prompting barely helps open-source models, and can even degrade in mixed-passage settings, is informative.
 
 ## Weaknesses
 
@@ -28,90 +14,76 @@ This paper proposes a three-level **knowledge preference hierarchy** (instructio
 None.
 
 ### Major
-
-- **mquakeAdapted is structurally in-distribution for the training data.** The most dramatic result in the paper—F1 rising from 28.40 to 89.36 on mquakeAdapted—is measured on a benchmark the authors constructed (Section 3.1) by taking MQuAKE-CF-3k Wikidata fact chains and adding GPT-3.5-verbalized passages. The training data for instruction knowledge preference (Section 4.2) also synthesizes data from Wikidata fact chains + counterfactual edits + LLM-verbalized passages, using GPT-4o. Both share the same generative structure: Wikidata-sourced multi-hop triples → counterfactual edits → LLM-verbalized supporting passages → QA. The 61-point F1 jump on mquakeAdapted is thus partially consistent with distributional match, not purely with the hierarchy being learned. The paper does not ablate this: a necessary experiment would train only on mquakeAdapted-structured data vs. the full pipeline, or use a fully held-out multi-hop benchmark with a different provenance. The IfQA and MRQA gains are more credible, but the paper's most dramatic claim rests on this result.
-
-- **RealCounterMemoryQA cross-model comparison evaluates different instance subsets.** As confirmed in Table 5, the probing step that defines the "counter-memory" subset is run *independently per model*. Subsets differ notably: BioASQ 661 vs. 610, RE 1,892 vs. 1,787, TextbookQA 648 vs. 611. Because Ours is a stronger reading comprehension model, it answers more questions correctly during probing, leaving a different—and likely harder—subset on which it is evaluated. Comparing P(U_c) and P(U_i) across models that were evaluated on different instance sets is not a clean cross-model comparison. The directional consistency across all six subdomains is reassuring, but a methodologically sound version would fix one shared counter-memory subset (e.g., determined by probing the Alpaca baseline) and evaluate all models on that same set.
-
-- **No comparison against RAG-specific fine-tuning baselines.** RAFT ("Adapting Language Model to Domain Specific RAG") and Self-RAG are explicitly mentioned in the introduction (line 33) as directly relevant prior work that fine-tunes models under RAG settings, yet neither appears in any experimental table. The current baseline is Alpaca-tuned Mistral, which is a general instruction-following model—not a RAG-specialized one. The improvement over Alpaca quantifies "knowledge-preference fine-tuning vs. general instruction tuning," but not "our method vs. existing RAG fine-tuning solutions," which is what the introduction claims to address. This is a material gap.
+- **Train–test distributional coupling on the flagship benchmark.** The MQuAKE-Adapted test instances and the multi-hop training instances follow nearly the same recipe: both mine Wikidata fact chains, apply counterfactual edits to intermediate triples, verbalize triples into supporting passages via a GPT model, and use the same templated assumption-in-question format. The paper itself notes (line 444) that MQuAKE-Adapted "is not hard in terms of multi-hop reasoning … it essentially requires testee LLMs to follow the knowledge preference hierarchy." Without an OOD counterfactual evaluation (e.g., human-authored counterfactual prompts over a different template), it is hard to separate "learned the hierarchy" from "learned the format/distribution." This directly threatens the strongest headline number (28.48 → 89.36).
+- **Non-comparable Counter-Memory subsets in Table 4.** Table 5 shows the Counter-Memory subset is constructed independently for each model (e.g., BioASQ 661 vs. 610; RE 1,892 vs. 1,787). Since each model's subset excludes instances it already gets right parametrically, the \Ours subset systematically differs from the Alpaca subset. The $\mathbb{P}(U_c)/\mathbb{P}(U_i)$ comparison in Table 4 therefore measures the two models on different populations. A shared (intersection or union) instance set, or per-instance pairing, is required to support the claim that \Ours "outperforms the baseline in correcting wrong parametric answers" (Sec. 5.1).
+- **No apples-to-apples training-data baseline isolating the counterfactual design.** \Ours is Alpaca (52K) + 7.4K synthesized counterfactual/conflict instances; the baseline is Alpaca alone. Without an "Alpaca + 7.4K matched-volume, non-counterfactual context-grounded QA" baseline, the gain cannot be attributed specifically to the counterfactual/edit design (which is the methodological novelty). The ablations in Table 3 vary noise/derivation/shuffling but never substitute non-counterfactual instances.
+- **Single base model.** All \Ours results are on Mistral-v0.3-7B. The abstract/intro claim that 7.4K examples "unlock the knowledge preference ability of open-source LLMs" (plural) is supported by a single data point. Llama-3, Llama-2, Qwen-2 appear only as reference baselines; \Ours is never re-applied to them.
 
 ### Minor
-
-- **Single base model limits generalizability.** All fine-tuning experiments use Mistral-v0.3-7B as the sole base. Llama-2, Llama-3, and Qwen-2 appear only as pre-existing instruction-tuned reference models, never as fine-tuning targets for the proposed pipeline. The claim that the synthesis procedure "instills knowledge preference ability" in open-source LLMs is supported by evidence for only one model family.
-
-- **F1 threshold gap in RealCounterMemoryQA probing.** The footnote defines F1 > 0.8 as "same answer" and F1 < 0.2 as "different answer," with the range 0.2–0.8 excluded from the analysis. The choice of these thresholds is not ablated and could materially affect subset sizes and reported proportions across datasets.
-
-- **Over-updating risk not evaluated.** The training data for context knowledge preference (Section 4.3) explicitly filters out questions that the model answers correctly from parametric knowledge. This ensures training only on conflict cases, but it means the model never learns that parametric knowledge can sometimes be correct. The paper does not report P(U_i) for the full MRQA test set (not just the counter-memory subset), which would reveal whether the model inappropriately defers to context even when context is wrong.
+- **Scope/framing overstretch.** Sec. 1 motivates the hierarchy via personalized search/recommendation and "user preferences," but the experiments only cover (i) counterfactual hypothetical conditions and (ii) edit-style fact overrides. Personalization is never evaluated. The "user preference" framing should be tempered or operationalized.
+- **Training implicitly assumes context is always trustworthy.** The Sec. 2 footnote (line 85) waves away the case where retrieved context is misleading, and the training pipeline filters in the opposite direction (filters out cases the LLM gets right parametrically, line 219). The resulting model is taught to obey context essentially unconditionally, which is a real limitation for deployed RAG where retrieval errors and misinformation are central concerns. This is worth flagging as a limitation rather than dismissing.
+- **The −Random Noise ablation is more important than the text suggests.** Removing random-noise contexts drops Mixed-Passages F1 from 77.85 → 68.99 (−8.9). Most of the mixed-passage robustness may come from "learn to ignore distractors" rather than from the preference hierarchy per se. This deserves discussion in text.
+- **No variance estimates.** No seeds or confidence intervals; some differences in Table 3 (e.g., 77.76 vs. 80.55) are small and may be within noise but are read as conclusive.
 
 ### Trivial
-None beyond parser artifacts from PDF extraction.
-
----
+- None substantive enough to report.
 
 ## Nice-to-Haves
-
-- Evaluate the proposed fine-tuning on an additional base model (e.g., Llama-3-8B) to support the generalizability claim.
-- Provide case studies of IfQA failure modes to distinguish hard knowledge-preference cases from instruction-following shortcomings.
-- Ablate the F1 thresholds (0.2/0.8) for the RealCounterMemoryQA probing step to confirm robustness of reported proportions.
-
----
+- An OOD counterfactual evaluation (e.g., a benchmark where contexts are not GPT-synthesized from Wikidata triples) would dramatically strengthen the headline claim.
+- Apply \Ours to at least one additional base model (Llama-3-8B is the obvious candidate).
+- Add an evaluation where retrieved context is itself wrong, to characterize how much the model has been trained into unconditional context obedience.
+- Failure-mode breakdown on MQuAKE-Adapted: when models fail, do they revert to the parametric answer, hallucinate, or refuse? Aggregate F1 hides this.
 
 ## Removed Points
-
 *These points are flagged to be removed; treat them with caution.*
-
-- **"Zero-shot (Ours) vs. best-of-k-shot baselines is an unfair comparison"** — Removed per hard rule. The asymmetry in Table 1 (Ours at zero-shot vs. baselines at their best shot count) explicitly *favors the baselines*, not the author's method. Ours still wins despite this handicap, which makes the result stronger, not weaker. This is not a flaw.
-
-- **"The RealCounterMemoryQA comparison cannot be fixed by rewriting"** — The harsh critic concludes this evaluation is irreparably broken. This is overstated. The directional result (Ours improves P(U_c) and reduces P(U_i) consistently across all six subdomains) is genuine even if the cross-model comparison is imperfect. This is a major methodological issue worth fixing, not a fatal invalidation.
-
-- **"Comparison against MRQA RealCounterMemoryQA 3-shot (baseline) vs. 0-shot (Ours) as an unfair comparison"** — Removed for the same reason as above: the asymmetry favors the baseline in terms of shot count, making Ours's improvement over the baseline more impressive, not less.
-
----
+- **Harsh critic's "hierarchy conflates three phenomena" critique.** This is a framing-only point; the paper explicitly notes its three settings (Sec. 2 and Sec. 1, lines 37) and only operationalizes (i) and (ii). Already partially captured under the scope-creep minor weakness; the stronger "category error" claim overstates and is set aside.
+- **"GPT-4o test contexts synthesized by GPT-3.5, contexts no longer naturalistic" (Sec. 3.1 critique).** The paper is upfront about this trade-off (lines 100–107); the design is a deliberate choice to produce sharper conflicts. Reasonable to mention but not a blocker.
+- **Strength: "targets an important problem / important research question."** Generic; dropped per filtering rules.
+- **Strength: "controllable multi-hop data synthesis from structured sources."** Kept implicitly via the synthesis-pipeline strength but the standalone framing is partly generic.
 
 ## Novel Insights
-
-The most genuinely novel observation that emerges from synthesizing the reviews against the paper is the **training–evaluation distributional alignment problem** on mquakeAdapted. This is not a trivial observation: the paper's most dramatic empirical result (28→89 F1) occurs precisely at the structural intersection of training and evaluation data—both using Wikidata fact chains verbalized by LLMs. The appropriate lesson is not that the paper's method is invalid, but that *benchmark construction for knowledge preference needs explicit structural separation from training data provenance*. Papers that synthesize both training and evaluation data from the same knowledge graph / LLM pipeline should report performance on at least one independently-sourced evaluation set (here IfQA and MRQA provide this, but they receive less emphasis than the most confounded result). This is a structural design pattern worth the community's attention.
-
----
+None beyond the paper's own contributions. The most interesting empirical observation — that random-noise contexts in training drive most of the mixed-passage robustness — is in the paper but under-discussed.
 
 ## Suggestions
-
-1. Fix RealCounterMemoryQA to use a shared counter-memory subset: probe the Alpaca baseline first, fix that subset, and evaluate all models on it. This is a straightforward experimental change that eliminates the cross-model comparability concern.
-2. Add RAFT or Self-RAG as a fine-tuning baseline (not just a reference) to directly address the gap in RAG-specialized competitors.
-3. Add an over-updating evaluation: report P(U_i) on a held-out set where the model's parametric answer is *correct*, to verify the model isn't indiscriminately deferring to context.
-4. Explicitly ablate the mquakeAdapted gain by comparing performance when fine-tuning only on Wikidata-derived multi-hop data vs. the full pipeline, to quantify the distributional contribution.
+- Re-do Table 4 on the intersection of the two Counter-Memory subsets (or pair instances) so the comparison is well-defined.
+- Add an "Alpaca + 7.4K non-counterfactual context QA" training baseline at matched volume.
+- Add an OOD counterfactual evaluation (non-Wikidata-template) for MQuAKE-style claims.
+- Apply \Ours to a second base model.
+- Either drop the personalization framing or add a personalization-conflict evaluation.
+- Report multi-seed variance for the trained model.
 
 ---
+
+**Evaluation summary.** *Originality:* moderate — the unified framing is a reorganization rather than a new mechanism; the synthesis recipe combines known ingredients with a non-trivial recursive edit propagation. *Importance:* the problem is timely and applied. *Claims vs. support:* the strongest claim (instilling a general hierarchy) is undercut by train/test distributional coupling, a non-comparable Table 4 comparison, and a single base model. *Soundness:* main experiments are reasonable, but the Counter-Memory comparison has a methodological flaw and the counterfactual-design contribution is not isolated. *Clarity:* generally clear; some key ablation findings are under-discussed. *Value:* the synthesis recipe and benchmark consolidation will be useful to practitioners working on RAG/edit faithfulness for 7B-scale models.
 
 ## Score and Decision
 
-**Anchor paper summary (all calibration results):**
+Anchors retrieved (read in full: t21RmVmJrT, Igm9bbkzHC, SPS6HzVzyt, hUD9ugK2OH):
+- `t21RmVmJrT.md` (avg 5.00, Reject) — Closest topical neighbor: parametric vs. contextual knowledge interplay; rejected at borderline. Very similar in scope and tone to this paper; comparable level of empirical evidence and similar concerns about generality.
+- `Igm9bbkzHC.md` (avg 6.75, Accept) — Context sensitivity "knob"; cleaner mechanistic contribution than the paper under review.
+- `sl4hOq9wm9.md` (avg 5.50, Reject) — In-context vs. in-parameter knowledge injection; similar borderline outcome.
+- `SPS6HzVzyt.md` (avg 8.00, Accept) — Context-parametric inversion during instruction tuning; sharper, more insightful empirical finding than this paper.
+- `hUD9ugK2OH.md` (avg 5.75, Reject) — Synthetic context extension via retrieval heads; comparable concern about synthetic data not transferring, mirrors the train/test overlap concern here.
+- `8m7p4k6Zeb.md` (avg 6.00, Accept) — Fine-tuning on synthetic key-value retrieval; weaker but cleaner story than this paper, accepted.
+- `RjYKTQ0L0W.md` (avg 5.33, Accept) — Content-grounded synthetic data generation; similar method-paper character.
+- `jl9lHkQrrI.md` (avg 3.50, Reject) — Industrial-assets synthetic data fine-tuning; substantially weaker than this paper.
+- `m9wG6ai2Xk.md` (avg 6.00, Accept) — MQuAKE-Remastered; more focused contribution; benchmark-side rather than method-side.
+- `INFfvQArFY.md` (avg 6.25, Reject) — Locate-then-edit multi-hop; weighted higher than this paper but still rejected.
+- `YpWV7XRmFB.md` (avg 4.00, Reject) — Edited-fact decoding; weaker than this paper.
+- `X5rO5VyTgB.md` (avg 5.60, Accept) — Unstructured knowledge editing; similar borderline.
+- `jOmk0uS1hl.md` (avg 8.00, Accept) — "Training on the test task"; directly relevant to the central concern about distributional overlap in this paper.
+- `rAylWUIKtu.md` (avg 4.25, Reject) — Benchmark inflation / contamination.
+- `PtnttTKgQw.md` (avg 5.00, Reject) — Clever-Hans features in benchmarks.
+- `590yfqz1LE.md` (avg 6.75, Accept) — Non-adversarial reproduction.
+- `Iyrtb9EJBp.md` (avg 8.00, Accept) — Trustworthiness in RAG with grounded attributions; cleaner empirical story than this paper.
+- `K2jOacHUlO.md` (avg 7.25, Accept) — Situated faithfulness; directly addresses the "context can be wrong" failure mode this paper sidesteps.
+- `Jjr2Odj8DJ.md` (avg 6.25, Accept) — Sufficient context for RAG.
+- `tBZK9BI2GZ.md` (avg 4.50, Reject) — Multimodal knowledge conflicts; weaker.
+- `3UB4NaEb1g.md` (avg 4.50, Reject) — Certifying knowledge comprehension; weaker.
+- `OdoS6cH8MP.md` (avg 2.00, Reject) — Data valuation; far weaker.
+- `kDakBhOaBV.md` (avg 4.00, Reject) — Diversity coefficient; weaker.
 
-| Path | Avg Human Score | Comparison to Paper Under Review |
-|---|---|---|
-| `Igm9bbkzHC` | 6.75 (Accept) | Controllable context sensitivity via mechanistic analysis — more mechanistic depth, similar topic; paper under review is more applied but has methodological gaps. |
-| `asGQQc7gNo` | 6.67 (Accept) | Factuality vs. context-faithfulness tradeoff — similar theme, accepted; proposes clear analysis with solid baseline comparisons this paper partially lacks. |
-| `GhexuBLxbO` | 6.75 (Accept) | StructRAG on knowledge-intensive reasoning — accepted; also proposes a new pipeline, with broader baselines. |
-| `WbWtOYIzIK` | 8.00 (Accept) | Knowledge Card framework for LLMs — accepted at high score; much more technically complete and multi-model evaluation. |
-| `q2DmkZ1wVe` | 6.00 (Accept) | Counterfactual multi-hop QA benchmark — accepted; similar benchmark+evaluation contribution with strong methodology. |
-| `TqLY7QoELU` | 6.00 (Reject) | GasketRAG on RAG alignment — similar RAG preference fine-tuning scope, rejected despite good motivation. |
-| `sl4hOq9wm9` | 5.50 (Reject) | In-context vs. in-parameter knowledge augmentation — similar knowledge conflict theme, borderline reject. |
-| `MpCxUF8x61` | 5.50 (Reject) | Generalized instruction tuning with synthetic data — similar data synthesis theme, rejected for limited novelty. |
-| `t21RmVmJrT` | 5.00 (Reject) | PK/CK interplay for LLMs — most similar topic, analysis-only without solution, rejected. |
-| `iSTMsye6SD` | 5.25 (Reject) | Knowledge-intensive reasoning benchmarks — similar benchmark construction, rejected. |
-| `a2rSx6t4EV` | 2.33 (Reject) | EDU-RAG benchmark — narrow RAG benchmark, low quality, clearly weaker than this paper. |
-| `OdoS6cH8MP` | 2.00 (Reject) | Low-quality data valuation paper — not comparable. |
-
-**Calibration reasoning:** The paper under review is stronger than the analysis-only papers in the 5.0 range (`t21RmVmJrT`) because it proposes a solution that demonstrably works on independent human-annotated benchmarks. However, it falls below the accepted papers in the 6.5–6.75 range (`Igm9bbkzHC`, `GhexuBLxbO`) due to: (a) the distributional overlap concern on its headline result, (b) missing directly relevant RAG fine-tuning baselines, and (c) single-model fine-tuning experiments. The paper is most comparable to `q2DmkZ1wVe` (6.00, accepted) and `sl4hOq9wm9` (5.50, rejected). The genuine contributions (benchmark, pipeline, real improvements on IfQA/MRQA) push it above borderline rejection, but the methodological gaps prevent a confident accept.
-
-**Originality:** Moderate-high — the three-level hierarchy cleanly distinguishes instruction from context knowledge, which is a meaningful refinement.  
-**Importance of research question:** High — knowledge preference under conflict is practically critical for RAG and knowledge editing systems.  
-**Claims well supported:** Partially — IfQA and MRQA results are solid; mquakeAdapted result is questionable.  
-**Soundness of experiments:** Mixed — the RealCounterMemoryQA and mquakeAdapted designs have genuine flaws; the missing RAFT comparison is a gap.  
-**Clarity of writing:** Good.  
-**Value to community:** The benchmark and synthesis pipeline are useful contributions even if the evaluation is imperfect.
-
-**Final Score: 5.0**
+Calibration: the paper sits closest to `t21RmVmJrT` (5.00) and `sl4hOq9wm9` (5.50) — credible empirical work on context-vs-parametric with framing/generality issues. It is clearly above the 3.5–4.0 anchors (no real methodological novelty there). It is below the 6.0+ anchors (`Igm9bbkzHC`, `K2jOacHUlO`, `SPS6HzVzyt`), which deliver sharper mechanistic findings or directly tackle the very failure mode this paper sidesteps (untrustworthy context). The Table-4 subset issue and the train/test recipe coupling are real but not fatal.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

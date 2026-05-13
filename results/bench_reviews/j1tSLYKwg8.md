@@ -1,108 +1,85 @@
-Now let me run calibration search and verify key reviewer claims simultaneously.Now I have enough information to write the comprehensive final review.
-
----
-
 ## Summary
-
-This paper proposes adapting pre-trained autoregressive (AR) language models into discrete diffusion language models (DLMs) via continual pre-training, addressing the challenge that DLMs have historically been trained at smaller scale than AR models. The two key technical components are (1) attention mask annealing, which gradually transitions causal to full bidirectional attention, and (2) a shift operation that preserves the AR-style token-prediction alignment during diffusion fine-tuning. Using these techniques, the authors convert GPT2 (127M/355M) into DiffuGPT using ~30B FineWeb tokens, and LLaMA2-7B into DiffuLLaMA using ~65B tokens, releasing all models and training code.
-
----
+The paper proposes an adaptation recipe to convert pretrained autoregressive LMs (GPT-2 and LLaMA2-7B) into discrete diffusion language models (DiffuGPT, DiffuLLaMA) using attention mask annealing, a shift operation, and a time-embedding-free architecture, justified by showing AR cross-entropy is a special case of the absorbing discrete diffusion ELBO. The authors train models from 127M to 7B using <200B tokens and evaluate on a broad benchmark suite spanning commonsense reasoning, math (GSM8K w/ CoT), code/story infilling, and unconditional generation. The 7B DiffuLLaMA is, at submission, the largest released discrete diffusion LM.
 
 ## Strengths
-
-- **First 7B-scale DLM with comprehensive evaluation:** DiffuLLaMA at 7B parameters substantially extends prior DLM work (SEDD, PLAID capped at ~1B). The paper evaluates across commonsense reasoning, math, code infilling, story infilling, and zero/few-shot tasks—significantly more breadth than previous DLM papers that relied primarily on perplexity. This evaluation framework is itself a useful community contribution.
-
-- **Ablation-validated adaptation recipe (Table 3):** The GSM8K-symbolic ablation concretely validates each component. Removing the shift operation degrades performance, and the comparison of direct DD fine-tuning vs. adaptation-then-fine-tune (50.2/61.8 for DiffuGPT-S/M vs. 45.4/49.7 for direct DD) demonstrates that a well-adapted base DLM provides a stronger foundation. This is direct experimental evidence supporting the recipe's value.
-
-- **Evidence of in-context learning in a 7B DLM (Table 2):** DiffuLLaMA's zero-shot→few-shot improvement on TriviaQA (0→15.8), MAWPS (25.7→34.0), and SATMATH (8.3→16.7) provides the first large-scale evidence that DLMs can leverage in-context demonstrations, a capability previously untested at this scale.
-
-- **Practical mathematical unification (Section 3.2):** The paper precisely identifies that the AR cross-entropy and the discrete diffusion ELBO differ only by a reweighting term (1/t) and the masked-token indicator δ, providing a principled—rather than heuristic—justification for why AR→diffusion adaptation is feasible. While the underlying equivalence is known from prior work, its use here as a concrete engineering bridge between AR and DLM objectives is legitimate.
-
-- **Model and code release:** Releasing DiffuGPT (127M, 355M) and DiffuLLaMA (7B) with training and evaluation code is a substantive community contribution that other DLM researchers can build directly upon.
-
----
+- **Principled connection between AR and absorbing discrete diffusion objectives** (§3.2, Eq. 6–7): the paper derives that AR cross-entropy is recovered as a special case of the discrete diffusion loss up to a reweighting and indicator, giving theoretical grounding for AR→DLM adaptation.
+- **Concrete, reproducible engineering recipe**: shift operation, attention-mask annealing, and removing time embedding are each ablated on GSM8K-symbolic at 127M/355M (Table 3/4), with DD aligning better with AR initialization than CD.
+- **First 7B discrete diffusion LM released** with code, evaluation toolkit, and three scales — concrete artifact contribution to the community.
+- **Broader evaluation surface than prior DLM work**: rather than perplexity-only (Plaid/SEDD norm), the paper evaluates commonsense MC, GSM8K with CoT, ICL/self-consistency, infilling, and unconditional generation perplexity vs. diversity (§4.2, Fig. 3). §4.3 makes a fair point that Plaid's low ppl does not transfer to conditional generation.
+- **Inference latency advantage at long sequence lengths** is demonstrated empirically (Fig. 5: T=256 vs. LLaMA2 with KV-cache at 1024+ tokens).
 
 ## Weaknesses
 
 ### Fatal
-None.
+None — the core artifacts and qualitative claims are supported by Table 1/2/3, even if some headline framings overshoot.
 
 ### Major
-
-- **Data quality confound undermines the headline "DiffuGPT outperforms GPT2" claim.** DiffuGPT is initialized from GPT2 and then trained on 30B tokens from FineWeb—an explicitly higher-quality corpus than the OpenWebText data used for GPT2's original training. The paper itself notes this is "an improved corpus than OpenWebText used in prior DLMs." Without a baseline GPT2 model continual pre-trained on FineWeb under the *autoregressive* objective (GPT2-FT-AR), one cannot determine whether the performance gains on HellaSwag (+1.3/+2.0), Winogrande (+1.8/+3.0), and SIQA (+1.8/+0.7) stem from the diffusion adaptation or from the better data. This concern is especially sharp because the paper lists "DiffuGPT outperforms GPT2 in most tasks" as a bullet-point contribution in the abstract and introduction. Note that DiffuGPT still clearly outperforms SEDD (a properly controlled DLM comparison) and the adaptation recipe's internal ablations are valid—but the specific claim of superiority over the AR base model is confounded. A closely related paper on scaling masked diffusion models (reviewed at similar venues) faced exactly the same criticism and addressed it with an additional disentangling experiment.
-
-- **Infilling superiority claim is not validly established.** Section 4.2 and Table 1 include ROCStories (+18.7/+15.9 ROUGE-L) and HumanEval code infilling comparisons that are then used to argue DLMs "demonstrate their strengths in infilling tasks." However, the paper explicitly states: "we do not provide the suffix information to [the AR] model, which might result in an unfair comparison." Depriving the AR baseline of suffix context while giving the diffusion model full bidirectional access renders this comparison uninformative. Fill-in-the-middle (FIM) pretrained AR models (e.g., models using the FIM objective) are the appropriate baseline, and none are evaluated. The honest phrasing should be that DLMs *naturally support* infilling without special FIM training—not that they *outperform* AR models at infilling.
+- **"Scaling" claim is not backed by a scaling-law experiment.** The title and §3.4 promise scaling, but the evidence is three loss curves on different data mixes at different token counts (Fig. 2 / §4.1), plus a 7B model that the authors themselves note "falls short of LLaMA2" on every task in Table 1 and attribute to insufficient training (§4.3). There is no compute-matched loss-vs-tokens plot across the three scales, so the central scaling claim is at best an existence/feasibility result, not an evidenced scaling trend. Compared to peer work that explicitly fits scaling laws (e.g., "Scaling up Masked Diffusion Models on Text"), this paper's framing outruns its evidence.
+- **DiffuGPT vs. GPT-2 is confounded by ~30B extra FineWeb tokens.** The headline "DiffuGPT outperforms GPT-2" comparison in Table 1 does not include an AR continued-pretraining control on the same 30B FineWeb tokens. Table 3 contains a partial GPT-2 AR finetune number on GSM8K-symbolic only, where the gap is small/mixed. Without a matched-token AR continued-pretraining baseline across the Table 1 task suite, the gain cannot be cleanly attributed to the diffusion objective vs. additional data exposure.
+- **Cross-class MC scoring is not commensurable.** §4.2 / §4.1 uses per-choice diffusion ELBO loss (Eq. 9) for DLMs and AR cross-entropy for AR baselines. The paper itself acknowledges (§4.2) that the diffusion loss is an upper bound on NLL and not directly comparable to AR NLL. Half of Table 1 (HellaSwag, Winogrande, SIQA, PIQA) rests on rankings of two non-commensurable losses; a single-sided importance-weighted bound or matched-mask AR scoring would be needed to make the comparison clean.
 
 ### Minor
-
-- **DiffuLLaMA omits attention mask annealing without sufficient justification.** Section 4.1 states: "we directly use bi-directional attention without attention mask annealing" for the 7B model, citing flash-attention 2 implementation convenience. The paper argues "mask annealing has minimal impact" based on the small-scale (127M/355M) ablation in Table 3, but this extrapolation to 7B is untested. Since attention mask annealing is one of only two core technical contributions, skipping it for the flagship model—without even a brief experiment or analysis—leaves the contribution's relevance at scale unvalidated.
-
-- **Multiple-choice scoring via diffusion ELBO is non-standard and unvalidated.** For HellaSwag, Winogrande, SIQA, and PIQA—four of the six main benchmark tasks—the paper selects answers by choosing the candidate with minimum diffusion ELBO loss (averaged by token length). The ELBO is an upper bound on NLL, and it is unclear whether this upper bound reliably ranks candidates the same way exact likelihood scoring would. No calibration or validation of this scoring method against AR likelihood scoring on the same items is provided. This concern affects a large fraction of Table 1 results.
-
-- **CoT underperformance is attributed away without analysis.** Table 2 shows CoT hurts DiffuLLaMA, attributed to "absence of instruction tuning." But AR base models without instruction tuning typically *do* benefit from CoT examples, making this explanation insufficient. This is an interesting and potentially fundamental signal about DLM reasoning behavior that deserves analysis rather than attribution.
+- **Infilling comparison is acknowledged unfair, then still drives a headline claim.** §4.3 admits that AR baselines (GPT-2/LLaMA2) are not FIM-trained and receive only the prefix, "which might result in an unfair comparison," yet the abstract/§4.3 still concludes DLMs "demonstrate their strengths in infilling." A FIM-trained AR baseline (e.g., Code LLaMA or an FIM-finetuned LLaMA) on HumanEval-infill would substantially strengthen this. Per the rule that asymmetry-favoring-baselines is fine, the issue here is the opposite — asymmetry favors the proposed method — so this point stays.
+- **Inference-speed Pareto for the 7B model is incomplete.** Fig. 5 reports latency at T=256 for 1024-token generation, but Fig. 3's quality-vs-T curves are for DiffuGPT, not DiffuLLaMA. A quality-vs-latency Pareto curve at 7B against LLaMA2 + KV cache is the natural claim and is missing.
+- **Attention-mask annealing schedule is under-specified** (§3.3 "sample the amount of context from the right side and progressively increase" — no schedule given). Table 3 also reports that mask annealing has "minimal impact" and it is dropped entirely for the 7B run, which sits in tension with framing it as a core contribution in §1 and the conclusion.
+- **Ablations are at 127M/355M only and extrapolated to 7B** without re-running at scale (the 7B drops mask annealing on the basis of small-scale ablation only).
+- **CoT degrades performance (Table 2)** and is rationalized as "lack of instruction tuning"; an analysis of where the gap comes from would strengthen the §4.3 reasoning claim rather than deferring to future work.
 
 ### Trivial
-
-- **Inference speed comparison at batch size 1 only (Figure 3):** The speed advantage of DiffuLLaMA is demonstrated only for 1024-token generation with T=256 steps at batch size 1. At higher batch sizes, AR KV-cache efficiency improves substantially. The crossover point also depends on sequence length and T values. The current comparison shows a scenario favorable to diffusion but does not present the full speed-quality-length tradeoff picture.
-
----
+- §3.4 / Fig. 2 caption presents loss curves on different data mixes and token counts as supporting a "scaling trend" — better axes/labels and at minimum compute-matched x-axes would help.
 
 ## Nice-to-Haves
-
-- A GPT2 continual pre-trained on FineWeb under the AR objective (GPT2-FT-AR) would cleanly resolve the data confound and strengthen or qualify the paper's headline claim.
-- A FIM-trained AR baseline (or a proper comparison against code models that support fill-in-the-middle) for the infilling tasks would put the infilling comparisons on sound footing.
-- Further analysis of why CoT hurts DiffuLLaMA—e.g., testing whether the issue is specific to step-by-step chain reasoning vs. format following—could yield interesting insights about fundamental AR vs. DLM behavioral differences.
-- Speed-quality tradeoffs reported across varying sequence lengths and T values to characterize the diffusion vs. AR efficiency regime more completely.
-
----
+- A compute-matched loss-vs-tokens scaling plot across 127M/355M/7B for AR→DLM adaptation.
+- AR continued-pretraining control on matched 30B FineWeb tokens, evaluated across the full Table 1 suite.
+- A FIM-trained AR baseline on HumanEval-infill and ROCStories.
+- Quality-vs-T Pareto curve for DiffuLLaMA vs. LLaMA2 with KV-cache.
+- Side-by-side generations from LLaMA2 and DiffuLLaMA with the same prefix at several T values, with quantitative quality metrics.
 
 ## Removed Points
-
-*These points are flagged to be removed, treat them with caution.*
-
-- **[Harsh Critic] "Section 3.2 overrepresents mathematical novelty"**: The paper explicitly cites Austin et al. (2021) and Hoogeboom et al. (2022) for the objective equivalence and states "As discussed in Austin et al. (2021), the loss objective of this diffusion process is equivalent to standard cross-entropy." The paper is honest about what is novel (the practical framing as a bridge for adaptation) vs. prior work. This is not an overstatement. **Removed as strawman.**
-
-- **[Harsh Critic] Flash-attention 2 doesn't require full attention as an excuse**: The paper says it uses full bidirectional attention "for efficient implementation" with flash-attention 2, not that it *cannot* do custom masking. The reason given is implementation simplicity. This is an acceptable engineering decision even if not ideal. **Removed as minor nitpick conflated with a real point, which is kept under Minor.**
-
-- **[Strength Finder] "Theoretical unification of AR and diffusion objectives"** as a standalone strength: While the equations in Section 3.2 are correct and useful, the mathematical equivalence itself is not new—the paper's own text credits Austin et al. (2021). The genuine contribution is the practical engineering bridge, which is captured in the ablation-validated recipe strength. **Removed as an overstated standalone strength; merged into the practical unification strength above.**
-
-- **[Strength Finder] "Competitive inference speed for long sequences"**: This is only shown at batch size 1, T=256, length 1024—a configuration favorable to diffusion. As noted in the minor weaknesses, the speed advantage is not shown to generalize robustly. **Removed as strength conflicting with a verified weakness.**
-
----
+*These points are flagged to be removed; treat them with caution.*
+- "Unification of objectives is not novel (Austin 2021, Shi 2024)." — Removed: this criticizes prior-art coverage rather than correctness; the paper credits both works and uses the unification as motivation, not as the main claim. The contribution rests on the engineering recipe, which the paper itself acknowledges.
+- Generic Strength Finder claims like "comprehensive evaluation beyond perplexity" and "time-embedding-free enables seamless weight transfer" — kept the first only because §4.2 has concrete substance; the latter is a design choice rather than a demonstrated benefit and is dropped.
+- Strength: "Emergent in-context learning at 7B scale" — DiffuLLaMA's ICL numbers in Table 2 are weak in absolute terms and the gap-to-CoT is reported sympathetically (§4.3 explicitly calls out CoT degradation). Keeping it would conflict with the verified weakness about overclaimed reasoning, so it is moved here.
 
 ## Novel Insights
-
-The most genuinely interesting finding is the CoT performance drop in DiffuLLaMA. While the paper attributes it to missing instruction tuning, the fact that AR base models typically benefit from CoT examples even without instruction tuning suggests something more fundamental: bidirectional diffusion models may process extended reasoning chains differently than left-to-right models, possibly because the iterative denoising objective is not well-aligned with the sequential, step-dependent structure of CoT reasoning. Investigating whether this is architectural (bidirectionality disrupting logical dependency chains), training-data (DLMs seeing text without directional reasoning supervision), or a decoding artifact would substantially advance understanding of DLMs' reasoning capabilities and limitations. The hit-rate @3 results in Table 2 also suggest high uncertainty in DiffuLLaMA outputs, pointing toward a role for diversity-based decoding or self-consistency as a key lever for this model class.
-
----
+None beyond the paper's own contributions. The most interesting observation surfaced by the reviews — that DD-loss aligns naturally with AR initialization while CD does not (Table 3) — is the paper's own finding.
 
 ## Suggestions
+- Reframe the title/abstract from "scaling" to "adapting" until a controlled scaling-law plot exists; the current artifact contribution is real but does not need the scaling-law framing to stand.
+- Add the AR continued-pretraining control (Issue: Major #2) — this is the single experiment that would most strengthen the paper.
+- Switch MC evaluation to a protocol that is commensurable across model classes (matched-mask scoring for AR or tighter NLL bound for DLM), and re-report Table 1.
+- Add at least one FIM-trained AR baseline for infilling and either soften or strengthen the corresponding claim.
 
-1. **Add a GPT2-FT-AR baseline**: Train GPT2 on the same 30B FineWeb tokens under the AR objective and include it in Table 1. This single experiment would resolve the main confound and either strengthen the DiffuGPT story or appropriately recalibrate expectations.
-2. **Reframe infilling results honestly**: Rather than claiming superiority over AR models at infilling, frame the result as DLMs natively supporting infilling without requiring FIM-style retraining. Acknowledge that a fair comparison requires an AR+FIM baseline.
-3. **Validate ELBO-based multiple-choice scoring**: Include a sanity check comparing ELBO-based ranking vs. AR teacher scoring on a sample of MCQ items, or cite prior work that validates this protocol.
-4. **Analyze CoT failure more deeply**: At minimum, compare DiffuLLaMA with CoT against a same-scale AR base model (no instruction tuning) with CoT to test whether the failure is diffusion-specific.
-
----
+## Evaluation Axes
+- **Originality**: Moderate — the AR↔DD ELBO equivalence is largely a restatement of Austin et al., 2021; the novelty is the adaptation recipe and the 7B-scale demonstration.
+- **Importance of question**: High — adapting AR LLMs to DLMs is a practically important question for the diffusion-text community.
+- **Claim support**: Partial — the artifact claims (we trained a 7B DLM with recipe X) hold; the comparative claims (DiffuGPT > GPT-2, competitive with AR counterparts, scaling) outrun the controls.
+- **Soundness of experiments**: Mixed — broad task coverage but several confounds (token mismatch, non-commensurable losses, acknowledged-unfair infilling baseline).
+- **Clarity**: Generally good; §3.3 mask-annealing schedule is under-specified.
+- **Value to community**: High — released 7B DLM, code, and eval toolkit will be used regardless of whether every claim holds.
 
 ## Score and Decision
 
-**Anchor Comparison:**
+Anchors retrieved:
+- `tyEyYT267x.md` — avg 8.00 — SAR (AR↔diffusion interpolation). Stronger novelty and cleaner methodology than this paper. Above ours.
+- `Qn4HEhezKW.md` — avg 5.00 — "Diffusion LMs Can Perform Many Tasks with Scaling and Instruction-Finetuning." Nearly the same plan (adapt MLM/AR → DLM, scale, evaluate broadly), and got rejected at 5.00. Most direct comparator; this paper is somewhat stronger because of (a) the explicit AR↔DD ELBO derivation and (b) actually shipping a 7B model, but the empirical confounds are similar.
+- `sL2F9YCMXf.md` — avg 6.75 — Energy-Based Diffusion LM. Cleaner methodological contribution; above ours.
+- `WNvvwK0tut.md` — avg 6.50 — "Scaling up Masked Diffusion Models on Text." This is the natural high-band comparator: it actually fits a scaling law and reports CFG. Above ours on rigor; ours has a larger released model.
+- `71mqtQdKB9.md` — avg 6.60 — SEDD. Strong methodology; above ours.
+- `xI71dsS3o4.md` — avg 5.75 — survey on scaling-law fitting; tangential.
+- `xGM5shdGJD.md` — avg 5.20 — scaling-law estimation guide; tangential.
+- `iZeQBqJamf.md` — avg 6.50 — over-training scaling; tangential but high-band reference for rigor.
+- `p6ncr0eTKE.md` — avg 6.50 — task-adaptive pretraining; tangentially relevant adaptation paper.
+- `IhbZytsinc.md` — avg 6.00 — Minifinetuning; tangential.
+- `i7oU4nfKEA.md` — avg 6.25 — multilingual LM; not closely related.
+- `PtnttTKgQw.md` — avg 5.00 — mid-band general LM paper.
+- `EJgxMsiAO9.md` — avg 5.20 — Alice in Wonderland; mid-band general LM.
+- `QiyQJqpcYe.md` — avg 4.75 — Linguini benchmark; lower mid.
+- `8QTpYC4smR.md` — avg 1.00 — survey paper; far below.
+- `hCfhfwSfCg.md` — avg 2.00 — RL+LLM; far below.
+- `NlY3XppPt3.md` — avg 2.00 — unsubstantive; far below.
 
-| Path | Avg Human Score | Comparison to paper under review |
-|---|---|---|
-| `tyEyYT267x.md` | 8.0 (Accept) | Stronger: cleaner novel methodology (gradient variance, data-driven noise schedules), sets new SOTA LM PPL; our paper has more practical scale but weaker theoretical rigor |
-| `WNvvwK0tut.md` | 6.5 (Accept) | Comparable: also scales a DLM family and evaluates vs. ARMs; faces the same "disentangle masking vs. diffusion" confound (addressed in rebuttal); establishes scaling laws which our paper does not |
-| `sL2F9YCMXf.md` | 6.75 (Accept) | Comparable scope (energy-based improvements to discrete DLMs, ~similar benchmark suite); stronger methodological novelty in EBM formulation |
-| `71mqtQdKB9.md` | 6.6 (Reject) | Comparable: SEDD proposes a novel discrete diffusion loss; stronger theoretical contribution but at smaller scale; our paper is at larger scale with weaker theory |
-| `Qn4HEhezKW.md` | 5.0 (Reject) | Very close analogue: also adapts pre-trained LMs to DLMs via scaling, criticized for lacking methodological novelty and confounding pre-training quality with diffusion gains; our paper is better (larger scale, causal LM adaptation, more comprehensive eval) |
-| `1pTlvxIfuV.md` | 5.5 (Reject) | Reparameterized discrete diffusion for text; stronger single methodological contribution (reparameterization); our paper broader scope |
-| `PvvQlhBbgu.md` | 4.0 (Reject) | Below our paper: work on continual diffusion model learning with weaker novelty and contributions |
-| `IeZpJNc3uy.md` | 3.5 (Reject) | Well below: symbolic music model updating with limited scope and novelty |
-
-**Calibrated Score:** The paper sits between `Qn4HEhezKW.md` (5.0, reject) and `WNvvwK0tut.md` (6.5, accept). The paper under review is clearly stronger than the 5.0 anchor: it addresses the harder problem of adapting causal LMs (not encoder-only MLMs), achieves genuinely novel scale (7B DLM), and releases models used by the community. However, the unresolved data confound for the headline DiffuGPT claim and the infilling comparison weakness keep it below the 6.5 anchor (which addressed its analogous confound in rebuttal). Evaluating on the six criteria: originality (moderate—building on known equivalence with two practical techniques), importance (high—scaling DLMs is a key open problem), claim support (partially—DLM vs. DLM comparisons are fair, but DLM vs. AR base model comparisons are confounded), experimental soundness (fair—MCQ scoring is non-standard but deployed, infilling baselines are acknowledged as unfair), clarity (good), community value (high—7B model release, comprehensive benchmark, code release). Final score: **5.5**.
-
-**Decision: Borderline Accept** — The practical contribution of a released 7B DLM with a clear adaptation recipe and comprehensive evaluation is real and valued by the community. The data confound does not invalidate the recipe or the DLM-vs-DLM comparisons; it mainly affects one headline claim that the paper could reframe more carefully.
+This paper sits between Qn4HEhezKW (5.0, very similar in scope/framing, also rejected for unclear gains) and WNvvwK0tut (6.5, scaled-up MDM with proper scaling laws). The release of an actual 7B model and the broader eval push it above the 5.0 anchor; the missing matched-token AR control, the non-commensurable MC scoring, and the missing scaling-law plot keep it below the 6.5 anchor.
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL DECISION: <orange>Reject</orange>

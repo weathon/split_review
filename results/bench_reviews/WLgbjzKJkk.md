@@ -1,24 +1,13 @@
-Now let me run the calibration search:Now I have everything I need. Let me write the final review.
-
----
-
 ## Summary
-
-CO-MOT proposes two complementary training improvements for end-to-end Transformer-based Multi-Object Tracking: (1) Coopetition Label Assignment (COLA), which allows detection queries to predict tracked objects in intermediate decoders (overriding the exclusive TALA strategy used there), and (2) Shadow Sets, which augment each query with nearby shadow counterparts to implement a one-to-set matching strategy and increase positive training samples. Applied on top of MOTR, CO-MOT achieves 69.4% HOTA on DanceTrack and 52.8% TETA on BDD100K while using only 38% of MOTRv2's FLOPs by eliminating the need for a separate YOLOX detector.
-
----
+The paper proposes CO-MOT, a plugin for end-to-end transformer MOT (built on MOTR) that consists of (i) COopetition Label Assignment (COLA) — allowing previously tracked objects to also be matched to detection queries in intermediate decoders while keeping standard TALA at the final decoder, and (ii) Shadow Sets — one-to-set query augmentation with mildly perturbed query "shadows". CO-MOT reaches 69.4 HOTA on DanceTrack and 52.8 TETA on BDD100K, comparable to MOTRv2 without requiring an external YOLOX detector.
 
 ## Strengths
-
-- **Compelling diagnostic in Table 1.** The three-condition experiment (full MOTR / tracking queries removed at inference / detection-only retrain) precisely decomposes the performance gap. Removal of tracking queries at inference raises mAP from 42.5% to 60.6%; retraining without them further raises it to 66.1%. This cleanly isolates where the TALA bottleneck lies and constitutes the paper's strongest, most self-contained piece of evidence.
-
-- **COLA provides a practical training balance at zero inference cost.** Table 3a shows COLA alone improves HOTA by 3.8% and AssA by 5.1% over the MOTR baseline, with no additional computation (since only label assignment changes during training). The mechanism — intermediate decoders receive both tracking and newborn targets for detection queries — is architecturally clean and well-described in Section 3.4.
-
-- **Meaningful efficiency claim.** Achieving 69.4% vs. MOTRv2's 69.9% HOTA on DanceTrack at 38% of the total pipeline FLOPs (173G vs. ~450G when MOTRv2's YOLOX is included) is a genuinely useful deployment advantage. Figure 4 supports this comparison directly.
-
-- **Honest initialization ablation.** Table 3c and the accompanying analysis (Section 4.4) clearly show that I_rand hurts convergence, I_copy is intermediate, and I_noise is best — with a principled explanation rooted in diversity vs. stability. The authors also acknowledge that too many shadows degrade performance (N_S=3 optimal), rather than hiding this.
-
----
+- The motivation experiment (Table 1) is a concrete, useful diagnostic: vanilla MOTR has 42.5% mAP, jumping to 60.6% when tracking queries are removed at inference and 66.1% when retrained as detection-only. Combined with Fig. 1 it persuasively argues that tracking queries hurt the detection branch under TALA.
+- COLA is a clean, well-motivated design: relax TALA only in intermediate decoders so detection queries enrich tracking-query features via self-attention, while preserving competition at the final layer to avoid duplicate trajectories.
+- The attention analysis in Fig. 3 provides mechanistic support: D2T attention exceeds 15% in deeper decoders and is notably higher than MD2T, consistent with the claimed feature-flow mechanism.
+- Component ablation (Table 3a) localizes the gain in AssA (44.6→52.2) rather than DetA (71.8→73.5), supporting the claim that the gains target association, not detection.
+- Shadow initialization is studied with three principled variants ($I_{rand}$, $I_{copy}$, $I_{noise}$) and $\lambda/\phi$ aggregation strategies (Tables 3b/3c), with $I_{noise}$ (σ=1e-6) chosen with a reasonable rationale.
+- Evaluation breadth on DanceTrack, BDD100K, and MOT17, plus an honest limitations section about MOT17 underperformance.
 
 ## Weaknesses
 
@@ -26,92 +15,58 @@ CO-MOT proposes two complementary training improvements for end-to-end Transform
 None.
 
 ### Major
-
-- **Generalizability claim is asserted without evidence.** The abstract and implementation details (Section 4.2) state: *"Our proposed label assignment and shadow concept can be applied to any e2e-MOT method. For simplicity, we conduct all the experiments on MOTR."* The conclusion reinforces this: *"our method as a plugin significantly facilitates the research of end-to-end MOT."* However, COLA's design is tightly coupled to MOTR's architecture (separate tracking/detection query pools, TALA-in-all-decoders, deformable self-attention). Whether it transfers to TrackFormer, MeMOTR, or other e2e-MOT variants is completely untested. The "plugin" framing is a genuine overclaim: at minimum, one additional architecture result is required to support it.
-
-- **Component ablations are DanceTrack-only.** Table 3 reports ablations exclusively on the DanceTrack validation set. DanceTrack is single-category and emphasizes association in choreographed motion. BDD100K is multi-category with different challenges. Since the paper claims COLA and Shadow are general improvements, omitting ablations on BDD100K leaves open whether both components contribute in multi-class tracking settings. This is a material gap given three benchmarks are used in the main comparisons.
+- **Efficiency framing conflates architectural choice with method contribution.** The "38% FLOPs of MOTRv2, 1.4× faster" headline holds at 69.4 vs 69.9 HOTA, but Table 2a shows MOTRv2 actually reaches 73.4 HOTA on DanceTrack, while CO-MOT⁺ tops at 69.9. The efficiency story compares CO-MOT to MOTRv2 at MOTRv2's lower operating point and largely reflects "no external YOLOX" rather than gains from COLA/Shadow per se. An iso-accuracy comparison (or MOTRv2 ablated without YOLOX) is needed to attribute efficiency to the proposed contributions.
+- **Shadow Set is not differentiated from Group-DETR / H-DETR by experiment.** The paper distinguishes "one-to-set" from "one-to-many" conceptually but provides no head-to-head ablation against Group-DETR / H-DETR style auxiliary heads on the same MOTR backbone. Without that, the +2.6 HOTA from Shadow could plausibly be attributable to a known one-to-many remedy adapted to tracking.
 
 ### Minor
-
-- **The stated mechanistic explanation for COLA (feature augmentation via self-attention) is correlation, not established causation.** Section 3.4 and Figure 3 argue that detection queries predicting the same identity as tracking queries contribute >15% of attention weight to those tracking queries in late decoders — and that this is *why* COLA improves tracking. However, this attention analysis is performed on a model trained under COLA, which specifically incentivizes detection and tracking queries to attend to each other. An alternative explanation is equally consistent with the results: COLA simply provides additional positive supervision signal to detection queries in intermediate decoders, improving convergence (as one-to-many strategies do in plain detection). The fact that DetA also improves by 1.7% (Table 3a) — which should be unaffected if tracking-feature-augmentation were the sole mechanism — is consistent with this alternative. The practical gains are real, but the mechanistic claim is overstated.
-
-- **Shadow hyperparameter search conducted under mismatched conditions.** Section 4.4 describes the λ/φ search using N_S=5, 5 epochs, I_rand, and no COLA — while the final model uses I_noise, N_S=3, COLA enabled, and 20 epochs. The winning combination (λ=max, φ=min) is deployed in a different training regime from the one under which it was selected. It is not established that this combination is optimal under the final regime.
-
-- **MOT17 underperformance explanation is unsupported.** The paper attributes inferior MOT17 performance to *"insufficient amount of MOT17 training data [that] cannot fully train a Transformer-based MOT model."* However, MOTRv2 is also Transformer-based and achieves significantly better MOT17 performance — undermining the data-scarcity explanation. A more precise analysis (e.g., comparing with and without CrowdHuman pre-training, or showing data-scaling curves) would be needed to substantiate this claim.
-
-- **BDD100K result is slightly soft-pedaled.** The discussion leads with "we achieve superior performance on TETA with an improvement of 2%" (vs. MOTR), while the comparison against MOTRv2 — which directly tests the paper's central efficiency claim — shows CO-MOT falls short on TETA. This is disclosed but de-emphasized relative to its relevance.
+- **Motivation diagnosis is suggestive but not isolated.** Table 1 shows removing tracking queries improves mAP, but does not separate "tracking queries degrade detection-query outputs via self-attention" from "TALA under-trains detection queries". The diagnosis-to-COLA link is plausible but indirect.
+- **No variance/seed reporting on ablations.** MOTR-family training is known to vary across seeds; the central ablation gains (2.6–5.4 HOTA on a single split) would be more convincing with multi-seed runs.
+- **BDD100K LocA drop is underexplained.** TETA improves +2.0, but LocA is "considerably lower" than baselines and dismissed in one sentence. On a driving dataset, this association-vs-localization tradeoff warrants analysis.
+- **Query budget ambiguity.** Sec. 4.2 says "300 initial queries" while Sec. 3.3 implies $(N_T+N_D)\cdot N_S$ total. With $N_S=3$, is the effective budget 300 or 900? Important for fair compute comparisons with MOTR.
+- **What do shadows specialize in?** The σ=1e-6 → 1e-2 observation is interesting but no analysis is offered of whether shadows are redundant or capture distinct aspects; the design currently reads as a useful empirical trick.
+- **MOT17 underperformance attribution.** Blaming "data-hungry Transformer" is weak given MOTR/MeMOTR train on identical data — if CO-MOT addresses a general TALA failure, gains should transfer.
 
 ### Trivial
-None beyond what's already covered above.
-
----
+- Notation in Sec. 3.2 / 3.5 is heavy and would benefit from a cleaner table of symbols; the COLA-vs-TALA partition over decoders 1..L-1 vs L could be stated as a one-line rule.
 
 ## Nice-to-Haves
-
-- An experiment applying COLA on at least one additional e2e-MOT architecture (MeMOTR or TrackFormer) to partially validate the "plugin" claim.
-- A masking ablation that blocks cross-query self-attention between detection and tracking queries in intermediate decoders; if feature augmentation is the mechanism, removing it should erase most of the COLA gain.
-- Re-running the λ/φ search under the full training regime (with COLA, I_noise, N_S=3, 20 epochs) to validate that λ=max, φ=min is indeed optimal.
-- A trajectory-level qualitative comparison between MOTR and CO-MOT on the DanceTrack0073 / MOT17-09 sequences used in Figure 1 to close the loop on the motivation.
-
----
+- Iso-accuracy or iso-FLOP efficiency curve with MOTRv2 (ideally MOTRv2 with and without YOLOX).
+- Head-to-head against Group-DETR / H-DETR auxiliary heads adapted to MOTR.
+- Intervention experiment: zero D2T attention at inference in a COLA-trained model to causally verify Fig. 3's mechanism.
+- Per-component multi-seed runs on Table 3a.
 
 ## Removed Points
-
-*These points are flagged to be removed; treat them with caution.*
-
-- **Harsh Critic: BDD100K comparison presented as selective framing.** Removed as a standalone weakness. The paper explicitly states "CO-MOT slightly falls behind on TETA" vs. MOTRv2, and MOTRv2 uses additional infrastructure. The comparison is disclosed; the framing may be optimistic but is not dishonest.
-
-- **Strength Finder: "State-of-the-art performance on e2e-MOT benchmarks" as a standalone strength.** Partially merged into the efficiency strength. CO-MOT outperforms MOTR/MeMOTR but is behind MOTRv2 on BDD100K — "state-of-the-art" is not a clean characterization, and the relevant SoTA comparison already appears under the efficiency strength.
-
-- **Strength Finder: "Effective and interpretable COLA."** The interpretability claim is weakened by the correlation-vs-causation issue noted above. The empirical effectiveness is kept, but "interpretable" is removed as a characterization.
-
----
+These points are flagged to be removed, treat them with caution.
+- "Parser-garbled prose in Sec. 3.2" — formatting artifact from PDF extraction, not an authoring problem.
+- Strength: "general plugin applicable to any e2e-MOT framework" — overly generic, the paper only demonstrates on MOTR.
+- Strength: "competitive multi-dataset results beyond DanceTrack" — partly contradicted by the BDD100K LocA drop and MOT17 underperformance kept as weaknesses.
 
 ## Novel Insights
-
-The diagnostic framework in Table 1 — separating the contribution of tracking queries to detection degradation via three controlled conditions — is the paper's most transferable intellectual contribution. The 18% mAP gap between MOTR with and without tracking queries at inference quantifies a previously qualitative concern about TALA and provides a reusable evaluation protocol for any future e2e-MOT method. The finding that the gap is primarily in association (AssA) rather than detection (DetA) also sharpens the community's understanding of where TALA actually fails. The shadow initialization study (I_rand → I_copy → I_noise) additionally provides a useful empirical template for query perturbation strategies in other DETR-style settings.
-
----
+None beyond the paper's own contributions. The diagnosis that TALA starves detection queries and that intermediate decoders can safely be relaxed to a cooperative assignment is the paper's central insight and is genuinely useful, but no additional novel synthesis emerges from the reviews.
 
 ## Suggestions
+- Recast the efficiency claim as "comparable HOTA to MOTRv2 *without* external detector" rather than headline FLOPs/speed at unequal accuracy; add an iso-accuracy plot.
+- Add a direct Group-DETR / H-DETR baseline trained on MOTR with everything else fixed.
+- Provide multi-seed numbers for Table 3a.
+- Analyze the BDD100K LocA gap and the MOT17 result rather than attributing it to data scale.
+- Clarify the actual total query count under $N_S=3$.
 
-1. Add at least one cross-architecture COLA result (e.g., MeMOTR or TrackFormer with/without COLA) to back up the "plugin" claim — even a simple two-row table would suffice.
-2. Run ablations on BDD100K in addition to DanceTrack so readers can assess whether COLA and Shadow both contribute in multi-class settings.
-3. Soften the mechanistic language around Figure 3 from "detection queries pass on rich semantic information" (causal) to "detection queries are correlated with" or "co-attend with" (observational), or add an ablation that tests the mechanism by blocking cross-query attention in intermediate decoders.
-4. Rerun the λ/φ grid search under the full training setup to ensure the chosen hyperparameters are calibrated to the production regime.
-5. Add a brief discussion of settings where COLA may be less effective — e.g., when detection image data is abundant and TALA's imbalance is less severe — to scope the contribution more precisely.
-
----
+## Evaluation
+Originality: moderate — COLA is a clean and somewhat novel re-framing; Shadow Sets is close to known one-to-many remedies. Importance: the e2e-MOT vs tracking-by-detection gap is a real and meaningful problem. Claim support: largely supported on DanceTrack, weaker on BDD100K (LocA) and MOT17; efficiency framing is overclaimed. Soundness: experiments are reasonable in scope but lack variance reporting and a Group-DETR head-to-head. Clarity: acceptable; notation in method section is dense. Value to community: useful plug-in idea (COLA) that practitioners can drop into MOTR-style trackers.
 
 ## Score and Decision
 
-**Anchor papers reviewed:**
+Calibration anchors retrieved:
+- `0ov0dMQ3mN.md` (this paper) — avg 6.00, Accept. Anchors directly to a 6.
+- `OeBY9XqiTz.md` Samba — avg 7.33, Accept. Cleaner, more novel state-space MOT architecture; clearly above this paper.
+- `GDS5eN65QY.md` OVTR — avg 5.75, Accept. Open-vocab e2e MOT with split reviews; similar tier.
+- `DorP300Q3b.md` Pseudo 3D MOT — avg 6.00, Reject. Borderline empirical MOT paper; comparable tier.
+- `eQcVfCK5cO.md` QQ-STR — avg 5.00, Reject. Less convincing tracking paper.
+- `8tWOUmBHRv.md` Offline tracking with permanence — avg 4.00, Reject. Weaker engineering paper.
+- `w73feIekdO.md` Motion vectors clustering — avg 3.25, Reject. Substantially weaker; far below this paper.
+- `FM21yYBhuE.md`, `fi9LF92Cak.md`, `Qyp3Rni2g1.md`, `ulXCYmvVg6.md`, `ydH8nU5csJ.md`, `YcUtOIzIXK.md`, `8gCgXG40Wn.md` — off-topic or weaker calibration items, not used for direct positioning.
 
-| Path | Avg Human Score | Comparison to CO-MOT |
-|---|---|---|
-| `0ov0dMQ3mN.md` | **6.00 (Accept)** | **This is the same paper** — four human reviewers gave 6,6,6,6; provides direct calibration. |
-| `OeBY9XqiTz.md` | 7.33 (Accept, Samba) | Stronger paper: novel SSM integration, outperforms SoTA on multiple datasets, better-motivated architecture; clearly above CO-MOT. |
-| `GDS5eN65QY.md` | 5.75 (Accept, OVTR) | Similar tier: incremental e2e-MOT improvement, mixed dataset results, generalization concerns. |
-| `DorP300Q3b.md` | 6.00 (Reject) | Topically similar MOT paper, rejected for different reasons (limited dataset validation, 3D approach in 2D setting). |
-| `8tWOUmBHRv.md` | 4.00 (Reject) | Lower tier: offline tracking with limited novelty and narrow dataset coverage. Clearly weaker than CO-MOT. |
-| `FV5nsugDY1.md` | 3.75 (Reject) | Low anchor: visual tracking with contrastive learning, weak baselines and motivation. Much weaker than CO-MOT. |
-| `vyF5aim4US.md` | 5.25 (Reject) | Similar methodology scope (query-based detection), rejected for insufficient novelty. CO-MOT's diagnosis and ablation quality are superior. |
+The paper has real contributions (COLA + ablation evidence), genuine weaknesses (efficiency framing, missing Group-DETR comparison), but no fatal flaws. It sits at the same level as the direct match (avg 6.00) and slightly below Samba.
 
-**Calibration reasoning:** The paper's own human review record (0ov0dMQ3mN.md) is a direct anchor: four reviewers at a competitive venue unanimously gave it 6 with an Accept decision. The paper's genuine contributions — a well-motivated diagnostic (Table 1), clean ablations on DanceTrack, and a compelling efficiency result — are real but incremental. The major weaknesses (unsubstantiated generalizability claim, DanceTrack-only ablations) are acknowledged weaknesses even in the human reviews and do not invalidate the core claim. Relative to Samba (7.33), which introduces a genuinely novel architectural paradigm with strong results, CO-MOT is clearly a tier below. Relative to weak rejects (3.75–4.0), CO-MOT is clearly stronger due to its principled motivation, multi-benchmark results, and ablation discipline.
-
-**Final score: 6.0** — marginal accept. The paper makes a concrete, reproducible contribution to e2e-MOT training: the diagnostic framework and COLA strategy are genuine, ablations on DanceTrack are clean, and the efficiency advantage is practically meaningful. The overclaim on generalizability and absence of multi-dataset ablations are real gaps, but they are scope limitations rather than fatal flaws. The score matches the consensus of four independent human reviewers on this submission.
-
-**Originality:** Moderate. COLA adapts an existing concept (one-to-many training) specifically to the tracking/detection query asymmetry in an insightful way. Shadow Sets are a straightforward adaptation of group-query strategies. No fundamentally new architecture.
-
-**Importance of research question:** High. E2e-MOT is an active area, and the tracking-terminal problem is a real, widely felt limitation.
-
-**Claims vs. support:** Partially supported. The DanceTrack claims are well-supported; the generalizability claim is not.
-
-**Soundness:** Adequate for the core claim; the shadow hyperparameter methodology is questionable but not paper-breaking.
-
-**Clarity:** Above average. The diagnostic in Table 1 and the COLA description are especially clear.
-
-**Value to community:** Moderate. The diagnostic framework and COLA strategy are reusable insights.
-
-MY FINAL SCORE: <pineapple>6</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

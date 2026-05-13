@@ -1,26 +1,12 @@
-Now let me read deeper into the paper to verify the key reviewer claims, and also read a high-scoring calibration anchor.Now I have enough to write the final review. Let me synthesize everything.
-
----
-
 ## Summary
-
-FedRC addresses the challenge of simultaneously occurring feature, label, and *concept* distribution shifts in federated learning. The paper first shows empirically that existing clustered FL methods (IFCA, FeSEM, FedEM, FedSoft) fail a proposed "clustering principle"—they cluster by label or feature rather than by concept. It then proposes a novel objective function using the pointwise mutual information ratio I(x,y;θ_k) = P(y|x;θ_k)/P(y;θ_k), which is invariant to marginal shifts in P(x) and P(y) but sensitive to changes in P(y|x). This is embedded in a bi-level optimization framework (ConceptEM → FedRC) with standard convergence guarantees, and validated across four datasets and three architectures.
-
----
+The paper proposes FedRC, a clustered federated learning framework targeting the simultaneous occurrence of label, feature, and concept shifts. It introduces a clustering principle (separate clients with concept shifts; group those with only label/feature shifts), a bi-level objective using the ratio $\mathcal{P}(y|x;\theta_k)/\mathcal{P}(y;\theta_k)$ ("MMI"), and a practical EM-style optimizer with a convergence rate. Experiments on FashionMNIST/CIFAR10/CIFAR100/Tiny-ImageNet show large global-accuracy gains over IFCA, CFL, FeSEM, FedEM, and FedSoft.
 
 ## Strengths
-
-- **Diagnostic visualization of existing method failures is concrete and novel.** Figure 2/3 directly shows that FeSEM, FedEM, IFCA, and FedSoft cluster by class label and feature style rather than concept in a unified scenario with all three shift types. This is a specific, falsifiable empirical finding that is new to the literature and cleanly motivates the need for FedRC.
-
-- **The objective function design is principled.** Using I(x,y;θ_k) = P(y|x;θ_k)/P(y;θ_k) as the clustering signal is well-motivated: the numerator P(y|x;θ_k) falls when a concept mismatch exists, while the denominator cancels out marginal label/feature shift effects. This provides a cleaner rationale for decoupling than objectives used in FedEM or FeSEM, which maximize P(x,y;θ_k) directly.
-
-- **Consistent large empirical improvements across diverse settings.** FedRC achieves substantially higher global accuracy than all baselines across FashionMNIST (CNN), CIFAR10 (MobileNetV2 and ResNet18), CIFAR100 (ResNet18), and Tiny-ImageNet (MobileNetV2). The improvement over the strongest baseline (FedEM) is large in every setting (e.g., 63.83% vs. 43.35% on CIFAR10/MobileNetV2). The result pattern is robust and consistent.
-
-- **FedRC† demonstrates a useful personalization–generalization tradeoff.** Fine-tuning FedRC for one local epoch achieves local accuracy comparable to FedSoft (91.02% vs. 91.35% on FashionMNIST) while maintaining dramatically higher global accuracy (62.37% vs. 19.88%). This is a practical and actionable result.
-
-- **Ablation studies cover key axes.** The paper tests sensitivity to number of clusters K, number of concepts, cluster imbalance (8:1:1), and hard vs. soft clustering. FedRC is consistently superior across all conditions.
-
----
+- **Useful diagnostic of existing clustered FL methods.** Fig. 3 systematically shows that IFCA/FeSEM/FedEM/FedSoft cluster by class or feature rather than concept under simultaneous shifts — concrete evidence motivating the new clustering principle.
+- **Principled objective design.** The ratio $\mathcal{P}(y|x;\theta_k)/\mathcal{P}(y;\theta_k)$ is well-motivated: it remains stable under label/feature shifts (denominator absorbs $\mathcal{P}(y)$) but collapses under concept shift, structurally distinguishing the shift types.
+- **Large, consistent empirical gains.** On CIFAR10/MobileNetV2 FedRC achieves 63.83% global vs 43.35% (FedEM) — a >20-point absolute improvement, with similar gaps on FashionMNIST and Tiny-ImageNet, and improvements carry over to ResNet18 (Table 2).
+- **Local–global gap framing.** Fig. 2(b) reframes evaluation of clustered FL away from local accuracy alone, and FedRC shows a markedly smaller gap, supporting the generalization claim.
+- **Reasonable robustness ablations.** Varying $K$ (Fig. 4a), imbalanced cluster sizes 8:1:1 (4b), hard vs soft clustering (4c), and number of concepts (4d) all show consistent gains; standard deviations across seeds in Table 1 are tight.
 
 ## Weaknesses
 
@@ -28,93 +14,66 @@ FedRC addresses the challenge of simultaneously occurring feature, label, and *c
 None.
 
 ### Major
-
-- **Concept shift is operationalized solely as full label permutation (y → C−y), the maximally favorable case for FedRC.** Section 5 confirms: "we change the labels of partial clients (i.e., from y to (C-y), where C is the number of classes)." This is the most discriminative possible concept shift: P(y|x;θ_k) collapses to near zero for a mismatched model, making the numerator of I(x,y;θ_k) small and the objective highly informative. No experiment tests partial concept shifts (e.g., stochastic label noise, gradual correlation changes), which are the realistic case. It is entirely unknown whether FedRC's advantage survives when P(y|x) differences between concepts are graded rather than flipped. The cited prior works (Jothimurugesan et al., Ke et al.) also use synthetic setups, which does not resolve this gap—it merely shows the convention exists.
-
-- **No evaluation on real-world datasets with naturally occurring concept shifts.** All datasets use synthetically constructed concept shifts. Datasets with known real-world P(y|x) differences across institutions (e.g., medical imaging benchmarks with label convention differences, or multi-site datasets) would validate whether the clustering principle holds in practice and whether the full-permutation construction is representative.
+- **Concept shift is operationalized only as a global label permutation $y \to C-y$.** Section 5.1 explicitly: "we change the labels of partial clients (i.e., from $y$ to $(C-y)$)" and the non-participating test set is built with the same permutation. While this protocol follows prior work (Jothimurugesan 2022, Ke 2022, Canonaco 2021), it is a very restricted form of concept shift: deterministic, label-space-wide, and identically applied at test time. Under this construction, the optimal partition is essentially "identify which permutation each client uses." The paper's motivation ("cultural differences," "weather fluctuations") suggests far broader concept shift than what is actually tested, leaving the "diverse distribution shifts" claim under-demonstrated. A non-permutation concept-shift evaluation (e.g., region-conditioned labels, naturalistic temporal drift) would meaningfully strengthen the contribution.
+- **Theory does not certify the clustering principle.** Theorem 1 bounds $\frac{1}{T}\sum \|\nabla_{\theta_k}\mathcal{L}\|^2$ — a standard non-convex stationarity rate. It says nothing about $\Omega$ updates, nor that limit points achieve the clustering principle. The argument that maximizers of $\mathcal{L}$ realize the clustering principle (Sec. 4.1) is qualitative; combined with the practical approximation $\mathcal{P}(y;\theta_k)\approx C_{y,k}$ (defined via current assignments $\gamma_{i,j;k}$), there is a fixed-point dependency whose stability/uniqueness is not analyzed.
 
 ### Minor
-
-- **Convergence theorem establishes O(1/T) convergence to a stationary point but says nothing about which stationary point is reached.** Theorem 1 is a standard non-convex gradient descent result. It does not prove that the algorithm converges to a solution satisfying the clustering principle, only that gradient norms vanish. The informal argument in Section 4.1 that maximizing L avoids concept shifts within clusters is plausible but relies on the model being well-calibrated and cluster assignments already being approximately correct—circularity that is never formally resolved. This does not invalidate the empirical results but means the theoretical section provides hygiene, not correctness.
-
-- **Checkpoint selection criterion is non-standard.** Table 1 caption states results are reported "on the round that achieved the best train accuracy for each algorithm." This is non-standard; applying it uniformly reduces but does not eliminate the risk of biased comparisons, since methods differ in their training-accuracy trajectories. Fixed final-round or held-out-validation reporting would be cleaner.
-
-- **FedRC achieves higher global than local accuracy on CIFAR10/MobileNetV2 (63.83% vs. 62.74%).** This is unusual—it implies the model performs better on balanced non-participating clients than on heterogeneous participating clients. Whether this reflects a systematic property of the objective (e.g., the balanced denominator C_{y,k} degrades on imbalanced training clients) or is an artifact of checkpoint selection is not explained.
-
-- **K must be set equal to the true number of concepts.** The paper initializes K=3 (= number of concepts) throughout. Ablation on K (Figure 5a) shows FedRC remains best, but sensitivity relative to baselines is not analyzed. In practice the number of concepts is unknown. While deferred to future work, this is a meaningful deployment gap.
+- **Oracle $K$ in headline tables.** Main tables fix $K=3$, equal to the number of injected concepts. Fig. 4(a) sweeps $K$ on one dataset; Fig. 4(d) similarly aligns $K$ with concepts. A more systematic study with severely misspecified $K$ would be welcome — though within the field's norms this is acceptable.
+- **FedSoft 19–22% global vs 83–91% local pattern** suggests it is collapsing to per-client memorization under this protocol; using its global number as the comparison point flatters the gap. FedRC$^t$ (one-epoch fine-tune) recovers comparable local accuracy — fair, but the comparison framing could be clearer.
+- **The $C_{y,k}$ approximation is buried.** This is the most consequential modeling choice in the paper (it implements the denominator of the MMI ratio) and deserves a dedicated analysis paragraph rather than a derivation aside.
+- **No CIFAR-100 standard deviations** in Table 2; given absolute accuracies in the 12–28% regime with 100 classes under permutation, run-to-run noise should be reported.
 
 ### Trivial
-None (parsing artifacts have been excluded).
-
----
+- None retained.
 
 ## Nice-to-Haves
-
-- An experiment with partial or probabilistic concept shifts (e.g., 30–50% label permutation probability per client) would test whether the method degrades gracefully as P(y|x) differences shrink.
-- A wall-clock and communication overhead comparison with single-model baselines would help practitioners assess the K-fold cost of FedRC.
-- A visualization of cluster assignment evolution over training rounds (trajectories of γ_{i,j;k}) would show whether convergence to concept-aligned clusters is monotone or oscillatory.
-- A principled criterion for selecting K (e.g., information-theoretic model selection, hierarchical merging) would make the method more self-contained.
-
----
+- A naturalistic concept-shift case study where the latent concept is known but is not a label permutation (e.g., domain-conditioned label noise).
+- An experiment varying the *severity* of concept shift (partial label remappings instead of full $y\to C-y$).
+- A formal lemma linking maximizers of $\mathcal{L}(\Theta,\Omega)$ to the clustering principle, not just convergence to a stationary point.
+- Comparison to non-clustered concept-shift methods (e.g., Jothimurugesan et al.) under matched conditions.
 
 ## Removed Points
 *These points are flagged to be removed; treat them with caution.*
-
-- **Harsh Critic: "The global accuracy metric is nearly tautological by construction."** Overstated. The nonparticipating client evaluation is explicitly motivated in Figure 4 (Section 5): it tests whether the model learns shared decision boundaries for each concept on a balanced distribution. This is a sensible operationalization of generalization under the clustering principle. The label-swapping on nonparticipating clients mirrors the setup of participating clients, which is methodologically coherent, not circular. Removed as a standalone weakness.
-
-- **Harsh Critic: Assumption 2 is a deterministic bound stated as an expectation.** The paper writes E[‖∇f(θ)‖²] = (1/N)Σ‖∇f(·)‖² ≤ σ². While the expectation notation is slightly inconsistent with the deterministic sum, this is a minor notation choice not uncommon in FL convergence proofs. Not a material error.
-
-- **Harsh Critic: Objective interpretation in Section 4.1 is internally inconsistent regarding label-shifted data being incentivized into the wrong cluster.** The argument concerns a subtle regime; the paper does not claim P(y|x;θ_k) is negligible for label-shifted data (it can still be non-negligible). The denominator P(y;θ_k) also adjusts via C_{y,k}. This is a theoretical subtlety worth exploring, but the harsh critic's framing overstates it as a definitive internal contradiction. Downgraded to a future-work observation.
-
-- **Harsh Critic: Circular dependency between C_{y,k} and γ.** This is standard EM behavior. The alternating optimization converges because each E-step and M-step individually improves the objective. Demanding a bound on the approximation error between ideal and practical objectives is a reasonable future extension but not a current weakness given the established EM convergence framework.
-
-- **Strength Finder: "Well-designed evaluation protocol with nonparticipating clients."** Kept as part of the method explanation, but not listed as a standalone strength since it is contested and the paper's evaluation scope remains limited to synthetic settings.
-
-- **Strength Finder: "Convergence guarantee for the centralized version."** The guarantee is O(1/T) convergence to a stationary point under standard assumptions—this is mathematically correct but not notably strong. Removed as a standalone strength.
-
----
+- **"Headline gap is tautological because single-model methods cannot succeed."** The authors openly motivate the need for multi-model methods under concept shift (Sec. 1, Fig. 1a). Comparing to single-model methods is a fair sanity check, not a strawman; and clustered baselines (FedEM, FeSEM, FedSoft) are also multi-model and do not match FedRC.
+- **"Unfair comparison because $K=3$ matches oracle."** All clustered baselines receive the same $K$, so the asymmetry does not favor FedRC. Fig. 4(a) varies $K$, undermining the claim that the result is purely an oracle artifact. Moved to a minor concern.
+- **"CFL choice of $K$ adaptively makes the comparison unfair."** The paper reports both CFL (adaptive) and CFL(3) — this is addressed.
+- **Generic Strength Finder claim "Convergence guarantee"** — kept only as supporting strength since the bound is weak (does not certify the clustering property, see Major).
+- **Strength Finder claim of broad robustness ablations** — retained but with the caveat that ablations remain within the permutation-style concept-shift regime.
 
 ## Novel Insights
-
-FedRC's most novel conceptual insight is that the pointwise mutual information ratio I(x,y;θ_k) = P(y|x;θ_k)/P(y;θ_k) constitutes a natural decoupling device between concept shifts and label/feature shifts: because it cancels the marginals P(x;θ_k) and P(y;θ_k), it becomes informative only about changes in the conditional P(y|x), which is precisely the fingerprint of a concept shift. This reframes the clustered FL problem as maximizing a mutual-information-like objective rather than a joint likelihood, with the appealing property that marginal heterogeneity (the dominant noise in standard FL) is cancelled. The complementary empirical finding—that all existing clustered FL methods cluster by label or feature rather than concept in the presence of all three shift types simultaneously—is itself novel and creates a concrete benchmark for future methods.
-
----
+The local–global accuracy gap as a diagnostic for clustered FL (showing that many clustered methods buy local accuracy by overfitting cluster-specific patterns) is a useful framing. The MMI ratio objective is a clean reformulation that structurally decouples the three shift types — modest but real conceptual progress beyond joint-likelihood EM. Beyond these, nothing genuinely novel emerges from the reviews.
 
 ## Suggestions
+- Add at least one non-permutation concept-shift benchmark (e.g., domain-conditioned label noise on CIFAR10-C variants, or a real dataset where concepts arise naturally).
+- Promote a formal statement linking $\arg\max \mathcal{L}$ to the clustering principle, or empirically demonstrate attractor behavior of the $C_{y,k}$ fixed point under random initialization.
+- Sweep concept-shift *severity* (partial remappings) and the *fraction* of concept-shifted clients.
+- Soften the "diverse distribution shifts" framing in the abstract/intro to match the experimental scope, or add the experiments needed to support it.
 
-1. Test FedRC on at least one partial-concept-shift scenario (e.g., stochastic label permutation at p ∈ {0.3, 0.5, 0.7}) to establish the range over which the objective remains discriminative.
-2. Report results at a fixed final round in addition to the best-train-accuracy checkpoint to preempt bias concerns.
-3. Clarify Theorem 1's scope explicitly: note it guarantees convergence to a stationary point, and that confirming whether stationary points align with the clustering principle is a recognized open problem.
-4. Include communication and computation overhead relative to single-model FedAvg and FedEM to help practitioners evaluate deployment feasibility.
-
----
+## Evaluation
+- **Originality:** Moderate — bi-level decomposition is standard, but the MMI-style objective and clustering principle are a fresh angle.
+- **Importance:** Reasonable — simultaneous heterogeneity in FL is real and under-explored.
+- **Support for claims:** Partial — empirical gains are robust within the chosen protocol; the "diverse shifts" framing outruns the synthetic concept-shift construction.
+- **Soundness of experiments:** Adequate by community standards (multiple datasets, models, seeds, ablations) but narrow concept-shift operationalization.
+- **Clarity:** Generally good; the $C_{y,k}$ approximation deserves more prominence.
+- **Value to community:** Solid contribution to clustered FL, especially the diagnostics and the objective design.
 
 ## Score and Decision
 
-**Anchor comparison:**
+Anchors retrieved:
+- `zPDpdk3V8L.md` — *Enhancing Clustered FL (HCFL)*, avg **6.33**, accept. Very similar topic and likely same author lineage; framework-style clustered-FL paper. The paper under review has comparable empirical strength but a narrower experimental scope on concept shift.
+- `uV39mPKRGw.md` — *Concept Matching: Clustering-based Federated Continual Learning*, avg **3.75**, reject. Same "concept-cluster" idea but weaker positioning; the present paper is clearly stronger empirically.
+- `rBAnJed1iY.md` — *Provably Robust DP Clustered FL*, avg **5.00**, reject. Mid-band clustered-FL paper with strong theory but limited experiments — comparable polish.
+- `SqNi6Se1NT.md` — *Bayesian Framework for Clustered FL*, avg **5.00**, reject. Mid-band clustered-FL theory; the present paper is empirically stronger but theoretically thinner.
+- `8OrXrdPbef.md` — *FLAG: Clustered FL combining data and gradient*, avg **4.25**, reject. Engineering-heavy clustered-FL; weaker conceptual contribution than the present paper.
+- `8hc2UvwTaL.md` — *FLAIM (synthetic federated)*, avg **4.67**, reject. Not directly relevant.
+- `keA1Ea7v6p.md` — *FedGC generative content*, avg **5.67**, reject. Not directly relevant.
+- `nwETBpOPiC.md` — *Overcoming label shift in targeted FL*, avg **4.00**, reject. Related but narrower topic.
+- `7pDI74iOyu.md` — *Language-driven Heterogeneous FL*, avg **6.00**, accept. Different topic but anchor for the upper band.
+- `TKDwsJmrDJ.md` / `4ftMNGeLsz.md` — avg **6.00** each; not directly relevant.
+- `kWsJkH1tNi.md`, `ghyeMoj1gK.md`, `11WAKGH8uv.md` — mid-band (~5.0) FL anchors.
+- `agocj3HTTd.md` (2.33), `J1SGf2lyr6.md` (2.50), `gTWaUlxxWi.md` (4.00) — low-band FL anchors, clearly weaker than this paper.
 
-| Path | Avg Human Score | Comparison to FedRC |
-|---|---|---|
-| zPDpdk3V8L.md | 6.33 (Accept) | Clustered FL framework paper, also empirically strong; similar scope but perhaps less novel objective; FedRC has comparable novelty with narrower evaluation |
-| dNzBTVuMgq.md | 6.00 (Reject) | Client sampling for non-IID FL; accepted at 6.0 despite moderate novelty; FedRC is more novel in objective design |
-| 7pDI74iOyu.md | 6.00 (Accept) | Language-driven FL for non-IID; accepted at 6.0 with comprehensive experiments |
-| rBAnJed1iY.md | 5.00 (Reject) | DP-robust clustered FL with theoretical guarantees; rejected; narrower contribution than FedRC |
-| SqNi6Se1NT.md | 5.00 (Reject) | Bayesian clustered FL; rejected; lacks the experimental breadth of FedRC |
-| ghyeMoj1gK.md | 5.00 (Reject) | Client-centric clustered FL; rejected; incremental over prior work |
-| 8OrXrdPbef.md | 4.25 (Reject) | Clustered FL with data+gradient; rejected; weaker evaluation than FedRC |
-| nwETBpOPiC.md | 4.00 (Reject) | Label-shift targeted FL; rejected; narrower problem, weaker results |
-| QuGnjxfLBH.md | 3.50 (Reject) | FL benchmarking paper; rejected; primarily engineering, no novel method |
-
-**Assessment:** FedRC is clearly stronger than the 3.5–5.0-range papers: its objective function is genuinely novel, its diagnostic of existing methods is concrete, and its empirical gains are large and consistent across 4 datasets and 3 architectures. It is comparable to the 6.0–6.33 papers (zPDpdk3V8L, dNzBTVuMgq), which also have comprehensive experiments and novel contributions, but those were evaluated more favorably partly due to broader theoretical coverage or more diverse evaluation. The major weakness here—concept shift evaluated only as full label permutation—is a real limitation that places FedRC slightly below zPDpdk3V8L.
-
-**Originality:** Good. The PMI-based objective is a principled and novel choice.
-**Importance of research question:** High. Simultaneous multi-type distribution shifts in FL is a realistic and underexplored setting.
-**Claim support:** Moderate. Claims are strongly supported within the synthetic evaluation regime but generality to realistic concept shifts is undemonstrated.
-**Soundness of experiments:** Moderate-to-good. Broad multi-dataset, multi-architecture coverage, but concept shift limited to full label permutation.
-**Clarity:** Good. The method and problem are clearly presented.
-**Value to community:** Good. The method is modular and compatible with existing FL optimizers.
-
-**Score: 5.5** — Weak accept. The paper makes a real, novel contribution with consistent strong empirical results, but the synthetic-only evaluation of concept shifts and the gap between convergence and correctness guarantees prevent a confident acceptance. The work is publishable with an expanded evaluation.
+This paper sits between the 5.0 mid-band and the 6.33 HCFL anchor — strong empirical results and a useful clustering principle, but the concept-shift evaluation is narrow and theory does not certify the principle. Calibrated against the closest topical anchor (HCFL @ 6.33 accept), this paper is slightly weaker on scope of evaluation.
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

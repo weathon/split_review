@@ -1,119 +1,91 @@
-Now I have all the information I need. Let me write the consolidated review.
-
----
-
 ## Summary
-
-ReBotNet proposes a real-time video enhancement network targeting practical applications such as video conferencing and live streaming. The core architecture is a dual-branch recurrent bottleneck mixer that tokenizes frames as both tubelets (spatio-temporal) and individual image patches (spatial/temporal), fusing them via MLP-Mixer bottlenecks in an encoder-decoder framework. A frame-recurrent training scheme is introduced to leverage temporal redundancy at zero additional inference cost. The paper introduces two author-curated multi-degradation datasets (PortraitVideo, FullVideo) and claims a 2.5× speedup over the prior SOTA method (RVRT) with competitive or superior visual quality.
-
----
+ReBotNet is a dual-branch architecture for real-time video enhancement that combines a tubelet-based spatio-temporal branch with a per-frame spatial branch, processes tokens with MLP-Mixer–style bottleneck blocks, and is trained with a frame-recurrent strategy that reuses the previous prediction. The authors introduce two synthetic multi-degradation datasets (PortraitVideo, FullVideo) and report latency at iso-FLOPs S/M/L against VRT, RVRT, BasicVSR++, and FastDVDNet, plus single-degradation results on DVD and GoPro.
 
 ## Strengths
-
-- **Genuine and large latency advantage**: Table 1 confirms that ReBotNet (M) achieves 15.02 ms latency vs. RVRT (M)'s 35.93 ms — a ~2.4× speedup at similar GFLOPs (~56 G vs. 62 G), while achieving 31.85 vs. 31.60 PSNR on PortraitVideo. This advantage holds across all FLOP regimes and is measured with a sound protocol (1000 forward passes after warm-up).
-
-- **Well-designed ablation study (Table 4)**: Each component's contribution is isolated at consistent FLOPs. The most striking result is that the recurrent training setup improves PSNR from 31.59 to 31.85 (+0.26 dB) and SSIM from 0.8822 to 0.8865 with *zero* change in GFLOPs (56.06) or latency (15.02 ms) — a clean, operationally useful finding.
-
-- **Practical multi-degradation framing**: Training on a mixture of blur, compression, noise, and colorimetric distortions simultaneously is better motivated for real-world deployment than single-degradation benchmarks. The new datasets address a genuine gap: no existing public benchmark contains multi-degradation video in a video-call format.
-
-- **Low peak memory**: Figure 3 shows ReBotNet (L) has among the lowest peak memory footprints at the large-FLOP regime, relevant for cloud-side real-time inference.
-
----
+- **Concrete latency wins at iso-FLOPs on the proposed datasets.** Table 1: ReBotNet (M) reaches 31.85 PSNR / 0.8865 SSIM at 15.02 ms vs. RVRT (M) at 31.60 / 0.8821 / 35.93 ms — a real ~2.4× latency reduction in this regime with quality at least matching RVRT.
+- **Clean ablation isolating the dual-branch design.** Table 5 separates the contributions: tubelet-only 31.24, image-only 28.01, fused 31.41, +bottleneck mixers 31.59, +recurrent 31.85. This shows the two branches carry complementary signal.
+- **The 30 FPS real-time bar is met at 384×384 on A100.** Coupled with low peak memory in Fig. 5, the engineering goal of the paper is credibly achieved within its setting.
 
 ## Weaknesses
 
 ### Fatal
-None — the core efficiency claim is genuine and supported.
+None — the contribution is real even if oversold.
 
 ### Major
-
-- **PSNR quality claim in the abstract is cherry-picked**: The abstract states "a PSNR improvement of 0.2 dB over previous SOTA." From Table 1: ReBotNet (L) achieves 32.13 dB vs. RVRT (L) 31.92 dB on PortraitVideo (+0.21 dB ✓), but 33.65 dB vs. RVRT (L) 33.79 dB on FullVideo (−0.14 dB ✗). The headline figure applies to only one of the two primary datasets, and the paper underperforms RVRT on the other. A more accurate claim would be "matches or in some cases improves," which is what the paper says later in the introduction — not the unqualified "+0.2 dB" in the abstract.
-
-- **On the one neutral benchmark, performance is at parity with RVRT**: Table 2 shows ReBotNet (L) = 34.28/0.9656 (DVD) and 34.90/0.9734 (GoPro) vs. RVRT = 34.30/0.9655 and 34.92/0.9738 — a difference of at most 0.02 dB. No latency figures appear in Table 2, so the efficiency-quality trade-off cannot be demonstrated on neutral ground. The paper's claims of quality superiority thus rest almost entirely on results from the authors' own curated datasets.
-
-- **FLOP-regime comparison protocol explicitly engineered to favor ReBotNet**: The paper states verbatim: "we ensured that the computational complexity of ReBotNet remained lower than that of the other models being compared." Scaling baselines by embedding-dimension sweeps — a procedure those architectures were not designed or optimized for — and then placing ReBotNet just below every baseline's FLOPs in every regime is not a neutral experimental choice. Compounding this, RVRT cannot be scaled to the Small regime "due to its inherent design," so ReBotNet's largest efficiency advantage is shown precisely where the strongest competing baseline is absent.
+- **The "2.5× faster than SOTA" headline depends on forcing baselines into a 2-frame regime they were not designed for.** Sec. 4.3 explicitly states the protocol ensured "the computational complexity of ReBotNet remained lower than that of the other models being compared" and that "we used a consistent number of frames, which was set to 2 for all models." VRT/RVRT are built around longer temporal windows; comparing against them at 2 frames is not an architectural defeat of those methods, it is a defeat of a deliberately constrained configuration. The paper does not also report the alternative (baselines at native temporal context, or scaled to iso-latency rather than iso-FLOPs), so the magnitude of the architectural advantage is unclear.
+- **The public-benchmark table does not support the "matching or outperforming" claim.** Table 2: ReBotNet 34.28 / 34.90 vs. RVRT 34.30 / 34.92 on DVD / GoPro. RVRT is numerically higher on both. The paper has no latency column for Table 2 (the in-text author note in line 225 concedes they "had difficulty finding codes for some of them"), so on public data the paper establishes neither a quality win nor an efficiency win — it can only point back to Table 1 for latency, which uses the constrained 2-frame protocol of the previous point.
+- **The user study (Sec. 4.4) cannot bear the perceptual-superiority claim against RVRT.** N=3 raters, and the reported margin over RVRT is +0.08 on a [-2,+2] scale with 95% CI ≈ 0.073 — essentially abutting zero. Margins against weaker baselines (FastDVDNet +1.83, VRT +1.61) are large and credible; the RVRT comparison, which is the one the paper relies on, is not. The Conclusion's "matching or outperforming … in terms of visual quality" overstates this.
+- **Synthetic-only evaluation despite a real-world (video-call / streaming) motivation.** PortraitVideo and FullVideo are clean YouTube clips with Gaussian blur, JPEG/compression, brightness/contrast perturbations, etc. (Sec. 4.1). The Introduction frames the work around real conferencing scenarios and criticizes prior datasets for being unrealistic, but no real degraded captures (real Zoom/streaming traces) are tested. The motivation–evaluation gap is exactly the one the paper accuses prior datasets of having.
 
 ### Minor
-
-- **User study is statistically underpowered for the RVRT comparison**: Three evaluators producing +0.08 ± 0.073 (95% CI) barely excludes zero. While the mean preference is positive, this magnitude and sample size cannot support the claim "our method is still preferred over [RVRT]" (Section 4.3). It is essentially statistical noise given the study's scale.
-
-- **Inference initialization gap not quantified**: The paper uses the ground-truth frame as the first recurrent input during training, while at inference it uses the degraded frame (per the commented-out text in Section 3.4). No experiment measures the performance gap this introduces, nor how quality evolves over the first few frames of inference — an important omission given that the paper motivates temporal consistency as a core benefit.
-
-- **Quantitative claims on 20-video test sets without confidence intervals**: Both PortraitVideo and FullVideo have 20 test videos each. Differences of 0.1–0.2 dB on a 20-sample test set can easily be noise; without variance estimates, the claims in Table 1 lack statistical grounding.
-
-- **Embedding dimension choice is not the best-performing configuration**: The Discussion table (5a) shows that embedding dimension 512 yields 31.90 dB while the chosen configuration (256) yields 31.85 dB. The efficiency rationale for choosing 256 over 512 (which differs by <0.3ms latency) is not explicitly justified.
+- **Unaddressed train/test mismatch in the recurrent component.** Sec. 3.4 uses the *ground-truth* clean frame as the recurrent prior for the first training frame, while inference must use the (degraded) frame itself. The recurrent term provides the single largest ablation jump (+0.26 dB, 31.59→31.85). The paper neither quantifies the resulting drift (e.g., per-frame PSNR over a long sequence) nor compares the two initialization strategies, so it is hard to know how much of the +0.26 dB survives at deployment.
+- **The iso-FLOPs scaling protocol is deferred to the supplement.** Sec. 4.3 says the scaling knob is "embedding dimension across different levels," but the exact protocol for VRT/RVRT/BasicVSR++/FastDVDNet is in the appendix. Since different scaling axes (depth vs. width vs. token count) can favor different architectures, the protocol is load-bearing and should be summarized in the main text.
+- **Justification of mixer over transformer bottleneck is also deferred.** The mixer-vs-attention comparison is central to the architectural pitch but the head-to-head is in the supplement.
+- **No variance / multi-seed numbers.** Differences in Table 1 between top methods are 0.1–0.3 dB; reporting at least the ranges across seeds would harden the comparison. This is a soft norm in the field, so listed only as minor.
+- **Tokenization design choice is unjustified.** Image tokens are max-pooled to match tubelet shape (Sec. 3.2); no comparison vs. avg-pool or a learned projection is provided.
+- **Limitations section only acknowledges parameter count.** Temporal flicker, long-sequence drift from the recurrent path, and degradation-mismatch robustness are not discussed.
 
 ### Trivial
-
-- Internal reviewer annotation markers (`\al{...}`, `\rg{...}`, `\jmj{...}`) are present throughout the text (e.g., line 17, 37, 46, 60, 101, 225, 227), indicating the paper was submitted without removing review comments. This does not affect scientific content but signals insufficient preparation for submission.
-
----
+- The submission text contains author-to-author markup left in the body (e.g., `\rg{Do we report these numbers somewhere?}\jmj{...}`, `\rg{Add citation}\jmj{added}` in Sec. 4.3 and Sec. 5). These are inline editorial comments visible in the parsed text, not parser artifacts. Worth a cleanup pass.
+- User-study Likert mapping in Sec. 4.4 lists `("worse", 1)` and `("better", 1)` — the sign appears intended to be `-1` and `+1`.
 
 ## Nice-to-Haves
-
-- Add per-method latency columns to Table 2 (DVD, GoPro); the paper explicitly acknowledges this in the reviewer comment thread (`\rg{Should we add latency?}`) and declines, but it would meaningfully strengthen the efficiency claim on neutral ground.
-- Report temporal consistency metrics (warping error, tOF) to back up the paper's stated motivation that the recurrent design improves temporal stability — PSNR/SSIM are frame-level and do not measure this.
-- Scale the user study to ≥20 evaluators to yield statistically interpretable results for the RVRT comparison.
-- Analyze *why* ReBotNet leads on PortraitVideo but trails on FullVideo at the Large regime — this could reveal whether the dual-branch design specifically benefits face/portrait content, which would be an actionable and interesting finding.
-
----
+- Report Table 2 with a latency column (even partial), and/or a "baselines at native temporal context" row in Table 1, so readers can see the speed claim under both protocols.
+- A small evaluation on real degraded captures (compressed conferencing or bandwidth-limited streams) would close the motivation–evaluation gap and is the most impactful addition for the conferencing pitch.
+- A per-frame PSNR curve over a long clip and a temporal-consistency (warping-error) number would directly characterize the recurrent component's value.
+- Move the mixer-vs-transformer-bottleneck comparison into the main text.
 
 ## Removed Points
-
-*These points are flagged to be removed, treat them with caution.*
-
-- **[Harsh Critic] FastDVDNet 2-frame latency confound**: The critic claims the comparison "uses a 2-frame variant" of FastDVDNet. The paper states explicitly: "we used a consistent number of frames, which was set to 2 for all models except for FastDVD, which was designed to process 5 frames." FastDVDNet is therefore tested with 5 frames, as designed. This criticism is factually incorrect and is removed.
-
-- **[Harsh Critic] FPS/Memory comparison "third protocol" inconsistency**: The paper explicitly and transparently discloses that Figure 3 uses "ReBotNet (L) configuration with original implementations for the previous methods" — an intentional choice to compare against each baseline at its default (often better) configuration. The paper is not hiding this asymmetry. Removed as it misreads the experimental design.
-
-- **[Harsh Critic] Unintentional tuning to the authors' own degradation pipeline**: While this concern has surface plausibility, it is speculative without evidence that the architecture or hyperparameters were iteratively selected based on private test-set performance. All baselines were retrained on the same data under the same loss, which is a reasonable standard procedure. The framing as a "structural" issue is overclaimed; the real concern (neutral benchmark shows parity) is already captured under Major weaknesses.
-
-- **[Strength Finder] "Competitive performance on established single-degradation benchmarks" as a strength**: This conflicts with the verified Major weakness — on DVD and GoPro, ReBotNet is within 0.02 dB of RVRT (essentially tied), and no latency data appears there. This is more neutral than a strength, and retaining it as a strength would contradict a verified major weakness. Moved to removed.
-
----
+These points are flagged to be removed; treat them with caution.
+- *Reviewer's framing of Table 5 ablation gains as "none is large".* The individual gains (0.17 / 0.18 / 0.26 dB) are small but consistent with normal ablation magnitudes for restoration; calling them collectively unconvincing overshoots. Kept only the train/test mismatch concern, which is the substantive part.
+- *Asking for ≥20 non-author double-blind raters as mandatory.* Useful nice-to-have, but treating it as a hard requirement is somewhat field-specific; we kept the substantive concern (the +0.08 / 0.073 result against RVRT is within noise), which is what actually matters.
+- *Strength Finder claim that the user study "confirms perceptual quality."* This directly conflicts with the verified weakness — the RVRT margin is within CI of zero, so the strength is dropped.
+- *Strength Finder claim of "competitive performance on established single-degradation benchmarks."* Numerically RVRT wins on both DVD and GoPro; "competitive" is defensible but not a clear strength to be credited.
+- *Generic "new datasets" credit.* Both datasets are synthetic degradations on YouTube clips; without a real-data complement this is incremental, so we did not promote it to a top strength.
 
 ## Novel Insights
-
-The paper's genuinely useful technical finding is that recurrent training — using the previous predicted frame as an additional input — contributes +0.26 dB PSNR at zero additional FLOPs or latency (Table 4). This is an unusually clean result: a training-time change with no inference cost that materially improves both quality and temporal consistency. It is distinct from typical recurrent architectures that require explicit optical flow or multi-frame sliding windows. If the evaluation methodology were cleaned up, this finding alone would be a compact and credible contribution.
-
----
+None beyond the paper's own contributions. The architectural idea (dual tubelet+frame tokenization with mixer bottlenecks and a recurrent prior frame) is sensibly engineered but composed of established ingredients; no broader insight emerges from the reviews.
 
 ## Suggestions
+- Add a Table 1 row pair: baselines at their *native* temporal context (e.g., RVRT with its default neighbor set), explicitly accepting the latency penalty, so the reader can see both the iso-FLOPs and the native comparisons side by side.
+- Add a latency column to Table 2 for the methods whose code you do have (VRT, RVRT at minimum), or state that Table 2 is purely quality.
+- Replace the 3-rater user study with either a substantially larger non-author study or drop the "perceptual superiority over RVRT" claim from the abstract/conclusion.
+- Quantify the recurrent train/test mismatch with an inference-time ablation (GT-init vs. duplicate-frame init) and a long-sequence per-frame PSNR plot.
+- Evaluate on at least one set of real degraded conferencing/stream captures to ground the real-world motivation.
+- Move the supplementary scaling protocol and the mixer-vs-transformer bottleneck comparison into the main text.
 
-1. Rewrite the abstract to accurately reflect the results across both datasets (e.g., "competitive or improved PSNR with 2.5× lower latency"), rather than citing a figure that holds for only one dataset.
-2. Add latency measurements for VRT and RVRT alongside Table 2; both are already benchmarked in the paper.
-3. Report variance over the 20-test-video splits, e.g., with standard deviation of per-video PSNR.
-4. Consider releasing PortraitVideo and FullVideo publicly (the paper's introduction already flags this as a goal) to allow independent reproduction.
-5. Replace the 3-evaluator user study with a properly powered study (≥20 participants) before making perceptual superiority claims over RVRT.
-
----
+## Axis Evaluation
+- **Originality:** Moderate. The dual-branch tokenization + mixer bottleneck + recurrent prior frame is a sensible recombination of known parts (ConvNext tokenizer, MLP-Mixer, recurrent restoration), not a fundamentally new mechanism.
+- **Importance of the question:** Real and underserved — efficient real-time video restoration is genuinely useful.
+- **Support for claims:** Mixed. The latency claim is real on the authors' datasets; the "matches/beats SOTA in quality" and "perceptually preferred over RVRT" claims are not well supported by Table 2 and the N=3 study.
+- **Soundness of experiments:** Adequate but with protocol choices that systematically favor the proposed method (forced 2-frame regime, iso-FLOPs only, synthetic data only).
+- **Clarity of writing:** Reasonable, though load-bearing details (iso-FLOPs scaling protocol, mixer vs. transformer bottleneck) are deferred to the supplement, and editorial markup remains in the body.
+- **Value to the community:** Useful as an engineering point in the speed/quality Pareto frontier for video enhancement; not a conceptual leap.
 
 ## Score and Decision
 
-**Axis evaluation:**
-- *Originality*: Moderate — MLP-Mixers and ConvNext are existing tools; the dual-branch tokenization and recurrent training application to real-time video enhancement is novel in combination but not deeply novel in components.
-- *Importance of research question*: High — real-time video enhancement for conferencing is timely and underserved.
-- *Claims well supported*: Partially — latency claim is solid; quality-superiority claims are overstated.
-- *Soundness of experiments*: Weak — self-curated evaluation, engineered FLOP comparison, near-parity on neutral benchmark.
-- *Clarity of writing*: Adequate, with the notable issue of internal reviewer comments left in the submitted draft.
-- *Value to community*: Moderate — the architecture and datasets could be useful if the evaluation were more rigorous.
+Anchors retrieved:
+- `Ysdo3fyD4Q.md` (VEnhancer, avg 5.00) — video enhancement, rejected; mixed support for claims like this paper.
+- `u8SYRtXDsZ.md` (AVESFormer, avg 5.25) — efficient real-time transformer paper, rejected for marginal contributions; close analog in pitch ("first real-time …"). ReBotNet pitches similarly and has comparable evidential gaps.
+- `YA1Ur2eGFl.md` (Live2Diff, avg 4.67) — efficient real-time video pitch, rejected.
+- `Un0rgm9f04.md` (VDT, avg 6.00, accept) — clearer methodological contribution; ReBotNet is below this bar.
+- `U4ekUAOLsM.md` (SCHEME, avg 5.00) — MLP/mixer architecture paper; similar incremental-architecture flavor.
+- `ImpeMDJfVL.md` (IV-mixed Sampler, avg 6.33, accept) — clear novelty, ReBotNet does not reach this level.
+- `F9JZiGradI.md` (MLP-KAN, avg 5.25) — mixer-flavor, mixed reception.
+- `7oLshfEIC2.md` (TimeMixer, avg 5.67, accept) — accepted MLP-mixer paper; ReBotNet is weaker in claim support.
+- `x3LxHdZX0f.md` (PUMA, avg 5.00) — efficiency paper with overclaim issues, similar profile.
+- `ulGwcj1egv.md` (FiRST, avg 3.00) — efficiency paper rejected for weak claims; ReBotNet has more substance than this.
+- `Km3Kprwyua.md` (Online Speculative Decoding, avg 6.00) — clearer empirical wins than ReBotNet.
+- `mqVgBbNCm9.md` (Skeleton-of-Thought, avg 5.67, accept) — clearer applicability story.
+- `BpKbKeY0La.md` (AddSR, avg 5.00) — efficiency-focused restoration, mixed reception; close to ReBotNet's profile.
+- `6rydymz1Qg.md` (Efficient Video Flow, avg 4.00) — efficient video work rejected for shaky claims; somewhat below ReBotNet.
+- `6325Jzc9eR.md` (VEditBench, avg 5.20) — benchmark-flavored video paper, borderline reject.
+- `e5288Iu4Zc.md` (Improved Video VAE, avg 5.33) — incremental video architecture, borderline reject.
+- `enQSCx47Ud.md` (SMCVAE, avg 3.00) — clearly weaker than ReBotNet in execution.
+- `RJG7fCVkhQ.md` (Modumer, avg 3.50) — image restoration with weak novelty; ReBotNet is stronger empirically but shares the "incremental architecture, oversold claims" pattern.
+- `9GNTtaIZh6.md` (Mask-Guided Video Generation, avg 3.00) — clearly weaker.
 
-**Calibration anchors:**
-
-| Path | Avg Score | Comparison to this paper |
-|---|---|---|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/vlpEXfbeHn.md` | 3.60 | RetCompletion — similar efficiency framing but weaker contribution and no ablation; ReBotNet is clearly stronger |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/enQSCx47Ud.md` | 3.00 | SMCVAE — video frame restoration, much weaker methodology and novelty than ReBotNet |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/RJG7fCVkhQ.md` | 3.50 | Modumer — image restoration with transformer redesign, similar novelty level but weaker evaluation |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Ysdo3fyD4Q.md` | 5.00 | VEnhancer — video enhancement, rejected; stronger architectural novelty but similar evaluation structure issues |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/YA1Ur2eGFl.md` | 4.67 | Live2Diff — live video streaming, rejected; comparable problem framing and similar evaluation weaknesses |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/AKMOrcobBE.md` | 4.33 | Image restoration with self-curated datasets — rejected; similar evaluation structure issues to ReBotNet |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/TRWxFUzK9K.md` | 6.50 | Video inverse problems using diffusion — accepted; stronger theoretical grounding and cleaner evaluation than ReBotNet |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/G1CN7R5qwE.md` | 6.00 | InstaRevive — image enhancement, accepted; stronger novelty and cleaner experimental design |
-
-**Positioning**: ReBotNet sits between the 4.33–5.00 range of rejected papers with self-curated evaluations and genuine but limited contributions (AKMOrcobBE, Ysdo3fyD4Q), and is clearly below the 6.0–6.5 papers that have cleaner evaluations on independent benchmarks. The genuine latency advantage and clean ablation push it above the 3.0–3.5 range. However, the abstract overclaim, near-parity on neutral benchmarks, and engineered FLOP comparison prevent acceptance.
-
-**Final score: 4.5 — Reject**
+ReBotNet sits in the same band as AVESFormer (5.25), VEnhancer (5.0), AddSR (5.0), Live2Diff (4.67): a real engineering contribution undermined by overclaimed headline numbers, narrow evaluation, and weak user study. Not as weak as FiRST/SMCVAE/Modumer (3.0–3.5); below clear accepts like VDT/IV-mixed/TimeMixer (6.0–6.3).
 
 MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>
